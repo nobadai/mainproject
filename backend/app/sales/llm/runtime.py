@@ -122,6 +122,35 @@ class StrategyPlanOutcome:
     profiles: list[Any]
     llm_provider: str | None = None
     llm_model: str | None = None
+    #: 🔴 **왜 템플릿으로 떨어졌나.** 성공했으면 `None`.
+    #:
+    #:   `FALLBACK` 하나로는 **우리가 틀린 날과 저쪽이 막은 날**이 같아 보인다.
+    #:   실제로 그 둘이 한 주에 다 일어났다 (2026-09-16).
+    #:
+    #:   ```text
+    #:   HTTP_400   우리 스키마가 틀렸다        고칠 것이 여기 있다. 영구적이다
+    #:   HTTP_429   저쪽이 쿼터로 막았다        고칠 것이 없다. 기다리면 풀린다
+    #:   ```
+    #:
+    #: ★ **라벨이다.** 응답 본문을 넣지 않는다 — 거기에는 키·요청 내용이 섞일 수
+    #:   있고, 이 값은 실행 이력에 그대로 남는다.
+    failure_reason: str | None = None
+
+
+def _failure_label(error: BaseException) -> str:
+    """실패를 **한 라벨로** 줄인다. 본문도 URL 도 남기지 않는다.
+
+    ★ 네 갈래면 충분하다 — 고칠 것이 우리에게 있나(계약·요청), 저쪽에 있나(상태
+      코드), 아니면 길이 막혔나(연결).
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP_{error.code}"
+    if isinstance(error, urllib.error.URLError):
+        return "PROVIDER_UNREACHABLE"
+    if isinstance(error, (ValueError, TypeError)):
+        # 계약 위반 — 모델이 어휘 밖을 냈거나 스키마를 못 폈다.
+        return "CONTRACT_VIOLATION"
+    return type(error).__name__
 
 
 def plan_strategy_profiles(*, signals: Any, template: list[Any]) -> StrategyPlanOutcome:
@@ -129,12 +158,17 @@ def plan_strategy_profiles(*, signals: Any, template: list[Any]) -> StrategyPlan
 
     ```text
     설정 꺼짐          DISABLED   → 템플릿
-    호출 실패·계약 위반 FALLBACK   → 템플릿
+    호출 실패·계약 위반 FALLBACK   → 템플릿 (+ 왜 떨어졌는지 라벨)
     성공              SUCCESS    → 모델 자세 (호출부가 사실로 한 번 더 깎는다)
     ```
 
     🔴 **템플릿으로 떨어져도 세 전략은 선다.** 외부 모델 하나 때문에 판매안이
       안 나오면, 그 모델이 없는 날 사업이 멈춘다.
+
+    🔴 **왜 떨어졌는지를 같이 남긴다** (2026-09-16). 전에는 사유 없이 `FALLBACK` 만
+      남겼고, 그래서 **우리 스키마 버그(`HTTP_400`)가 이 자리에 숨어 실환경에서
+      Planner 가 한 번도 안 돈 채로 지나갔다** — 화면에는 *"모델이 실패했다"* 만
+      보였고 그것은 쿼터가 막힌 날과 구별되지 않았다.
     """
     settings = load_settings()
     if not settings.enabled:
@@ -142,9 +176,14 @@ def plan_strategy_profiles(*, signals: Any, template: list[Any]) -> StrategyPlan
     try:
         output = _call_gemini_planner(_planner_context(signals), settings)
         profiles = _validated_profiles(output, template)
-    except Exception:  # noqa: BLE001 - 외부 호출 실패는 판매안 실패가 아니다.
+    except Exception as error:  # noqa: BLE001 - 외부 호출 실패는 판매안 실패가 아니다.
         return StrategyPlanOutcome(
-            "TEMPLATE_FALLBACK", "FALLBACK", template, settings.provider, settings.model
+            "TEMPLATE_FALLBACK",
+            "FALLBACK",
+            template,
+            settings.provider,
+            settings.model,
+            failure_reason=_failure_label(error),
         )
     return StrategyPlanOutcome("LLM", "SUCCESS", profiles, settings.provider, settings.model)
 

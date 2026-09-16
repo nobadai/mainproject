@@ -733,6 +733,18 @@ class SalesProposalReply(BaseModel):
     )
     #: 모델이 고른 자세를 사실이 내린 자리. 비어 있으면 깎인 것이 없다.
     strategy_clamped_reason_codes: list[str] = Field(default_factory=list)
+    #: 🔴 **전략 모델이 왜 실패했나.** 성공했거나 안 켠 날은 `None`.
+    #:
+    #:   ```text
+    #:   HTTP_400              우리 요청이 틀렸다 - 고칠 것이 코드에 있다
+    #:   HTTP_429              저쪽이 쿼터로 막았다 - 기다리면 풀린다
+    #:   PROVIDER_UNREACHABLE  길이 막혔다
+    #:   CONTRACT_VIOLATION    모델이 어휘 밖을 냈다
+    #:   ```
+    #:
+    #: ★ 이 칸이 없던 동안 우리 스키마 버그가 «모델이 실패했다» 뒤에 숨어
+    #:   실환경에서 Planner 가 한 번도 안 돈 채로 지나갔다 (2026-09-16).
+    strategy_llm_failure_reason: str | None = None
     #: 🔴 **자세는 갈렸는데 숫자가 수렴했는가** (2026-09-16).
     #:
     #:   ```text

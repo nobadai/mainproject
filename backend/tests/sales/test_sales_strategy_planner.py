@@ -679,3 +679,91 @@ def test_모델을_안_켜면_템플릿이_그대로_나온다():
 
     assert outcome.source == "TEMPLATE_FALLBACK"
     assert outcome.llm_status == "DISABLED"
+
+
+# ---------------------------------------------------------------------------
+# 실패 사유 — 우리 잘못과 저쪽 사정을 가른다
+# ---------------------------------------------------------------------------
+
+
+def _planner_raises(monkeypatch, error: BaseException):
+    def 터진다(context, settings):
+        raise error
+
+    monkeypatch.setattr("app.sales.llm.runtime._call_gemini_planner", 터진다)
+
+
+def test_우리_요청이_틀린_날과_쿼터가_막힌_날을_가른다(모델을_켠다, monkeypatch):
+    """★★ **이 칸이 없어서 스키마 버그가 숨었다** (2026-09-16 실측).
+
+    한 주에 둘이 다 일어났는데 화면에는 둘 다 `FALLBACK` 으로만 보였다.
+
+    ```text
+    HTTP_400   우리 스키마가 틀렸다   고칠 것이 코드에 있다. 영구적이다
+    HTTP_429   저쪽이 쿼터로 막았다   고칠 것이 없다. 기다리면 풀린다
+    ```
+    """
+    import urllib.error
+
+    def _http(code: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError("https://x", code, "boom", {}, None)
+
+    _planner_raises(monkeypatch, _http(400))
+    우리잘못, _ = plan_strategies(_request())
+
+    _planner_raises(monkeypatch, _http(429))
+    저쪽사정, _ = plan_strategies(_request())
+
+    assert 우리잘못.llm_failure_reason == "HTTP_400"
+    assert 저쪽사정.llm_failure_reason == "HTTP_429"
+    assert 우리잘못.llm_status == 저쪽사정.llm_status == "FALLBACK", (
+        "두 날 다 템플릿으로 서는 것은 같다 — 갈리는 것은 사유다"
+    )
+
+
+def test_길이_막힌_것과_어휘를_어긴_것도_가른다(모델을_켠다, monkeypatch):
+    import urllib.error
+
+    _planner_raises(monkeypatch, urllib.error.URLError("no route"))
+    못닿음, _ = plan_strategies(_request())
+
+    output = _llm_plan()
+    output.strategies = output.strategies[:2]
+    _stub(monkeypatch, output)
+    어휘위반, _ = plan_strategies(_request())
+
+    assert 못닿음.llm_failure_reason == "PROVIDER_UNREACHABLE"
+    assert 어휘위반.llm_failure_reason == "CONTRACT_VIOLATION"
+
+
+def test_성공하면_사유가_없다(모델을_켠다, monkeypatch):
+    _stub(monkeypatch, _llm_plan())
+
+    plan, _signals = plan_strategies(_freshness_request())
+
+    assert plan.llm_status == "SUCCESS"
+    assert plan.llm_failure_reason is None
+
+
+def test_설정이_꺼진_날은_실패가_아니다():
+    """안 켠 것은 실패한 것이 아니다 — 사유를 붙이면 없는 사고를 만든다."""
+    plan, _signals = plan_strategies(_request())
+
+    assert plan.llm_status == "DISABLED"
+    assert plan.llm_failure_reason is None
+
+
+def test_실패_사유가_회신까지_간다(모델을_켠다, monkeypatch):
+    """이력에 안 남으면 나중에 읽는 사람이 원인을 못 되짚는다."""
+    import urllib.error
+
+    from app.sales.proposal import run_proposal
+
+    _planner_raises(
+        monkeypatch, urllib.error.HTTPError("https://x", 400, "boom", {}, None)
+    )
+
+    reply = run_proposal(_request())
+
+    assert reply.strategy_llm_status == "FALLBACK"
+    assert reply.strategy_llm_failure_reason == "HTTP_400"
