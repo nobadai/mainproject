@@ -167,7 +167,12 @@ def test_분류_검증이_ml_조회를_받는다():
 # ── (a)(b) payload ──────────────────────────────────────────────────────
 
 
-def test_ml_은_질문과_품목을_받고_다른_부서는_빈_payload_다():
+def test_ml_은_질문과_품목을_물류는_질문만_받고_나머지는_빈_payload_다():
+    """★ 종전 `test_ml_은_질문과_품목을_받고_다른_부서는_빈_payload_다` 를 갈음한다.
+
+    그 검사는 `inventory` payload 가 `{}` 라고 못 박았다. 물류가 질문형 조회를
+    맡으면서 원문이 물류에도 실린다 — 대신 **품목은 안 실린다**를 여기서 잠근다.
+    """
     seen: list[AgentRequest] = []
     wiring.register("ml", _recording_port(seen, _ML_PAYLOAD))
     wiring.register("finance", _recording_port(seen, {"available_cash": 7}))
@@ -178,8 +183,44 @@ def test_ml_은_질문과_품목을_받고_다른_부서는_빈_payload_다():
     assert result.outcome == "STATUS_ANSWERED"
     by_agent = {r.agent: r for r in seen}
     assert dict(by_agent["ml"].payload) == {"question": 질문, "item": "배추"}
+    # 🔴 물류는 원문만 받는다. `item` 이 실리면 "배추랑 양파" 에서 양파가 떨어진다.
+    assert dict(by_agent["inventory"].payload) == {"question": 질문}
+    assert "item" not in by_agent["inventory"].payload
     assert dict(by_agent["finance"].payload) == {}
-    assert dict(by_agent["inventory"].payload) == {}
+
+
+def test_원문이_없어도_물류는_빈_payload_로_그대로_부른다():
+    """🔴 물류는 ML 과 다르다 — 원문이 없다고 건너뛰지 않는다.
+
+    바로가기 버튼처럼 발화문 없이 오는 호출이 이 길이다. 여기서 접으면 그 경로가
+    통째로 `unavailable` 이 된다.
+    """
+    seen: list[AgentRequest] = []
+    wiring.register("inventory", _recording_port(seen, {"warehouse_free_kg": 10}))
+    app = FastAPI()
+    app.include_router(router)
+
+    의도 = {"action": "STATUS_QUERY", "agents": ["inventory"], "confidence": "HIGH"}
+    body = _execute_body(intent=의도)
+    data = TestClient(app).post("/master/ask/execute", json=body).json()
+
+    assert [r.agent for r in seen] == ["inventory"]
+    assert dict(seen[0].payload) == {}
+    assert data["status"]["unavailable"] == []
+    assert "inventory" in data["status"]["answers"]
+
+
+def test_매입_재무_판매_payload_는_그대로_비어_있다():
+    """원문이 있어도 이 셋은 종전 그대로다 — 수신 계약을 건드리지 않았다."""
+    seen: list[AgentRequest] = []
+    for name in ("finance", "purchase", "sales"):
+        wiring.register(name, _recording_port(seen, {"ok": True}))
+
+    _ask(질문, _intent_json(agents=["finance", "purchase", "sales"], item="배추"))
+
+    assert sorted(r.agent for r in seen) == ["finance", "purchase", "sales"]
+    for request in seen:
+        assert dict(request.payload) == {}, request.agent
 
 
 def test_품목이_없으면_item_키를_빼고_보낸다():
