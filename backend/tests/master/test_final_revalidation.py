@@ -25,6 +25,7 @@ M-3 으로 칸은 섰다(`revalidation_request_id` · `revalidation_outcome`). �
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any
@@ -796,7 +797,7 @@ def test_매입에서_원_실행과_같은_조건이면_PASSED_다():
         "inventory": {"business_status": "conditional"},
     }
 
-    outcome, _reason = revalidation._verdict(오늘_판정, (), (), 원_조건)
+    outcome, _reason, _conditions = revalidation._verdict(오늘_판정, (), (), 원_조건)
 
     assert outcome == "PASSED"
 
@@ -812,7 +813,7 @@ def test_매입에서_재검증에만_붙은_조건은_여전히_CONDITIONAL_이
         "inventory": {"business_status": "conditional"},
     }
 
-    outcome, reason = revalidation._verdict(오늘_판정, (), (), 원_조건)
+    outcome, reason, _conditions = revalidation._verdict(오늘_판정, (), (), 원_조건)
 
     assert outcome == "CONDITIONAL"
     # ★ **새로 붙은 것이 재무 판정이라는 사실**을 잰다. 표지 원문(`verdict:finance=
@@ -857,7 +858,7 @@ def _물류_수량_조정(reason: str = "수량을 7470kg 로 조정 제안") ->
 
 def test_조정이_붙은_거부_사유에_JSON_이_안_들어간다():
     """🔴 **이것이 표적이다.** 중괄호가 하나라도 있으면 사람이 JSON 을 읽고 있는 것이다."""
-    _, reason = revalidation._verdict({}, (), (_물류_수량_조정(),), frozenset())
+    _, reason, _conditions = revalidation._verdict({}, (), (_물류_수량_조정(),), frozenset())
 
     assert "{" not in reason
     assert "ref_ids" not in reason
@@ -869,7 +870,7 @@ def test_조정_문장에_부서_한글과_조정_사유가_들어간다():
 
     🔴 **숫자는 자리를 끊어 찍는다** (`7,470`). 저장소가 금액·수량에 쓰는 방식과 같다.
     """
-    _, reason = revalidation._verdict({}, (), (_물류_수량_조정(),), frozenset())
+    _, reason, _conditions = revalidation._verdict({}, (), (_물류_수량_조정(),), frozenset())
 
     assert "물류: 수량을 7,470kg 로 조정 제안" in reason
 
@@ -887,7 +888,7 @@ def test_시점_조정의_날짜는_자릿수를_안_끊는다():
         "unit": "d",
     }
 
-    _, reason = revalidation._verdict({}, (), (시점,), frozenset())
+    _, reason, _conditions = revalidation._verdict({}, (), (시점,), frozenset())
 
     assert "물류: 도착일을 2026-09-14 로 조정 제안" in reason
     assert "2,026" not in reason
@@ -899,7 +900,7 @@ def test_판정만_붙은_거부_사유도_사람_말이다():
     🔴 **capability 어휘까지 부서로 옮긴다.** 판매 안은 `FINANCIAL_VALIDATION` 을,
       매입 안은 `finance` 를 키로 담는데 사람이 읽을 것은 둘 다 「재무」다.
     """
-    _, reason = revalidation._verdict(
+    _, reason, _conditions = revalidation._verdict(
         {"FINANCIAL_VALIDATION": {"business_status": "conditional"}}, (), (), frozenset()
     )
 
@@ -912,7 +913,7 @@ def test_reason_이_빈_조정은_축과_값과_단위로_짓는다():
     """🔴 **없는 값을 지어내지 않는다.** 칸이 말해 주는 것까지만 적는다."""
     빈_사유 = {**_물류_수량_조정(reason="")}
 
-    _, reason = revalidation._verdict({}, (), (빈_사유,), frozenset())
+    _, reason, _conditions = revalidation._verdict({}, (), (빈_사유,), frozenset())
 
     assert "물류: 수량을 7,470kg 로 조정 제안" in reason
 
@@ -921,7 +922,69 @@ def test_축도_값도_없으면_대안을_냈다까지만_말한다():
     """★ **모르는 것을 모른다고 말한다.** 여기서 지어낸 숫자는 사람이 그대로 믿는다."""
     빈_조정 = {"dept": "inventory", "reason": "", "ref_ids": [], "scenario_labels": [LABEL]}
 
-    _, reason = revalidation._verdict({}, (), (빈_조정,), frozenset())
+    _, reason, _conditions = revalidation._verdict({}, (), (빈_조정,), frozenset())
 
     assert "물류가 대안을 냈다" in reason
     assert "{" not in reason
+
+
+def test_사람_말_사유와_표지_원문이_같은_행에_함께_남는다(monkeypatch, 이력, 부서들):
+    """🔴 **이 PR 이 있는 이유가 이 한 줄이다** (2026-09-16).
+
+    사람 말로 접은 문장이 **표지 원문을 덮으면 안 된다.** 둘은 같은 자리를 다투지
+    않는다 — 묻는 사람이 다르다.
+
+    ```text
+    reason      사람이 읽는다     「재무: 한도 초과」
+    conditions  기계가 되만든다   adjust:{dept·axis·target_value·unit·…}
+    ```
+
+    ★ **전에는 `reason` 문장이 표지의 유일한 사본이었다.** `_verdict_of` 가 담는 칸에
+      `suggested_adjustments` 가 없고(봉투에서 `payload` 의 **형제**다),
+      `ExecutionStep` 에도 `master_decisions` 에도 그 칸이 없고, 이 모듈에는 로거도
+      없다. 그래서 문장만 고치면 조정 표지가 **영영** 사라진다.
+
+    🔴 **발표 뒤 개발이 없다. 지금 안 남기면 못 되만든다.** 빈 자리도 아니다 —
+      30회 실행에 조정 45건이 실측됐다 (충환님 2026-09-16).
+    """
+    잡힌: list[dict[str, Any]] = []
+    monkeypatch.setattr(persistence, "try_save_run", lambda **kw: 잡힌.append(kw))
+    부서들["finance"].business_status = "conditional"
+    부서들["finance"].adjustments = (조정(),)
+    _실행을_세운다(monkeypatch, _run_row())
+
+    saved = decision_service.record_decision(REQ, _승인())
+
+    assert saved.revalidation_outcome == "CONDITIONAL"
+    적재 = 잡힌[0]["response_payload"]
+
+    # ① 사람이 읽는 칸 — JSON 이 없다
+    assert "{" not in 적재["reason"]
+    assert "재무: 한도 초과" in 적재["reason"]
+
+    # ② 기계가 되만드는 칸 — 표지 원문이 통째로 있다
+    표지 = 적재["conditions"]
+    assert any(m.startswith("adjust:") for m in 표지), 표지
+    실린_조정 = [json.loads(m[len("adjust:") :]) for m in 표지 if m.startswith("adjust:")]
+    assert 조정() in 실린_조정, "표준형이 한 칸이라도 빠지면 되만들 수 없다"
+
+    # ③ 🔴 **`verdict:` 절반도 같이 싣는다.** `validations[cap].business_status` 로
+    #    되만들 수는 있지만 **되만들 수 있다는 것과 남아 있다는 것은 다르다** —
+    #    되만드는 규칙(`conditions_of`)이 바뀌는 날 두 값이 갈린다.
+    assert "verdict:FINANCIAL_VALIDATION=conditional" in 표지
+
+    # ④ 두 칸이 **같은 조건**을 가리킨다 — 세는 방식이 갈리면 한쪽만 고쳐진다
+    assert f"조건이 {len(표지)}건 붙었다" in 적재["reason"]
+
+
+def test_새_조건이_없으면_표지_칸은_비어서_남는다(monkeypatch, 이력, 부서들):
+    """★ **빈 목록과 칸이 없는 것은 다르다.** `[]` 는 *"새 조건이 없었다"* 이고,
+    옛 행(칸 자체가 없다)과 새 행을 가르는 자리이기도 하다."""
+    잡힌: list[dict[str, Any]] = []
+    monkeypatch.setattr(persistence, "try_save_run", lambda **kw: 잡힌.append(kw))
+    _실행을_세운다(monkeypatch, _run_row())
+
+    saved = decision_service.record_decision(REQ, _승인())
+
+    assert saved.revalidation_outcome == "PASSED"
+    assert 잡힌[0]["response_payload"]["conditions"] == []

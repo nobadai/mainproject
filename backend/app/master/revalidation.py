@@ -197,6 +197,42 @@ class Revalidation:
     #: 사람이 읽는 한 줄. 부서가 쓴 문장을 옮기거나 못 돈 이유를 적는다.
     reason: str = ""
 
+    #: 🔴 **원 실행에 없던 조건의 표지 원문** (`conditions_of` 가 만든 그대로).
+    #:
+    #: ★ **`reason` 과 다투는 칸이 아니다.** 둘은 묻는 사람이 다르다.
+    #:
+    #:   ```text
+    #:   reason      사람이 읽는다     「물류: 수량을 7,470kg 로 조정 제안」
+    #:   conditions  기계가 되만든다   adjust:{dept·axis·target_value·unit·…}
+    #:   ```
+    #:
+    #: 🔴 **이 칸이 없으면 표지 원문이 영영 사라진다** (2026-09-16). 전에는 표지를
+    #:   `reason` 문장에 이어 붙여 **그 문자열이 유일한 사본**이었는데, 그 문장을
+    #:   사람 말로 고치는 순간 원문이 어디에도 안 남는다:
+    #:
+    #:   ```text
+    #:   validations[cap]   `_verdict_of` 가 담는 칸에 suggested_adjustments 가 없다
+    #:                      (봉투에서 payload 의 **형제**라 payload 에도 안 들어온다)
+    #:   plan(ExecutionStep) 조정 제안 칸 자체가 없다
+    #:   master_decisions   revalidation_request_id · revalidation_outcome 뿐이다
+    #:   로그                이 모듈에도 `runner` 에도 로거가 없다
+    #:   ```
+    #:
+    #: 🔴 **발표 뒤 개발이 없다. 지금 안 남기면 영영 못 되만든다.**
+    #:
+    #: 🔴 **빈 자리가 아니다** — 30회 실행에 조정 45건이 실측됐다 (충환님 2026-09-16).
+    #:   살아 있는 데이터를 사람 말로 덮는 것이라 잃으면 티가 난다.
+    #:
+    #: ★ **`verdict:` 표지도 같이 싣는다.** `validations[cap].business_status` 로
+    #:   되만들 수는 있지만 **되만들 수 있다는 것과 남아 있다는 것은 다르다** —
+    #:   되만드는 규칙(`conditions_of`)이 바뀌는 날 두 값이 갈린다.
+    #:
+    #: ★ **오늘 세 파트가 각자 세운 같은 선이다.** 매입은 「확정 입고 예정」을 `0` 이
+    #:   아니라 `—` + `raw=None` 으로 냈고(`#740`), 재무는 운영비 축을 `None` =
+    #:   「기록 없음」으로 두었다. **사람 말과 정본을 나란히 둔다** — 사람 말이
+    #:   정본을 덮지 않는다.
+    conditions: tuple[str, ...] = ()
+
     #: capability → 이번 호출의 판정. **원 실행 회신이 아니다** (S-1 금지).
     validations: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
@@ -372,13 +408,16 @@ def revalidate_scenario(
             cycle=SALES_CYCLE,
         )
 
-    outcome, reason = _verdict(validations, tuple(unroutable), adjustments, original_conditions)
+    outcome, reason, conditions = _verdict(
+        validations, tuple(unroutable), adjustments, original_conditions
+    )
     return _recorded(
         context,
         Revalidation(
             outcome=outcome,
             request_id=request_id,
             reason=reason,
+            conditions=conditions,
             validations=validations,
             unroutable=tuple(unroutable),
         ),
@@ -497,13 +536,14 @@ def revalidate_procurement_scenario(
             cycle=PROCUREMENT_CYCLE,
         )
 
-    outcome, reason = _verdict(validations, (), adjustments, original_conditions)
+    outcome, reason, conditions = _verdict(validations, (), adjustments, original_conditions)
     return _recorded(
         context,
         Revalidation(
             outcome=outcome,
             request_id=request_id,
             reason=reason,
+            conditions=conditions,
             validations=validations,
         ),
         runner=runner,
@@ -531,6 +571,10 @@ def _recorded(
         cycle=cycle,
         outcome=result.outcome,
         reason=result.reason,
+        # 🔴 **사람 말(`reason`)과 표지 원문(`conditions`)을 같은 행에 나란히 남긴다.**
+        #   `reason` 만 남기면 조정 표지가 이 표에서 사라진다 — 근거는
+        #   `Revalidation.conditions` 에 적어 두었다.
+        conditions=result.conditions,
         validations=result.validations,
         unroutable=result.unroutable,
         plan=runner.plan,
@@ -1010,7 +1054,7 @@ def _verdict(
     unroutable: tuple[str, ...],
     adjustments: Sequence[Mapping[str, Any]],
     original_conditions: frozenset[str],
-) -> tuple[RevalidationOutcome, str]:
+) -> tuple[RevalidationOutcome, str, tuple[str, ...]]:
     """네 값 중 무엇인가 (설계 §3).
 
     ```text
@@ -1018,6 +1062,11 @@ def _verdict(
     CONDITIONAL  통과했으나 조건이 원 실행보다 늘었다
     PASSED       통과했고 조건이 같거나 줄었다
     ```
+
+    🔴 **셋째 칸이 표지 원문이다** (2026-09-16 · `Revalidation.conditions`).
+      **`reason` 문장이 접은 바로 그 표지**를 정렬 그대로 돌려준다 — 문장과 원문이
+      같은 것을 가리켜야 한 행 안에서 서로를 풀 수 있다. 여기서 한 번 만든 것을
+      두 곳이 나눠 쓰는 것이라, 부르는 쪽이 `conditions_of` 를 다시 돌리지 않는다.
 
     ★ **통과 판정은 허용목록으로 한다** (`PASSING_VERDICTS`). *"reject 가 아니면
       통과"* 로 정하면 봉투 어휘가 늘 때마다 새 값이 통과 쪽으로 샌다 (#173).
@@ -1034,17 +1083,23 @@ def _verdict(
         if str(verdict.get("business_status") or "") not in PASSING_VERDICTS
     ]
     if blocked:
-        return "FAILED", f"재검증에서 막혔다: {', '.join(blocked)}"
+        # ★ **여기는 조건을 비교하지도 않았다** — 표지가 없는 것이 사실 그대로다.
+        return "FAILED", f"재검증에서 막혔다: {', '.join(blocked)}", ()
 
     now = conditions_of(validations, adjustments)
     added = sorted(now - original_conditions)
     if added:
         # 🔴 **비교는 표지로, 문장은 사람 말로** (2026-09-16). `added` 는 그대로 표지
-        #   집합이고 세는 방식도 그대로다 — 펴는 것은 이 한 줄뿐이다.
-        return "CONDITIONAL", (
-            f"통과했으나 원 실행에 없던 조건이 {len(added)}건 붙었다: "
-            f"{'; '.join(_spoken(표지) for 표지 in added)}"
+        #   집합이고 세는 방식도 그대로다 — 펴는 것은 이 한 줄뿐이고, **편 것과 원문을
+        #   나란히 돌려준다** (`Revalidation.conditions`).
+        return (
+            "CONDITIONAL",
+            (
+                f"통과했으나 원 실행에 없던 조건이 {len(added)}건 붙었다: "
+                f"{'; '.join(_spoken(표지) for 표지 in added)}"
+            ),
+            tuple(added),
         )
 
     꼬리 = f" (못 물어본 요구: {', '.join(unroutable)})" if unroutable else ""
-    return "PASSED", f"재검증 통과 — 조건이 원 실행보다 나빠지지 않았다{꼬리}"
+    return "PASSED", f"재검증 통과 — 조건이 원 실행보다 나빠지지 않았다{꼬리}", ()
