@@ -69,7 +69,7 @@ from app.finance.llm.planner import (
     _configured_finance_llms,
 )
 from app.finance.state import FinanceAgentState
-from app.finance.user_messages import explanation_for
+from app.finance.user_messages import explanation_for, explanation_keys
 from app.master.envelope import AgentReply, AgentRequest, ExecutionMetadata
 
 # ---------------------------------------------------------------------------
@@ -1029,6 +1029,36 @@ class FinanceAgentController:
         #   실제로 실렸을 때만 그 사실을 말하는 문장이 후보가 된다 — LLM 경로든 대체
         #   경로든 같은 사실을 본다.
         has_verified_adjustment = bool(adjustments)
+
+        #  🔴 **고를 것이 하나뿐이면 묻지 않는다.** Finalizer 는 문장을 쓰지 않는다 —
+        #     `explanation_keys` 가 허용한 키 중 하나를 고를 뿐이고, 사용자가 읽는 문장은
+        #     `FINANCE_EXPLANATIONS` 가 가진다. 후보가 하나면 모델이 무엇을 답하든 나가는
+        #     문장이 같으므로, provider 왕복은 답을 바꾸지 않고 시간만 쓴다.
+        #
+        #  ★ **Finalizer 를 없애는 것이 아니다.** 후보가 둘 이상이 되는 날에는 아래 기존
+        #    경로가 그대로 살아난다 — 그때는 실제로 고를 것이 있다.
+        allowed = explanation_keys(
+            request.mode,
+            business_status,
+            has_verified_adjustment=has_verified_adjustment,
+        )
+        #  ★ **후보가 0개인 경우를 여기서 새로 해석하지 않는다.** `explanation_keys` 의
+        #    계약은 모든 입력을 최소 한 개의 키로 닫는 것이고(`explanation_for` 도
+        #    `[0]` 을 그대로 읽는다), 그 불변식은 조합 전수 검사가 잠근다. 여기서
+        #    «0개면 이렇게» 를 정하면 최적화와 무관한 **새 계약**이 하나 생긴다.
+        if len(allowed) == 1:
+            #  ★ 정본은 `explanation_for` 하나다. 여기서 문장 표를 다시 뒤지지 않는다 —
+            #    두 벌이 되면 모델 경로와 이 경로가 언젠가 다른 말을 한다.
+            return _Explanation(
+                explanation_for(
+                    request.mode,
+                    business_status,
+                    has_verified_adjustment=has_verified_adjustment,
+                ),
+                self._llm_status(planner_failed=outcome.planner_failed, before=before),
+                outcome.planner_failed,
+            )
+
         try:
             reasoning = self.finalizer.finalize(
                 mode=request.mode,

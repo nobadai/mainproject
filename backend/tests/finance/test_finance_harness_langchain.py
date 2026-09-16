@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
@@ -53,7 +54,38 @@ from app.finance.llm.planner import (
 )
 from app.finance.schemas import FinancePolicy
 from app.finance.state import FinanceAgentState
+from app.finance.user_messages import explanation_keys
 from app.master.envelope import AgentRequest, ExecutionContext
+
+
+@contextmanager
+def two_explanation_candidates():
+    """설명 후보가 **둘인 상황**을 만든다.
+
+    ★ 지금 계약에서는 모든 (mode · business_status · 조정여부) 조합의 설명 후보가
+      하나뿐이라 Finalizer 가 불리지 않는다. 그래서 Finalizer 실패·숫자 주입·호출 시점
+      처럼 **모델이 실제로 불릴 때만 의미가 있는** 계약은 이 자리를 빌려 시험한다.
+      계약 자체는 예전 그대로다 — 바뀐 것은 «언제 부르는가» 뿐이다.
+    """
+    real_keys = explanation_keys
+
+    def two_keys(mode, business_status, *, has_verified_adjustment=False):
+        first = real_keys(
+            mode, business_status, has_verified_adjustment=has_verified_adjustment
+        )
+        #  실제로 존재하는 키를 준다 — 없는 키를 주면 문장 조회가 먼저 터진다.
+        second = (
+            "SCENARIO_NOT_CONCLUDED"
+            if first[0] != "SCENARIO_NOT_CONCLUDED"
+            else "PRE_BOUNDARY"
+        )
+        return [first[0], second]
+
+    with patch(
+        "app.finance.application.orchestration.explanation_keys", side_effect=two_keys
+    ):
+        yield
+
 
 PRE_ORDER = (
     "assess_finance_position",
@@ -613,7 +645,8 @@ def test_langchain_planner_drives_the_finance_tools_end_to_end(monkeypatch):
 
     assert reply.runtime_status == "READY"
     assert metadata.used_tools == PRE_ORDER
-    assert metadata.llm_model == "scripted-finalizer"
+    #  Finalizer 는 안 불렸다(설명 후보 1개). 이번 실행에서 답한 모델은 Planner 다.
+    assert metadata.llm_model == "gemini-test"
     assert planner.model == "gemini-test"
     #  5 → 3. 줄어든 둘은 **고를 것이 하나뿐이던 단계와 종료 단계**다.
     #  실행 순서(`PRE_ORDER`)는 그대로다 — Harness 가 같은 Tool 을 집기 때문이다.
@@ -1008,7 +1041,11 @@ def test_finalizer_explains_a_result_that_already_exists():
             )
 
     planner = ScriptedPlanner(pre_purchase_plan())
-    reply, _metadata = FinanceAgentController(Port(), planner, _Recording()).run(request())
+    #  Finalizer 가 **불릴 때** 무엇을 이미 들고 있는가를 보는 검사다.
+    with two_explanation_candidates():
+        reply, _metadata = FinanceAgentController(Port(), planner, _Recording()).run(
+            request()
+        )
 
     assert reply.runtime_status == "READY"
     assert {"finance_cap_amount_krw", "base_projected_cash_min", "available_cash"} <= set(seen)

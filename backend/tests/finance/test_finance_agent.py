@@ -33,6 +33,7 @@ from app.master.envelope import (
     ExecutionMetadata,
     validate_reply,
 )
+from tests.finance.test_finance_harness_langchain import two_explanation_candidates
 
 
 def _harness_trace(metadata) -> dict:
@@ -591,9 +592,12 @@ def test_finalization_failure_uses_deterministic_fallback_after_evidence(save_ru
             ToolAction(finalize=True),
         ]
     )
-    reply, metadata = FinanceAgentController(
-        Port(), planner, finalizer=FailingFinalizer()
-    ).run(request())
+    #  설명 후보가 하나뿐이면 Finalizer 를 부르지 않는다. **불렸을 때의 계약**을
+    #  시험하는 검사이므로 고를 것이 있는 상황을 만들어 준다.
+    with two_explanation_candidates():
+        reply, metadata = FinanceAgentController(
+            Port(), planner, finalizer=FailingFinalizer()
+        ).run(request())
     assert reply.runtime_status == "READY"
     assert reply.payload["finance_cap_amount_krw"] == 800
     assert metadata.llm_status == "FALLBACK"

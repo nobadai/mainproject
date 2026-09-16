@@ -26,6 +26,7 @@ from app.finance.llm.planner import (
 )
 from app.finance.schemas import FinancePolicy
 from app.master.envelope import AgentRequest, ExecutionContext
+from tests.finance.test_finance_harness_langchain import two_explanation_candidates
 
 
 class Port:
@@ -334,7 +335,11 @@ def test_finalizer_failure_falls_back_deterministically():
     """Finalizer 가 죽어도 답은 나간다 — 검증된 Evidence 가 이미 있기 때문이다."""
     planner = ScriptedPlanner(pre_purchase_plan())
     finalizer = ScriptedFinalizer(fail=True)
-    reply, metadata = FinanceAgentController(Port(), planner, finalizer).run(request())
+    #  후보가 하나뿐이면 애초에 안 부른다. 여기서 보는 것은 **불렀는데 죽었을 때**다.
+    with two_explanation_candidates():
+        reply, metadata = FinanceAgentController(Port(), planner, finalizer).run(
+            request()
+        )
 
     assert reply.runtime_status == "READY"
     # ★ 문장을 그대로 적지 않는다 — 말투는 바뀔 수 있고, 지켜야 하는 것은
@@ -668,7 +673,9 @@ def test_planner_unavailability_preserves_each_scenario_business_result(
     assert metadata.rules_applied == expected_metadata.rules_applied
     #  🔴 죽은 Planner 가 **한 번도 불리지 않았다.** 대체 경로를 탄 것이 아니다.
     assert unavailable.attempts == 0
-    assert metadata.llm_status == "SUCCESS"
+    #  설명 후보도 하나뿐이라 Finalizer 까지 안 불렀다 — 이번 실행은 모델에 닿지 않았다.
+    assert metadata.llm_status == "SKIPPED_TEMPLATE"
+    assert metadata.llm_attempts == 0
     assert metadata.llm_fallback_used is False
 
 
@@ -812,9 +819,11 @@ def test_reasoning_may_not_introduce_numbers():
             return "Finance cap is 12345 KRW."
 
     planner = ScriptedPlanner(pre_purchase_plan())
-    reply, metadata = FinanceAgentController(
-        Port(), planner, _NumericFinalizer()
-    ).run(request())
+    #  숫자 주입 방어는 **모델이 문장을 들고 올 때**만 의미가 있다.
+    with two_explanation_candidates():
+        reply, metadata = FinanceAgentController(
+            Port(), planner, _NumericFinalizer()
+        ).run(request())
 
     assert "12345" not in reply.reasoning
     assert metadata.llm_status == "FALLBACK"
