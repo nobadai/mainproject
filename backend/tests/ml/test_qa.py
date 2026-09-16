@@ -1084,8 +1084,11 @@ def test_가격과_배치를_같이_물으면_표와_배치가_같이_나온다(
 ):
     도구를_갈아_끼운다(rows=[_row(5)], base=BASE)
     배치도구를_갈아_끼운다(run=_batch(), reports={})
-    _routes(monkeypatch, ["forecast", "batch"],
-            items=["배추"], kinds=["AUC"], dates=[BASE + timedelta(days=5)])
+    #   ★ 날짜는 **짝 물음 안에만** 들어온다 (2026-09-16 · 실제 해석기 응답으로 확인).
+    #     맨 위 `dates` 는 비어 있어서 배치 쪽은 «날짜를 안 말한 것» 이 된다.
+    _routes(monkeypatch, ["forecast", "batch"], items=["배추"], kinds=["AUC"],
+            dates=[], asks=[{"item": "배추", "kind": "AUC",
+                             "dates": [BASE + timedelta(days=5)]}])
     out = qa_graph.answer(QaRequest(question="5일 뒤 배추 경락가랑 배치 상태"))
     assert out.meta.routes == ["forecast", "batch"]
     assert "| 날짜 | 예측 |" in out.markdown               # 가격 표
@@ -1769,14 +1772,123 @@ def test_어제_배치를_물으면_어제_기록을_읽는다(도구를_갈아_
     assert "2026-09-16" not in out.markdown
 
 
-def test_앞날을_말한_배치는_오늘을_본다(도구를_갈아_끼운다, monkeypatch):
-    """🔴 «5일 뒤 배추 경락가랑 배치 상태» 의 배치는 **오늘**이다 — 앞날엔 기록이 없다."""
+def test_가격_날짜만_있는_배치는_오늘을_본다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 «5일 뒤 배추 경락가랑 배치 상태» 의 배치는 **오늘**이다 — 날짜를 안 말했다.
+
+    ★ **해석기가 둘을 갈라 준다** (2026-09-16 · 실제 응답 2건으로 확인).
+      같은 모델·같은 지시문에 두 질문을 넣어 받은 것이 이랬다 —
+
+      ```text
+      「내일 배치 알려줘」            dates=["2026-09-17"] · asks=[]
+      「5일 뒤 배추 경락가랑 배치 상태」 dates=[]             ·
+                                     asks=[{배추, AUC, ["2026-09-21"]}]
+      ```
+
+      **가격에 붙은 날은 `asks` 안에만 들어온다.** 배치·성능이 읽는 `asked` 는
+      맨 위 `dates` 뿐이라(`supervise`), 짝 물음의 날짜는 여기까지 오지 않는다.
+      그래서 이 질문의 배치 쪽은 «날짜를 안 말한 것» 이고 오늘을 본다.
+    """
     도구를_갈아_끼운다(rows=[_row(5)], base=BASE)
     seen = _날짜를_적어_둔다(monkeypatch)
-    _routes(monkeypatch, ["forecast", "batch"],
-            items=["배추"], kinds=["AUC"], dates=[BASE + timedelta(days=5)])
-    qa_graph.answer(QaRequest(question="5일 뒤 배추 경락가랑 배치 상태", as_of=AS_OF))
+    _routes(monkeypatch, ["forecast", "batch"], items=["배추"], kinds=["AUC"],
+            dates=[], asks=[{"item": "배추", "kind": "AUC",
+                             "dates": [BASE + timedelta(days=5)]}])
+    out = qa_graph.answer(
+        QaRequest(question="5일 뒤 배추 경락가랑 배치 상태", as_of=AS_OF)
+    )
     assert seen["batch"] == [AS_OF]
+    assert qa_graph.AHEAD_BATCH not in out.markdown
+
+
+# ── 앞날을 콕 집어 물으면 기준일 뒤는 안 보여준다 (2026-09-16) ────────────────
+#
+# 🔴 화면에서 «내일 배치 알려줘» 에 **오늘 배치와 오늘 점검 보고서**가 나왔다.
+#    `_report_days` 가 지난 날만 남기고, 남는 게 없으면 «오늘 하루» 로 돌아갔다.
+#    그 규칙은 **날짜를 안 말한 질문**을 위한 것인데 콕 집은 앞날까지 오늘로 바꿨다.
+#
+# ★ «아직 안 돌았다» 고 적지 않는다 (사용자 결정). 화면 기준일은 진짜 오늘보다
+#   과거일 수 있다 — 기준일을 09-14 로 두면 09-15 기록은 **DB 에 있는데** 앞날이다.
+#   그러면 «아직 안 돌았다» 는 거짓이 된다. 맞는 말은 «기준일 뒤는 안 보여준다» 다.
+
+
+def test_앞날_배치는_기준일_뒤는_못_본다고_한_줄로_말한다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 오늘 것을 **대신 보여주지 않는다.** 조용히 다른 날을 내미는 것이다."""
+    도구를_갈아_끼운다(rows=[])
+    내일 = AS_OF + timedelta(days=1)
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["batch"], dates=[내일])
+    out = qa_graph.answer(QaRequest(question="내일 배치 알려줘", as_of=AS_OF))
+
+    assert out.markdown.strip() == qa_graph.AHEAD_BATCH
+    assert seen["batch"] == [] and seen["report"] == []       # 읽으러 가지도 않는다
+    assert "배치 — " not in out.markdown                      # 오늘 표가 없다
+    assert "점검 보고서" not in out.markdown
+    #   ★ 상태는 «기록 없음» 과 같은 길이다 — 어댑터가 READY·skipped 로 낸다
+    assert out.meta.status == "NO_DATA"
+    assert out.reads == {"batch_run": "empty", "agent_report": "empty"}
+
+
+def test_앞날_배치도_어댑터는_고장이_아니라고_낸다(도구를_갈아_끼운다, monkeypatch):
+    """🔴 `RUNTIME_NOT_READY` 로 올리면 마스터가 이 한 줄을 **버린다.**"""
+    from app.master import envelope as E
+    from app.ml import adapter
+
+    도구를_갈아_끼운다(rows=[])
+    _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["batch"], dates=[AS_OF + timedelta(days=1)])
+    답 = qa_graph.answer(QaRequest(question="내일 배치 알려줘", as_of=AS_OF))
+    monkeypatch.setattr(adapter, "qa_answer", lambda _request: 답)
+
+    modes = dict(E._AGENT_MODES)
+    modes["ml"] = frozenset({"STATUS_QUERY"})
+    monkeypatch.setattr(E, "_AGENT_MODES", modes)
+    request = E.AgentRequest(
+        context=E.ExecutionContext(request_id="req-1", as_of=AS_OF,
+                                   trigger="USER_REQUEST", policy_version="v1"),
+        agent="ml",                                          # type: ignore[arg-type]
+        mode="STATUS_QUERY",                                 # type: ignore[arg-type]
+        payload={"question": "내일 배치 알려줘"},
+    )
+    reply, meta = adapter.ml_port(request)
+    assert reply.runtime_status == "READY"
+    assert reply.business_status == "skipped"
+    assert reply.missing_data == ()
+    assert reply.payload["answer_markdown"] == 답.markdown
+    assert E.validate_reply(request, reply, meta) == ()
+
+
+def test_어제랑_내일을_같이_물으면_어제는_답하고_앞날은_한_줄로_밝힌다(
+    도구를_갈아_끼운다, monkeypatch
+):
+    """★ 날마다 따로 본다. 앞날 안내는 **맨 끝에 한 번만**."""
+    도구를_갈아_끼운다(rows=[])
+    어제, 내일 = AS_OF - timedelta(days=1), AS_OF + timedelta(days=1)
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["batch"], dates=[어제, 내일])
+    out = qa_graph.answer(QaRequest(question="어제랑 내일 배치 알려줘", as_of=AS_OF))
+
+    assert seen["batch"] == [어제]
+    assert "배치 — 2026-09-15" in out.markdown
+    assert "배치 — 2026-09-17" not in out.markdown
+    assert out.markdown.count(qa_graph.AHEAD_BATCH) == 1
+    assert out.markdown.rstrip().endswith(qa_graph.AHEAD_BATCH)
+
+
+def test_앞날_재학습도_같은_규칙이고_봉인_성능표는_그대로다(
+    도구를_갈아_끼운다, 배치도구를_갈아_끼운다, monkeypatch
+):
+    """★ 봉인 성능표·현재 모델은 **날짜와 무관하다** — 그건 늘 지금 것이다."""
+    도구를_갈아_끼운다(rows=[])
+    배치도구를_갈아_끼운다(reports={})
+    seen = _날짜를_적어_둔다(monkeypatch)
+    _routes(monkeypatch, ["perf"], dates=[AS_OF + timedelta(days=1)])
+    out = qa_graph.answer(QaRequest(question="내일 재학습 어때?", as_of=AS_OF))
+
+    assert seen["retrain"] == []
+    assert qa_graph.AHEAD_PERF in out.markdown
+    assert "재학습 판정 기록이 없습니다" not in out.markdown
+    assert qa_tools.SEALED_SOURCE in out.markdown            # 봉인 성능표는 그대로
+    assert "19.7" in out.markdown
 
 
 def test_날짜가_여럿이면_날마다_블록을_만든다(도구를_갈아_끼운다, monkeypatch):
