@@ -26,6 +26,7 @@
 import { useState } from "react";
 
 import { graphAct, MlError, type TargetKind } from "@/lib/mlConsole";
+import { announceRetrainChanged } from "@/lib/retrainSignal";
 
 /** 코드 이름을 사람 말로. **여기 없는 값은 버튼을 안 그립니다.** */
 const KIND_LABEL: Record<string, string> = {
@@ -102,6 +103,10 @@ export function ActionButton({ href, label }: { href: string; label: string }) {
       if (!ok) return;
       await graphAct(kind, "apply");
       setResult({ ok: true, text: `교체됨 · ${now()}` });
+      //  ★ **여기가 채팅 바깥을 고쳐 주는 유일한 자리입니다.** 채팅은 화면
+      //    (`console/forecast/page.tsx`) 바깥에 있어서, 알려 주지 않으면 탭의
+      //    빨간 배지가 새로고침 전까지 그대로 남습니다 — 실제로 그랬습니다.
+      announceRetrainChanged(kind);
     } catch (error) {
       //  ★ 오류는 **원문 그대로** 남깁니다. 「실패했습니다」 로 뭉개면 무엇이
       //    막혔는지(콘솔이 안 떴나 · 승인 단계가 지났나)를 아무도 못 봅니다.

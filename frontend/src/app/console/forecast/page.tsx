@@ -43,6 +43,7 @@ import { useTab } from "@/components/console/useTab";
 //     `useTab` 의 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { retrainPending } from "@/lib/mlConsole";
+import { useRetrainChanged } from "@/lib/retrainSignal";
 import { forecast, type ForecastTab } from "@/lib/screen";
 
 function ForecastPane() {
@@ -281,6 +282,19 @@ export default function ForecastPage() {
       alive = false;
     };
   }, []);
+
+  //  🔴 **뜰 때 한 번만 세면 배지가 굳습니다** (2026-09-16 사용자 실측).
+  //     모델을 바꾸는 길이 둘인데(재학습 탭 · 아래 채팅 서랍) 둘 다 이 수를
+  //     못 건드려서, 바꾸고 나도 빨간 배지가 새로고침 전까지 남았습니다.
+  //     이제 어느 쪽에서 바꾸든 신호가 와서 **다시 셉니다.**
+  //
+  //  ★ 여기서도 «몇 건 남았나» 를 신호에서 받지 않고 **다시 물어봅니다.**
+  //     세는 곳은 ML 콘솔 하나여야 합니다 (`lib/retrainSignal.ts` 머리말).
+  useRetrainChanged(() => {
+    retrainPending()
+      .then((r) => setWaiting(r.pending.length))
+      .catch(() => undefined);
+  });
 
   //  ★ 탭은 **늘 있습니다** (2026-09-09 다시 바꿈). 없다가 생기니 사람이
   //    「어디로 들어가야 하나」 를 몰랐습니다. 갈리는 것은 탭 안입니다 —
