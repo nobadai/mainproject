@@ -177,6 +177,11 @@ from app.master.forecast_gate import DayForecastReadiness, day_forecast_readines
 #   결이다 — 손으로 적으면 어휘가 느는 날 요약만 옛말을 하고 새 값의 0 이 안 찍힌다.
 from app.master.inspection import AFTER_INBOUND, AFTER_OUTBOUND, INSPECTION_STATUSES
 
+# 🔴 **막는 갈래 이름의 주인에서 들여온다. 여기서 안 짓는다** (2026-09-16).
+#   `INSPECTION_STATUSES` · `LLM_STATUSES` 와 같은 결이다 — 세는 쪽이 자기 이름을
+#   지으면 갈래가 둘이 되고, 그때 나는 것은 오류가 아니라 **조용한 0** 이다.
+from app.master.ledger import LEDGER_BLOCK_KINDS, PERMANENT_BLOCK_KINDS
+
 # 🔴 **마감 칸 이름의 주인에서 들여온다. 여기서 칸 이름을 안 적는다** (2026-09-12).
 #   손으로 적으면 표가 바뀌는 날 요약만 옛 이름을 말하고, 그때 나는 것은 오류가
 #   아니라 **조용한 0** 이다 — 위 `LLM_STATUSES` 와 같은 결이다.
@@ -207,6 +212,11 @@ from app.master.scheduler import (
     plan_next_action,
     run_scheduled_day,
 )
+
+# 🔴 **승인 하나를 가르는 키를 여기서 짓지 않는다** (2026-09-16). 그 파일이
+#   *"여기까지가 승인 하나를 가리킨다"* 고 적어 둔 앞머리가 그대로 동일성 키다 —
+#   원장 행 ID 를 짓는 규칙과 **같은 함수**라 둘이 갈릴 수가 없다.
+from app.master.transition import purchase_id_prefix_for
 from app.master.walk_provenance import WalkedNowStamp, record_walked_now
 
 __all__ = [
@@ -309,6 +319,53 @@ class CashIdentity:
     def holds(self) -> bool:
         """성립하는가. `|차이| < 1원`."""
         return abs(self.gap_krw) < _ONE_WON
+
+
+@dataclass(frozen=True)
+class LedgerBlocks:
+    """승인은 났는데 **매입 원장에 한 행도 안 남은** 것들 (2026-09-16).
+
+    🔴 **크기와 소음을 한 수로 접지 않는다.**
+
+    ```text
+    unique          고유 미기록 승인 건수 — 같은 승인은 한 번만 센다   ← 크기
+    retries         그 건들이 다음 날 재시도에서 다시 막힌 횟수        ← 소음
+    permanent       그중 영영 안 될 것. **고유 건수로 센다**           ← 크기
+    unique_by_kind  갈래별 고유 건수. 0 인 갈래도 든다
+    ```
+
+    ★★ **접으면 한 건이 며칠치로 부푼다.** `retry_pending_transitions` 가 같은 약정을
+      날마다 다시 세우고 같은 사유로 또 막히기 때문이다 — 실측에서 `NOT_APPLIED 12`
+      였는데 복수 등급 승인안은 **실제로 1건**이었다.
+
+    ⚠️ **`unique_by_kind` 의 합이 `unique` 보다 클 수 있다.** 한 승인이 날을 달리해
+      다른 갈래로 막히면 양쪽에 다 든다 — 그 승인을 **한쪽에서 빼면** 그 갈래가
+      실제보다 적어 보인다. `unique` 는 그때도 승인 수를 말한다.
+    """
+
+    unique_by_kind: Mapping[str, int]
+    unique: int
+    retries: int
+    permanent: int
+
+
+def _approval_key(request_id: str | None, decision_seq: int | None, run_id: str = "") -> str:
+    """승인 하나를 가르는 키. 🔴 **여기서 규칙을 짓지 않는다.**
+
+    ★ 주인은 `transition.purchase_id_prefix_for` 다 — 그 함수가 *"여기까지가 승인
+      하나를 가리킨다"* 고 적어 둔 앞머리이고, **원장 행 ID 를 짓는 규칙과 같은
+      함수**라 둘이 갈릴 수가 없다 (`PUR-{request_id}-D{decision_seq}-S`).
+
+    🔴 **`request_id` 하나로 접지 않는다.** 같은 업무 키에 결정이 여러 번 붙을 수
+       있고 (`decision_seq` 가 그래서 있다), 접으면 서로 다른 승인 둘이 한 건이 된다.
+
+    ⚠️ **키를 못 만들면 조용히 빼지 않는다.** 실행 행 하나는 승인 하나를 넘지 않으므로
+      `run_id` 로 떨어뜨린다 — 같은 승인을 두 건으로 셀지언정 **안 센 것으로 만들지는
+      않는다.** (막힌 행은 승인 문을 지난 행이라 여기 오는 일이 없어야 한다.)
+    """
+    if request_id and decision_seq is not None:
+        return purchase_id_prefix_for(request_id, decision_seq)
+    return f"RUN:{run_id}"
 
 
 @dataclass(frozen=True)
@@ -634,6 +691,88 @@ class WalkResult:
             if day.pending_transition is not None:
                 total.update(day.pending_transition.outcomes)
         return total
+
+    @property
+    def ledger_blocks(self) -> LedgerBlocks:
+        """승인은 났는데 **매입 원장에 한 행도 안 남은** 것들 (2026-09-16).
+
+        ```text
+        등급 둘        purchase_items 는 품목당 한 줄인데 등급이 둘이다
+        회차금액 없음   회차가 둘 이상인데 어느 회차 금액이 비었다
+        지급일 없음     purchases.payment_due_date 를 만들 값이 없다
+        도착분 없음     목표 상태일에 앞으로 올 도착분이 하나도 없다
+        ```
+
+        ★★ **이 줄이 없어서 6건 726kg 255,287원(수량 0.76% · 금액 0.46%)이 조용히
+          사라졌다** (확인 걷기 CHECK-0916 · 매입 파트가 A/B 실험 중 발견). 승인은
+          `RECORDED` 로 찍히고 전이는 `NOT_APPLIED` 한 값에 묻혀, **요약만 봐서는
+          원장이 비었다는 사실이 아무 데도 안 보였다.**
+
+        🔴 **막히는 경로가 둘이라 둘 다 본다.**
+
+        ```text
+        당일 전이      backfill 이 승인하며 부른 apply_approval  (BackfilledRun)
+        다음 날 재시도  retry_pending_transitions                 (RetriedTransition)
+        ```
+
+        한쪽만 보면 수가 **조용히 작아진다** — 오류가 안 나고 그냥 적게 나온다.
+
+        🔴 **크기와 소음을 따로 센다** (매입 파트 회신 2026-09-16). `retry_pending_
+           transitions` 가 같은 약정을 **날마다** 다시 세우고 같은 사유로 또 막힌다 —
+           날짜별로 세면 한 건이 며칠치로 부푼다. 실측에서 `NOT_APPLIED 12` 였는데
+           복수 등급 승인안은 **실제로 1건**이었다. 12 와 1 이 이만큼 벌어진다.
+
+        🔴 **사유 문장이 아니라 갈래로 센다.** 문장에는 등급 이름과 회차 번호가
+           박혀 있어 (`등급이 2개인데 매입 줄이 하나다 (특/상)`) 약정마다 다른 키가
+           되고, 그러면 세는 뜻이 없어진다. 이름의 주인은 `ledger` 다.
+
+        🔴 **0 인 갈래도 든다.** 키가 빠지면 *"없었다"* 와 *"안 셌다"* 가 같아진다
+           (`inspection_statuses` · `observation_coverage` 와 같은 규율).
+        """
+        갈래별: dict[str, set[str]] = {갈래: set() for 갈래 in LEDGER_BLOCK_KINDS}
+        모두: set[str] = set()
+        재시도 = 0
+
+        def 담는다(키: str, 갈래: str) -> None:
+            갈래별.setdefault(갈래, set()).add(키)
+            모두.add(키)
+
+        for day in self.days:
+            # ① 당일 전이 — 승인 문이 그날 바로 부른 자리. **첫 시도라 소음이 아니다.**
+            for approval in (day.procurement_approval, day.sales_approval):
+                if approval is None:
+                    continue
+                for one in approval.runs:
+                    if one.transition_block_kind:
+                        담는다(
+                            _approval_key(one.request_id, one.decision_seq, one.run_id),
+                            one.transition_block_kind,
+                        )
+            # ② 다음 날 재시도 — 원장에 안 닿은 것을 다시 세우는 자리. **여기가 소음이다.**
+            if day.pending_transition is not None:
+                for retried in day.pending_transition.retried:
+                    if retried.block_kind:
+                        재시도 += 1
+                        # 🔴 **당일 경로와 같은 문을 쓴다.** 여기서 키를 따로 지으면
+                        #    두 경로가 같은 승인을 다른 키로 보고, 같은 승인이 둘로
+                        #    세어지는 날이 온다.
+                        담는다(
+                            _approval_key(retried.request_id, retried.decision_seq),
+                            retried.block_kind,
+                        )
+
+        # 🔴 **영영 안 될 것도 고유로 센다.** 이 수가 곧 발표에서 말할 크기다 —
+        #    날짜별로 세면 재시도가 도는 날수만큼 부풀고, 그러면 *"복수 등급 1건"* 이
+        #    *"12건"* 으로 나간다.
+        영영: set[str] = set()
+        for 갈래 in PERMANENT_BLOCK_KINDS:
+            영영 |= 갈래별.get(갈래, set())
+        return LedgerBlocks(
+            unique_by_kind={갈래: len(키들) for 갈래, 키들 in 갈래별.items()},
+            unique=len(모두),
+            retries=재시도,
+            permanent=len(영영),
+        )
 
     @property
     def maintenance_statuses(self) -> Mapping[str, int]:
@@ -1654,6 +1793,32 @@ def _closing_line(result: WalkResult) -> str:
     )
 
 
+def _ledger_block_line(result: WalkResult) -> str:
+    """원장못씀 한 줄 (2026-09-16). 🔴 **0 건이어도 찍고 · 0 인 갈래도 찍는다.**
+
+    ```text
+    원장못씀  고유 2건 {등급 둘: 1 · 회차금액 없음: 1 · 지급일 없음: 0 · 도착분 없음: 0}
+              · 재시도 12회 · 영영 안 될 것 1건       ← 실제로는 한 줄이다
+    ```
+
+    🔴 **세 수를 낸다.** 「고유」가 크기이고 「재시도」가 소음이다 — 한 수로 접으면
+       같은 승인이 날마다 다시 막히는 것이 건수로 읽혀 한 건이 며칠치로 부푼다.
+       **「영영 안 될 것」도 고유 건수다** — 그 수가 곧 발표에서 말할 크기다.
+
+    ★ **갈래 순서는 `LEDGER_BLOCK_KINDS` 그대로다** — 가나다순으로 세우지 않는다.
+      순서가 뜻이라 `관측시점` 줄과 같은 규율이다.
+
+    🔴 **세고 찍기만 한다.** 이 함수도 이 줄도 걷기가 고르는 안·재시도·분류 결과를
+       바꾸지 않는다.
+    """
+    센것 = result.ledger_blocks
+    갈래 = " · ".join(f"{이름}: {수}" for 이름, 수 in 센것.unique_by_kind.items())
+    return (
+        f"원장못씀  고유 {센것.unique}건 {{{갈래}}}"
+        f" · 재시도 {센것.retries}회 · 영영 안 될 것 {센것.permanent}건"
+    )
+
+
 def _inspection_line(result: WalkResult) -> str:
     """물류 점검 한 줄. **칸 순서는 하루 안의 순서 그대로**, 칸 안은 가나다순이다."""
     칸별 = {칸: dict(sorted(분포.items())) for 칸, 분포 in result.inspection_statuses.items()}
@@ -1673,6 +1838,11 @@ def format_summary(result: WalkResult) -> str:
         # 🔴 **매입 줄을 판단 줄에 접지 않는다** (2026-09-13). 배치 없는 날은 품목이
         #    없어 `종료코드` 줄에서 빠진다 — 그 날들이 어디 갔는지를 이 줄이 말한다.
         f"매입      {dict(sorted(result.procurement_statuses.items()))}",
+        # 🔴 **원장못씀 줄을 매입 줄에 접지 않는다** (2026-09-16). *"매입 판단이
+        #    돌았나"* 와 *"그 승인이 매입 원장에 닿았나"* 는 축이 다르다 — 이 줄이
+        #    없어서 확인 걷기에서 6건 726kg 255,287원(수량 0.76% · 금액 0.46%)이
+        #    승인은 났는데 원장에 한 행도 안 남은 채 요약 어디에도 안 보였다.
+        _ledger_block_line(result),
         f"종료코드  {dict(sorted(result.end_codes.items()))}",
         f"채권      {dict(sorted(result.receivable_statuses.items()))}",
         f"판매      {dict(sorted(result.sales_statuses.items()))}",

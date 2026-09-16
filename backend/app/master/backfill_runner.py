@@ -100,6 +100,16 @@ class NotWritten:
     revalidation_outcome: None = None
     sale: None = None
 
+    #: ★ `transition` 도 같다 (2026-09-16). 세어 보기는 장부를 안 바꿨으므로 `None`
+    #:   이고, `DecisionOut` 도 그 칸의 `None` 을 *"반영할 약정이 없었다"* 로 읽는다.
+    #:   그래서 걷기 요약의 「원장못씀」에 세어 보기가 섞이지 않는다.
+    transition: None = None
+
+    #: 🔴 **결정 번호를 지어내지 않는다.** 위 원문 그대로다 — 세어 보기는 결정을
+    #:   안 적었으므로 번호가 없다. 여기에 `1` 을 넣으면 *"적었을 결정"* 이 적힌
+    #:   결정과 같은 키를 갖게 되고, 세는 쪽이 둘을 못 가른다.
+    decision_seq: None = None
+
 
 class CountingDoor:
     """`--commit` 없이 돌 때 **승인 문 자리에 서는 것.** 세기만 하고 안 적는다.

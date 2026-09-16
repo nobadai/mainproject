@@ -179,6 +179,10 @@ def test_둘_다_미등록이면_커넥션을_열지_않는다() -> None:
     assert "finance" in out.reason and "logistics" in out.reason
     assert out.missing == ["finance", "logistics"]
     assert calls == [], "미등록인데 커넥션을 열었다"
+    # 🔴 **미등록은 원장못씀 갈래가 아니다** (2026-09-16). 배선이 없는 것과 쓸 값이
+    #    없는 것은 다른 사실이고, 접으면 걷기 요약의 「원장못씀」이 배선 문제까지
+    #    끌어안아 크기가 부푼다.
+    assert out.block_kind == "", "미등록을 원장못씀으로 세면 안 된다"
 
 
 def test_한쪽만_등록되면_반쪽으로_반영하지_않는다() -> None:
