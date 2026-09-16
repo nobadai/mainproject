@@ -399,6 +399,7 @@ def _generate_scenarios(
                 # ★ **이 안의 확정 물량**에 붙은 원가만 싣는다. 조건부로 더 채운 몫은
                 #   재고가 아니라 매입에서 오므로 여기 금액에 섞이지 않는다.
                 inventory_cost_basis=basis,
+                price_strategy_codes=list(price_strategy),
                 sales_decision_axes=axes,
                 required_validations=validations,
                 evidence_refs=_unique_refs(

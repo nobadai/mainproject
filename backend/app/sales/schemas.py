@@ -656,6 +656,12 @@ class SalesScenario(BaseModel):
     authoritative_inventory_risk_severity: str | None = None
     remaining_freshness_days: int | None = None
     ml_support_used: bool = False
+    #: 이 안의 단가를 **무엇이 정했는가**. `MARKET_UPPER` · `MARGIN_FLOOR` 같은 코드다.
+    #:
+    #: ★ **rationale 문장에서 뽑아 쓰지 않으려고 칸으로 세웠다.** 세 안의 숫자가
+    #:   같아졌을 때 *"무엇이 묶었나"* 를 기계가 읽어야 하는데, 문장을 파싱하면
+    #:   판매가 낱말을 바꾸는 날 조용히 빈 목록이 된다.
+    price_strategy_codes: list[str] = Field(default_factory=list)
     #: 이 안을 만든 **전략 자세**. 숫자가 아니라 기준이다 (`app/sales/strategy.py`).
     #:
     #: ★ **누가 골랐는지는 회신 최상위(`strategy_source`)가 말한다.** 안마다 적으면
@@ -727,6 +733,21 @@ class SalesProposalReply(BaseModel):
     )
     #: 모델이 고른 자세를 사실이 내린 자리. 비어 있으면 깎인 것이 없다.
     strategy_clamped_reason_codes: list[str] = Field(default_factory=list)
+    #: 🔴 **자세는 갈렸는데 숫자가 수렴했는가** (2026-09-16).
+    #:
+    #:   ```text
+    #:   strategy_collapsed = true
+    #:   strategy_collapse_reason_codes = ["MARGIN_FLOOR"]
+    #:   ```
+    #:
+    #: ★ **숫자를 억지로 벌리지 않는다.** 마진 최저선·여신·확정 재고 같은 제약
+    #:   때문에 세 전략이 같은 값에 닿는 것은 정상이다. 버그처럼 숨기지 않고
+    #:   **무엇이 묶었는지**를 남긴다.
+    #:
+    #: ⚠️ `variant_collapsed` 와 다른 사실이다. 저쪽은 *"중간 수량 안을 못 만들었다"*
+    #:   이고 이쪽은 *"자세는 달랐는데 단가가 같아졌다"* 다.
+    strategy_collapsed: bool = False
+    strategy_collapse_reason_codes: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

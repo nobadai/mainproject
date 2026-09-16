@@ -54,10 +54,12 @@ def _request(
     finance_context: dict[str, Any] | None = None,
     ml: bool = True,
     cost_amount: int = 7_000_000,
+    raw_text: str | None = None,
 ) -> SalesProposalInput:
     payload: dict[str, Any] = {
         "business_mode": "SPOT_SALES",
         "user_request": {
+            "raw_text": raw_text,
             "item": "배추",
             "partner_id": "CUST-1",
             "requested_quantity_kg": 7000,
@@ -249,6 +251,35 @@ def test_마진_최저선_때문에_같아지면_강제로_벌리지_않는다()
     ), "수렴 원인이 근거에 안 남았다"
 
 
+def test_수렴하면_회신이_그_사실과_원인을_말한다():
+    """§8 — 숫자를 억지로 벌리지 않는 대신 **무엇이 묶었는지**를 남긴다."""
+    from app.sales.proposal import run_proposal
+
+    reply = run_proposal(_request(soft_warnings=_FRESHNESS, cost_amount=11_000_000))
+
+    assert reply.strategy_collapsed is True
+    assert "MARGIN_FLOOR" in reply.strategy_collapse_reason_codes
+
+
+def test_자세가_갈리고_숫자도_갈리면_수렴이_아니다():
+    """세 안이 서로 다른 값에 닿았으면 묶인 것이 없다."""
+    from app.sales.proposal import run_proposal
+
+    reply = run_proposal(_request(soft_warnings=_FRESHNESS))
+
+    assert reply.strategy_collapsed is False
+    assert reply.strategy_collapse_reason_codes == []
+
+
+def test_수렴_원인은_세_안을_다_묶은_코드만_적는다():
+    """한 안에만 있는 코드는 수렴을 설명하지 못한다."""
+    from app.sales.proposal import run_proposal
+
+    reply = run_proposal(_request(soft_warnings=_FRESHNESS, cost_amount=11_000_000))
+
+    assert "MARKET_UPPER" not in reply.strategy_collapse_reason_codes
+
+
 def test_수렴해도_자세는_기록에_남는다():
     """숫자가 같아도 **무엇을 하려 했는지**는 다르다."""
     scenarios = {
@@ -267,9 +298,21 @@ def test_수렴해도_자세는_기록에_남는다():
 # ---------------------------------------------------------------------------
 
 
-def _finance(*, pressure: str, credit_available: float | None) -> dict[str, Any]:
+def _finance(
+    *,
+    pressure: str,
+    credit_available: float | None,
+    payables_due_7d: float = 3_000_000.0,
+    projected_cash_min: float = 25_000_000.0,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "available_cash": 31_000_000.0,
+        "base_projected_cash_min": projected_cash_min,
+        "minimum_cash_balance_krw": 12_941_280.0,
+        "payables_total_krw": 9_000_000.0,
+        "payables_due_7d_krw": payables_due_7d,
+        "payables_due_30d_krw": 9_000_000.0,
+        "receivables_total_krw": 7_000_000.0,
         "payment_pressure": pressure,
         "partner_credit": {"partner_id": "CUST-1", "partner_receivable_krw": 0.0},
     }
@@ -313,6 +356,59 @@ def test_여신한도를_모르면_여력_없음으로_읽지_않는다():
     assert signals.credit_available_krw is None
     assert signals.credit_is_exhausted is False
     assert signals.credit_limit_known is False
+
+
+def test_임박_채무가_크고_투영_현금이_낮으면_자세가_방어로_간다():
+    """§26 Case 1 vs Case 2 — 재고·ML·사용자 요청은 그대로이고 재무만 다르다.
+
+    🔴 **가격 숫자를 모델이 바꾸는 방식으로 재지 않는다.** 달라지는 것은 자세이고,
+      그 자세가 단가가 되는 것은 결정론 계산의 몫이다.
+
+    ★ `payment_pressure` 라벨이 없어도 판단한다 — 급여 출처가 없는 실행에서는 재무가
+      투영 라벨을 안 낸다. 그때는 투영 최저와 최소현금 두 값으로 본다.
+    """
+    case1 = _request(
+        finance_context=_finance(
+            pressure="LOW",
+            credit_available=9_000_000.0,
+            payables_due_7d=0.0,
+            projected_cash_min=25_000_000.0,
+        )
+    )
+    case2 = _request(
+        finance_context=_finance(
+            pressure="LOW",  # 라벨은 같다 — 숫자만 다르다
+            credit_available=9_000_000.0,
+            payables_due_7d=28_000_000.0,
+            projected_cash_min=3_000_000.0,
+        )
+    )
+
+    a, sa = plan_strategies(case1)
+    b, sb = plan_strategies(case2)
+
+    assert sa.cash_is_tight is False
+    assert sb.cash_is_tight is True, "투영 최저가 최소현금 아래인데 빠듯하지 않다고 읽었다"
+    assert a.of("CONSERVATIVE").cash_posture == "NORMAL"
+    assert b.of("CONSERVATIVE").cash_posture == "DEFENSIVE"
+    assert "CASH_PRESSURE" in b.of("CONSERVATIVE").reason_codes
+
+
+def test_재무만_달라도_같은_재고_ML_에서_단가는_안_바뀐다():
+    """🔴 자세는 재무를 보지만 **가격은 원가·시장·마진만 본다.**
+
+    재무 사실이 단가를 직접 움직이면 판정 전에 재무가 값을 정하는 것이 된다.
+    """
+    case1 = _request(finance_context=_finance(pressure="LOW", credit_available=9_000_000.0))
+    case2 = _request(
+        finance_context=_finance(
+            pressure="HIGH", credit_available=0.0, projected_cash_min=3_000_000.0
+        )
+    )
+
+    assert [s.unit_price_krw for s in _generate_scenarios(case1)] == [
+        s.unit_price_krw for s in _generate_scenarios(case2)
+    ]
 
 
 def test_재무_사실이_없으면_그_사실이_사유에_남는다():
@@ -438,8 +534,8 @@ def test_설정이_꺼져_있으면_FALLBACK_이_아니라_DISABLED_다():
     assert plan.source == "TEMPLATE_FALLBACK"
 
 
-def test_모델은_금액을_보지_않는다(모델을_켠다, monkeypatch):
-    """🔴 금액을 보여 주면 모델이 그것을 문장에 옮기고, 사실의 주인이 둘이 된다."""
+def _sent_to_model(monkeypatch, request) -> dict[str, Any]:
+    """모델에 실제로 나간 context 를 잡는다."""
     본것: list[Any] = []
 
     def 잡는다(context, settings):
@@ -447,19 +543,89 @@ def test_모델은_금액을_보지_않는다(모델을_켠다, monkeypatch):
         return _llm_plan()
 
     monkeypatch.setattr("app.sales.llm.runtime._call_gemini_planner", 잡는다)
+    plan_strategies(request)
+    return 본것[0]
 
-    plan_strategies(
-        _request(finance_context=_finance(pressure="HIGH", credit_available=0.0))
+
+def test_모델이_재무_물류_ML_사실을_전부_본다(모델을_켠다, monkeypatch):
+    """★ 자세를 고르려면 사실이 손에 있어야 한다 (§4).
+
+    숫자를 **보여 주는** 것과 숫자를 **받는** 것은 다르다. 모델 출력에는 숫자를 담을
+    칸이 없고(`LlmStrategyProfileOutput`), 단가·수량은 결정론 계산이 자세만 읽고
+    만든다 — 모델이 본 숫자가 가격이 될 길이 없다.
+    """
+    보낸것 = _sent_to_model(
+        monkeypatch,
+        _request(
+            soft_warnings=_FRESHNESS,
+            finance_context=_finance(pressure="HIGH", credit_available=0.0),
+        ),
     )
 
-    보낸것 = 본것[0]
+    # 재무
+    assert 보낸것["available_cash_krw"] == 31_000_000.0
+    assert 보낸것["payables_due_7d_krw"] == 3_000_000.0
+    assert 보낸것["receivables_total_krw"] == 7_000_000.0
     assert 보낸것["credit_state"] == "EXHAUSTED"
-    금액_같은_값 = [
-        value
-        for value in 보낸것.values()
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
-    ]
-    assert 금액_같은_값 == [], f"모델에 숫자가 나갔다: {보낸것}"
+    assert 보낸것["payment_pressure"] == "HIGH"
+    # 물류
+    assert 보낸것["depletion_pressure"] is True
+    assert 보낸것["freshness_risk_codes"] == ["FRESHNESS_QUALITY_RISK"]
+    assert 보낸것["inventory_available_kg"] == 7000.0
+    assert 보낸것["inventory_cost_basis_known"] is True
+    assert 보낸것["delivery_status"] == "READY"
+    # ML
+    assert 보낸것["ml_band_available"] is True
+    assert (보낸것["ml_lower"], 보낸것["ml_predicted"], 보낸것["ml_upper"]) == (
+        1350.0,
+        1450.0,
+        1600.0,
+    )
+    assert 보낸것["ml_target_kind"] == "WHSL"
+
+
+def test_모델은_판정을_보지_않는다(모델을_켠다, monkeypatch):
+    """🔴 판정 라벨을 주면 모델이 그것을 따라 적을 자리가 생긴다.
+
+    후보가 아직 없으므로 판정도 없다 — 그 사실이 계약에 드러나야 한다.
+    """
+    보낸것 = _sent_to_model(monkeypatch, _request())
+
+    금지 = {"finance_verdict", "verdict", "status", "unit_price_krw", "qty_kg", "amount_krw"}
+    assert 금지.isdisjoint(보낸것), f"판정·결정값이 모델에 나갔다: {금지 & set(보낸것)}"
+
+
+def test_사용자가_말로_남긴_의도가_모델에_간다(모델을_켠다, monkeypatch):
+    """§16 — raw_text 는 자세를 고르는 참고다. 가격·수량을 바꾸지 않는다."""
+    보낸것 = _sent_to_model(
+        monkeypatch, _request(raw_text="이번 주 안에 급하게 털고 싶다")
+    )
+
+    assert 보낸것["user_intent_text"] == "이번 주 안에 급하게 털고 싶다"
+    assert 보낸것["business_mode"] == "SPOT_SALES"
+
+
+def test_raw_text_가_단가와_수량을_바꾸지_않는다():
+    """🔴 문장은 자세 입력이지 값 입력이 아니다."""
+    없이 = _generate_scenarios(_request())
+    있이 = _generate_scenarios(_request(raw_text="최대한 비싸게 팔아줘 2000원 이상"))
+
+    assert [s.unit_price_krw for s in 없이] == [s.unit_price_krw for s in 있이]
+    assert [s.quantity_kg for s in 없이] == [s.quantity_kg for s in 있이]
+
+
+def test_되먹임_사유_코드가_모델에_간다(모델을_켠다, monkeypatch):
+    """재계획에서 **무엇이 막았는지**를 모르면 같은 자세를 다시 고른다."""
+    from app.sales.strategy import derive_signals
+
+    class _Reply:
+        def __init__(self) -> None:
+            self.source_agent = "finance"
+            self.payload = {"reason_codes": ["SALES_CREDIT_LIMIT_EXCEEDED"]}
+
+    signals = derive_signals(_request(), [_Reply()])
+
+    assert signals.feedback_reason_codes == ("SALES_CREDIT_LIMIT_EXCEEDED",)
 
 
 def test_회신에_전략_출처가_실린다(monkeypatch):

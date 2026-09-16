@@ -117,17 +117,63 @@ class StrategySignals:
     sell_priority: str | None = None
     inventory_risk_severity: str | None = None
     remaining_freshness_days: int | None = None
+    #: 무슨 판매인가. 자세를 고를 때 계약 이행과 현물 판매는 여지가 다르다.
+    business_mode: str | None = None
+    #: 사용자가 **말로** 남긴 의도. 없으면 `None` 이고, 값은 해석하지 않는다.
+    #:
+    #: 🔴 **여기서 숫자를 뽑지 않는다** (§16). 수량·가격은 구조화된 칸이 소유하고,
+    #:   이 문장은 *자세* 를 고르는 참고로만 모델에 간다.
+    user_intent_text: str | None = None
     #: 재무 선행 사실. **`None` 은 못 받았다는 뜻이다** — 0 과 다르다.
     payment_pressure: str | None = None
     credit_available_krw: Decimal | None = None
     credit_limit_known: bool = False
     has_finance_context: bool = False
+    available_cash_krw: Decimal | None = None
+    base_projected_cash_min_krw: Decimal | None = None
+    minimum_cash_balance_krw: Decimal | None = None
+    payables_total_krw: Decimal | None = None
+    payables_due_7d_krw: Decimal | None = None
+    payables_due_30d_krw: Decimal | None = None
+    receivables_total_krw: Decimal | None = None
+    partner_receivable_krw: Decimal | None = None
+    #: 물류 사실. 수량은 **물류가 확정한 값 그대로** 나르고 다시 세지 않는다.
+    inventory_available_kg: Decimal | None = None
+    inventory_cost_basis_known: bool = False
+    delivery_status: str | None = None
     #: ML 밴드를 실제로 쓸 수 있는가 (`use_recommended` · `target_kind` 게이트).
     ml_gate_open: bool = False
+    ml_target_kind: str | None = None
+    ml_use_recommended: bool | None = None
+    #: 자세를 고를 때 보는 **개략 밴드**. 희망 납품일의 점이고, 없으면 전부 `None`.
+    #:
+    #: 🔴 **가격에 쓰는 밴드가 아니다.** 실제 가격은 `_market_corridor` 가 **확정된
+    #:   납품일**로 다시 고른 점으로 만든다 — 그 날짜는 물류 납기 판정을 거쳐야
+    #:   정해지므로 자세를 고르는 시점에는 아직 없다.
+    ml_lower: Decimal | None = None
+    ml_predicted: Decimal | None = None
+    ml_upper: Decimal | None = None
+    #: 되먹임 회차에서 부서가 적은 사유 코드. **1차 생성에서는 비어 있다.**
+    #:
+    #: ★ 조정 **금액**은 싣지 않는다. 그 숫자의 주인은 재무이고, 그것을 실제로
+    #:   반영하는 것은 결정론 계산이다 — 모델은 *"여신이 막혔다"* 만 알면 된다.
+    feedback_reason_codes: tuple[str, ...] = ()
 
     @property
     def cash_is_tight(self) -> bool:
-        return self.payment_pressure in _TIGHT_CASH
+        """자금이 빠듯한가. **재무가 낸 판정과 재무가 낸 숫자 둘 다 본다.**
+
+        ★ 라벨(`payment_pressure`)이 없는 실행이 있다 — 급여 출처가 없으면 재무가
+          투영을 안 낸다. 그때도 투영 최저와 최소현금이 오면 그 둘로 판단할 수 있다.
+
+        🔴 **새 임계값을 만들지 않는다.** *"투영 최저가 최소현금 아래"* 는 재무
+          정책이 이미 정한 선이고, 여기서는 두 값을 비교만 한다.
+        """
+        if self.payment_pressure in _TIGHT_CASH:
+            return True
+        if self.base_projected_cash_min_krw is None or self.minimum_cash_balance_krw is None:
+            return False
+        return self.base_projected_cash_min_krw < self.minimum_cash_balance_krw
 
     @property
     def credit_is_exhausted(self) -> bool:
@@ -227,6 +273,13 @@ def derive_signals(request: Any, replies: Sequence[Any] = ()) -> StrategySignals
 
     finance = request.finance_context
     forecast = request.ml_context
+    point = _coarse_band_point(request)
+    supply = logistics.sellable_supply if logistics is not None else None
+    delivery = logistics.delivery_feasibility if logistics is not None else None
+
+    def fin(*path: str) -> Decimal | None:
+        return None if finance is None else _finance_number(finance, path)
+
     return StrategySignals(
         depletion_pressure=depletion,
         freshness_risk_codes=risk_codes,
@@ -234,23 +287,79 @@ def derive_signals(request: Any, replies: Sequence[Any] = ()) -> StrategySignals
         sell_priority=sell_priority,
         inventory_risk_severity=severity,
         remaining_freshness_days=freshness,
+        business_mode=request.business_mode,
+        user_intent_text=request.user_request.raw_text,
         payment_pressure=None if finance is None else _finance_label(finance, "payment_pressure"),
-        credit_available_krw=(
-            None
-            if finance is None
-            else _finance_number(finance, ("partner_credit", "partner_credit_available_krw"))
-        ),
-        credit_limit_known=(
-            finance is not None
-            and _finance_number(finance, ("partner_credit", "partner_credit_limit_krw")) is not None
-        ),
+        credit_available_krw=fin("partner_credit", "partner_credit_available_krw"),
+        credit_limit_known=fin("partner_credit", "partner_credit_limit_krw") is not None,
         has_finance_context=finance is not None,
+        available_cash_krw=fin("available_cash"),
+        base_projected_cash_min_krw=fin("base_projected_cash_min"),
+        minimum_cash_balance_krw=fin("minimum_cash_balance_krw"),
+        payables_total_krw=fin("payables_total_krw"),
+        payables_due_7d_krw=fin("payables_due_7d_krw"),
+        payables_due_30d_krw=fin("payables_due_30d_krw"),
+        receivables_total_krw=fin("receivables_total_krw"),
+        partner_receivable_krw=fin("partner_credit", "partner_receivable_krw"),
+        inventory_available_kg=_available_qty(supply, item),
+        inventory_cost_basis_known=supply is not None and supply.inventory_cost_basis is not None,
+        delivery_status=None if delivery is None else delivery.status,
         ml_gate_open=(
             forecast is not None
             and forecast.use_recommended is True
             and forecast.target_kind == "WHSL"
         ),
+        ml_target_kind=None if forecast is None else forecast.target_kind,
+        ml_use_recommended=None if forecast is None else forecast.use_recommended,
+        ml_lower=None if point is None else point.lower,
+        ml_predicted=None if point is None else point.predicted,
+        ml_upper=None if point is None else point.upper,
+        feedback_reason_codes=_reply_reason_codes(replies),
     )
+
+
+def _reply_reason_codes(replies: Sequence[Any]) -> tuple[str, ...]:
+    """되먹임 회신이 적은 사유 코드. **부서가 쓴 말 그대로다.**
+
+    ★ 조정 금액은 안 읽는다. 자세를 고르는 데 필요한 것은 *"무엇이 막았나"* 이고,
+      얼마까지 되는지는 결정론 계산이 재무 회신에서 직접 읽는다.
+    """
+    codes: list[str] = []
+    for reply in replies:
+        payload = getattr(reply, "payload", {}) or {}
+        for code in payload.get("reason_codes") or ():
+            if isinstance(code, str):
+                codes.append(code)
+    return tuple(dict.fromkeys(codes))
+
+
+def _available_qty(supply: Any, item: str) -> Decimal | None:
+    """물류가 확정한 그 품목의 판매 가능 수량. **합산하지 않는다.**
+
+    ★ `inventory_by_item` 한 줄을 그대로 읽는다 — 로트를 더하면 판매가 물류의 가용
+      판정을 다시 하는 것이 된다 (`proposal._confirmed_sellable_qty` 와 같은 규율).
+    """
+    if supply is None:
+        return None
+    row = next((row for row in supply.inventory_by_item if row.item == item), None)
+    return None if row is None else row.available_qty_kg
+
+
+def _coarse_band_point(request: Any) -> Any:
+    """자세를 고를 때 보는 **개략 밴드 한 점**.
+
+    🔴 **가격을 만드는 밴드가 아니다.** 실제 가격은 `proposal._market_corridor` 가
+      **확정된 납품일**로 다시 고른 점으로 만든다. 그 날짜는 물류 납기 판정을 거쳐야
+      정해지는데, 자세를 고르는 시점에는 아직 후보가 없어 그 판정도 없다.
+
+    ★ 그래서 희망 납품일로만 찾고, 없으면 밴드를 안 본다 — 아무 날짜나 집어
+      *"시장이 이렇다"* 를 만들지 않는다.
+    """
+    forecast = request.ml_context
+    wanted = request.user_request.preferred_delivery_date
+    if forecast is None or wanted is None:
+        return None
+    return next((point for point in forecast.daily if point.date == wanted), None)
 
 
 def _reply_ranking_facts(replies: Sequence[Any]) -> tuple[str | None, str | None, int | None]:

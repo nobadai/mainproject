@@ -499,6 +499,8 @@ def _final_recommendation(state: SalesAgentState) -> SalesAgentState:
         # 🔴 **장애를 숨기지 않는다** (§10). 모델이 실패했는데 성공처럼 보이면 모델이
         #   죽은 날과 산 날이 화면에서 같아진다.
         **_strategy_fields(state),
+        # ★ 제약 때문에 숫자가 수렴한 사실은 **버그가 아니라 결과의 일부**다 (§8).
+        **_strategy_collapse(scenarios),
     )
     return {
         **state,
@@ -554,6 +556,45 @@ def _agent_self_check(
             else ["판매안의 추천 후보와 외부 검증 상태를 다시 확인해 주세요."],
         }
     )
+
+
+def _strategy_collapse(scenarios) -> dict[str, object]:
+    """자세는 갈렸는데 **숫자가 수렴했는가.** 숫자를 벌리지 않고 원인만 남긴다.
+
+    ```text
+    자세가 한 가지뿐이다          → 수렴이 아니다. 애초에 나뉜 적이 없다
+    자세는 여럿인데 단가가 한 가지 → 수렴이다. 무엇이 묶었는지를 적는다
+    ```
+
+    🔴 **수렴 원인을 지어내지 않는다.** 코드는 결정론 계산이 실제로 쓴 것
+      (`price_strategy_codes`)에서만 온다 — `MARGIN_FLOOR` 가 세 안을 다 묶었으면
+      그 이름이 거기 있다.
+
+    ★ **단가가 없는 안은 안 센다.** 가격을 못 만든 것과 같은 값에 닿은 것은 다르다.
+    """
+    by_price: dict[object, list] = {}
+    for scenario in scenarios:
+        if scenario.unit_price_krw is not None:
+            by_price.setdefault(scenario.unit_price_krw, []).append(scenario)
+
+    reasons: set[str] = set()
+    collapsed = False
+    for group in by_price.values():
+        if len(group) < 2 or len({_posture_of(s) for s in group}) < 2:
+            # 같은 자세끼리 같은 값인 것은 수렴이 아니다 — 애초에 안 나뉜 것이다.
+            continue
+        collapsed = True
+        # ★ **그 묶임을 다 설명하는 코드만** 원인이다. 한 안에만 있는 코드는
+        #   왜 둘이 같은 값에 닿았는지를 말해 주지 못한다.
+        reasons |= set.intersection(*(set(s.price_strategy_codes) for s in group))
+    if not collapsed:
+        return {}
+    return {"strategy_collapsed": True, "strategy_collapse_reason_codes": sorted(reasons)}
+
+
+def _posture_of(scenario) -> str | None:
+    profile = scenario.strategy_profile
+    return getattr(profile, "price_posture", None) if profile is not None else None
 
 
 def _strategy_fields(state: SalesAgentState) -> dict[str, object]:

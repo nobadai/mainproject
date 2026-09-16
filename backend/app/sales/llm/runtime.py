@@ -29,30 +29,68 @@ _ENV_FILES = (
 
 _PLANNER_SYSTEM_PROMPT = """당신은 판매 전략 자세만 정합니다.
 CONSERVATIVE · BALANCED · AGGRESSIVE 세 전략의 자세를 각각 한 번씩 고르세요.
+
+주어진 재무·물류·ML 사실은 **판단 재료**입니다. 그 값을 답에 옮겨 적지 마세요.
 가격·수량·금액·마진·판정은 결정론 코드가 계산하므로 절대 만들지 마세요.
-숫자를 한 글자도 쓰지 말고, 주어진 어휘 밖의 값을 만들지 마세요.
+reason_codes 에 숫자를 한 글자도 쓰지 말고, 주어진 어휘 밖의 값을 만들지 마세요.
 DEPLETION 자세는 소진 신호가 실제로 있을 때만 고르세요."""
 
 
 class StrategyPlanningInput(BaseModel):
-    """Planner 가 보는 **사실 라벨**. 금액도 수량도 없다.
+    """Planner 가 보는 **사실**. 재무·물류·ML 이 실제로 보낸 값이다.
 
-    🔴 **여신 여력을 금액으로 주지 않는다.** 금액을 보여 주면 모델이 그 값을 문장에
-      옮기고 싶어지고, 옮긴 순간 재무가 센 사실의 주인이 둘이 된다. 모델이 자세를
-      고르는 데 필요한 것은 *"남았나 / 찼나 / 모르나"* 뿐이다.
+    ★ **숫자를 보여 준다. 숫자를 받지는 않는다.**
+
+      ```text
+      입력   현금·채무·채권·여신·재고·시장 밴드 — 판단에 필요하니 준다
+      출력   닫힌 어휘의 자세뿐 — 숫자가 섞이면 계획을 통째로 버린다
+      ```
+
+      모델이 본 숫자가 가격이 될 길이 없다. 단가·수량·금액은 `proposal.py` 의
+      결정론 계산이 **자세만 읽고** 만들고, 모델 출력에는 숫자를 담을 칸이 없다.
+
+    🔴 **판정 라벨을 주지 않는다.** `finance_verdict` 같은 값은 여기 없다 — 후보가
+      아직 없으므로 판정도 없고, 있다 해도 모델이 판정을 따라 적을 자리를 만들지
+      않는다.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    #: 사용자
+    business_mode: str | None = None
+    #: 사용자가 말로 남긴 의도. **해석은 모델이 하고 숫자는 여기서 안 나온다** (§16).
+    user_intent_text: str | None = None
+    #: 물류
     depletion_pressure: bool
     freshness_risk_codes: list[str] = Field(default_factory=list)
     has_freshness_risk_lots: bool = False
     sell_priority: str | None = None
     inventory_risk_severity: str | None = None
+    inventory_available_kg: float | None = None
+    inventory_cost_basis_known: bool = False
+    delivery_status: str | None = None
+    #: 재무
     payment_pressure: str | None = None
     credit_state: Literal["AVAILABLE", "EXHAUSTED", "UNKNOWN"] = "UNKNOWN"
     finance_context_available: bool = False
+    available_cash_krw: float | None = None
+    base_projected_cash_min_krw: float | None = None
+    minimum_cash_balance_krw: float | None = None
+    payables_total_krw: float | None = None
+    payables_due_7d_krw: float | None = None
+    payables_due_30d_krw: float | None = None
+    receivables_total_krw: float | None = None
+    partner_receivable_krw: float | None = None
+    partner_credit_available_krw: float | None = None
+    #: ML
     ml_band_available: bool = False
+    ml_target_kind: str | None = None
+    ml_use_recommended: bool | None = None
+    ml_lower: float | None = None
+    ml_predicted: float | None = None
+    ml_upper: float | None = None
+    #: 되먹임 회차에서만 채워진다.
+    feedback_reason_codes: list[str] = Field(default_factory=list)
 
 
 class LlmStrategyProfileOutput(BaseModel):
@@ -116,16 +154,40 @@ def _planner_context(signals: Any) -> StrategyPlanningInput:
         credit_state = "UNKNOWN"
     else:
         credit_state = "EXHAUSTED" if signals.credit_available_krw <= 0 else "AVAILABLE"
+
+    def num(value: Any) -> float | None:
+        return None if value is None else float(value)
+
     return StrategyPlanningInput(
+        business_mode=signals.business_mode,
+        user_intent_text=signals.user_intent_text,
         depletion_pressure=signals.depletion_pressure,
         freshness_risk_codes=list(signals.freshness_risk_codes),
         has_freshness_risk_lots=bool(signals.freshness_risk_lot_ids),
         sell_priority=signals.sell_priority,
         inventory_risk_severity=signals.inventory_risk_severity,
+        inventory_available_kg=num(signals.inventory_available_kg),
+        inventory_cost_basis_known=signals.inventory_cost_basis_known,
+        delivery_status=signals.delivery_status,
         payment_pressure=signals.payment_pressure,
         credit_state=credit_state,
         finance_context_available=signals.has_finance_context,
+        available_cash_krw=num(signals.available_cash_krw),
+        base_projected_cash_min_krw=num(signals.base_projected_cash_min_krw),
+        minimum_cash_balance_krw=num(signals.minimum_cash_balance_krw),
+        payables_total_krw=num(signals.payables_total_krw),
+        payables_due_7d_krw=num(signals.payables_due_7d_krw),
+        payables_due_30d_krw=num(signals.payables_due_30d_krw),
+        receivables_total_krw=num(signals.receivables_total_krw),
+        partner_receivable_krw=num(signals.partner_receivable_krw),
+        partner_credit_available_krw=num(signals.credit_available_krw),
         ml_band_available=signals.ml_gate_open,
+        ml_target_kind=signals.ml_target_kind,
+        ml_use_recommended=signals.ml_use_recommended,
+        ml_lower=num(signals.ml_lower),
+        ml_predicted=num(signals.ml_predicted),
+        ml_upper=num(signals.ml_upper),
+        feedback_reason_codes=list(signals.feedback_reason_codes),
     )
 
 
