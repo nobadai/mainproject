@@ -67,8 +67,8 @@ __all__ = [
     "CLOSED_DUE_DATE_MESSAGE",
     "PURCHASE_DATE_MESSAGE",
     "SAME_DAY_DUE_DATE_MESSAGE",
-    "WHOLE_AMOUNT_MESSAGE",
     "WHOLE_QTY_MESSAGE",
+    "WHOLE_UNIT_PRICE_MESSAGE",
     "get_purchase_record",
     "record_purchase",
     "recorded_scenario",
@@ -91,8 +91,14 @@ PURCHASE_DATE_MESSAGE = "매입일은 승인한 날({as_of})과 같아야 합니
 WHOLE_QTY_MESSAGE = "수량은 1kg 단위로 적어 주세요 — {seq}회차"
 """수량에 소수점이 있을 때의 한 줄 (선검사 · 2026-09-16)."""
 
-WHOLE_AMOUNT_MESSAGE = "금액은 원 단위 정수로 적어 주세요 — {seq}회차"
-"""금액에 소수점이 있을 때의 한 줄 (선검사 · 2026-09-16)."""
+WHOLE_UNIT_PRICE_MESSAGE = "단가는 원 단위 정수로 적어 주세요 — {seq}회차"
+"""단가가 원 단위 정수로 안 떨어질 때의 한 줄 (선검사 · 2026-09-16).
+
+★ 입력이 단가로 바뀐 뒤(`PurchaseRecordLegIn.unit_price_krw`)로는 Pydantic 이 소수점
+  단가를 먼저 막는다. 그래도 이 문장을 남기는 이유는 **입구를 안 지나는 부름** 때문이다
+  — `RecordedLeg` 를 직접 짓는 자리에서 금액이 수량으로 안 나뉘면 원장의 단가가 소수가
+  되고, DB CHECK 가 그때 알기 어려운 말로 막는다.
+"""
 
 #: 승인 때 재검증을 통과로 보는 결과. `CONDITIONAL` · `FAILED` · `ERROR` 는 통과가 아니다
 #: (`decision.RevalidationOutcome` 의 표).
@@ -123,7 +129,7 @@ def record_purchase(
 
     ```text
     검증  승인(APPROVE) 존재 · 사람 승인 · 아직 기록 없음 · 회차 집합 == 선정안 회차 집합
-          선검사  첫 회차 매입일 == 승인 실행 as_of · 수량 · 금액이 정수
+          선검사  첫 회차 매입일 == 승인 실행 as_of · 수량이 정수 · 금액 ÷ 수량(= 단가)이 정수
           회차마다 매입일 >= 승인 실행 as_of · 지급기일 > 마지막 재무 일마감일 (같은 날은 예외 하나)
     재검증 기록값이 선정안과 하나라도 다르면 · 기록값 안 사본으로 · PASSED 가 아니면 멈춘다
     ①    master_purchase_records 에 회차 행 — **제 커넥션 · 제 커밋**
@@ -261,7 +267,7 @@ def _check_recordable_values(approval: CurrentApproval, legs: Sequence[RecordedL
 
     ```text
     첫 회차 매입일 == 승인 실행 as_of
-    회차마다 수량 · 금액이 정수
+    회차마다 수량이 정수 · 금액 ÷ 수량(= 단가)이 정수
     ```
 
     ★ **왜 매입일을 승인일에 묶는가.** 기록값 재검증은 안 사본을 매입안 계약
@@ -284,14 +290,21 @@ def _check_recordable_values(approval: CurrentApproval, legs: Sequence[RecordedL
       소수점 수량 · 금액은 재검증에서 떨어진다. 반올림해 통과시키면 **기록한 값과 다른
       값이 검증을 지난다** — `#727` 이 그래서 반올림 대신 막아 두었고 그 판단을 유지한다.
 
+    ★ **단가는 금액 ÷ 수량으로 잰다.** 입력이 단가로 바뀐 뒤(2026-09-16) 정상 경로로는
+      늘 정수지만(`PurchaseRecordLegIn` 이 수량 · 단가를 `int` 로 받고 금액을 곱해 만든다),
+      여기는 `RecordedLeg` 를 받는 자리라 입구를 안 지나는 부름도 온다. 원장이 만드는
+      단가가 바로 이 나눗셈이므로(`ledger._row_for_leg`), **같은 식으로 미리 잰다.**
+
     ⚠️ **승인 실행 as_of 를 못 읽으면 매입일은 안 잰다.** 못 잰 것을 틀렸다고 하지 않는다
       — 뒤의 경계(`_check_purchase_dates`)도 같은 규율이다.
     """
     for leg in legs:
         if not float(leg.qty_kg).is_integer():
             raise DecisionRejected(WHOLE_QTY_MESSAGE.format(seq=leg.seq))
-        if not float(leg.amount_krw).is_integer():
-            raise DecisionRejected(WHOLE_AMOUNT_MESSAGE.format(seq=leg.seq))
+        # ⚠️ 수량이 0 이면 단가를 잴 수 없다. 여기서 새 문장을 지어내지 않는다 —
+        #    `PurchaseRecordLegIn` 이 `gt=0` 으로 이미 막았고, 뒤의 원장이 제 말로 막는다.
+        if leg.qty_kg > 0 and not float(leg.amount_krw / leg.qty_kg).is_integer():
+            raise DecisionRejected(WHOLE_UNIT_PRICE_MESSAGE.format(seq=leg.seq))
     as_of = approval.as_of
     if as_of is None or not legs:
         return
@@ -441,9 +454,13 @@ def _grade_lines(total_qty: float, total_amount: float) -> list[tuple[int | floa
       수량 · 금액 칸이 정수라 부서 파싱에서 걸리는데, **여기서 반올림해 통과시키면
       기록값과 다른 값이 검증을 지난다.** 못 적는 것은 못 적는 대로 막힌다.
 
-      ⚠️ 이 갈래는 이제 사실상 안 불린다 — 입구(`_check_recordable_values`)가 소수점
-        수량 · 금액을 사람 말로 먼저 거부한다 (2026-09-16). **마지막 방어선으로 남긴다**:
-        입구를 안 지나는 부름이 생겨도 반올림한 값이 조용히 검증을 지나면 안 된다.
+      ⚠️ **입력이 단가라 이 갈래는 안 불린다** (2026-09-16). 사람은 회차마다 정수
+        단가를 적고 금액은 수량 × 단가로 나므로, 수량도 금액도 언제나 정수다.
+        **마지막 방어선으로 남긴다**: 입구(`PurchaseRecordLegIn` · `_check_recordable_values`)를
+        안 지나는 부름이 생겨도 반올림한 값이 조용히 검증을 지나면 안 된다.
+
+      ⚠️ **나머지 줄(`rest != 0`)도 같다.** 회차 단가가 회차마다 다르면 총액 ÷ 총량이
+        정수로 안 떨어져 여전히 두 줄이 난다 — 그 갈래는 살아 있다.
     """
     if not (float(total_qty).is_integer() and float(total_amount).is_integer()):
         return [(total_qty, total_amount / total_qty if total_qty else total_amount)]
@@ -559,6 +576,30 @@ def recorded_scenario(
     return out
 
 
+def _recorded_unit_price(row: Mapping[str, Any]) -> float | None:
+    """기록 한 줄의 단가. **`amount_krw ÷ quantity_kg` 다** (2026-09-16).
+
+    ⚠️ 수량이 0 이거나 못 읽으면 `None` — 없는 것을 0 으로 채우지 않는다 (§1.2-10).
+    """
+    qty = float(row["quantity_kg"])
+    return float(row["amount_krw"]) / qty if qty else None
+
+
+def _plan_unit_price(plan: ApprovedCommitment | None) -> float | None:
+    """폼이 미리 채울 **선정안 단가**. 안이 적은 `sourcing_plan[].grade_unit_price` 다.
+
+    🔴 **금액 ÷ 수량으로 지어내지 않는다** (2026-09-16). 그것은 안이 적은 단가가 아니라
+      마스터가 만든 숫자다. 안에 단가가 없으면 `None` 으로 두고, 화면이 빈 칸으로 열어
+      사람이 실제로 산 단가를 적게 한다 (§1.2-10).
+
+    ⚠️ **등급 줄이 여럿이면 `None` 이다.** 줄마다 단가가 다를 수 있어 「이 회차의 단가」가
+      하나로 정해지지 않는다 — 그중 하나를 집으면 근거 없는 값이 폼에 앉는다.
+    """
+    if plan is None or len(plan.sourcing_plan) != 1:
+        return None
+    return plan.sourcing_plan[0].grade_unit_price
+
+
 def get_purchase_record(request_id: str) -> PurchaseRecordOut:
     """화면용 — 선정안 회차(기본값) · 기록(있으면) · 반영 상태.
 
@@ -567,12 +608,14 @@ def get_purchase_record(request_id: str) -> PurchaseRecordOut:
     approval = _approval_to_record(request_id)
     decision = approval.decision
     plan = approval.plan
+    단가 = _plan_unit_price(plan)
     plan_out = PurchaseRecordPlanOut(
         grade=plan.grades[0] if plan is not None and plan.grades else None,
         legs=[
             PurchaseRecordLegOut(
                 seq=leg.seq,
                 qty_kg=leg.qty_kg,
+                unit_price_krw=단가,
                 amount_krw=leg.amount_krw,
                 purchase_date=leg.purchase_date,
                 arrival_date=leg.arrival_date,
@@ -608,6 +651,10 @@ def get_purchase_record(request_id: str) -> PurchaseRecordOut:
             reason = f"선정안 약정이 서지 않았다: {approval.plan_out.reason}"
         return PurchaseRecordOut(**base, status="AWAITING_PURCHASE_RECORD", reason=reason)
 
+    # ★ **기록 표에 단가 칸을 더하지 않는다** (2026-09-16 · DDL 없음). `quantity_kg` 와
+    #   `amount_krw` 가 이미 있고, 입력이 단가라 저장된 금액이 **수량 × 단가**다 —
+    #   그래서 `amount_krw ÷ quantity_kg` 가 적은 단가로 **정확히** 돌아온다. 칸을 더하면
+    #   같은 사실이 두 칸에 앉아 둘이 갈리는 날이 온다.
     record = PurchaseRecordValuesOut(
         grade=str(rows[0]["grade"]),
         recorded_by=str(rows[0]["recorded_by"]),
@@ -616,6 +663,7 @@ def get_purchase_record(request_id: str) -> PurchaseRecordOut:
             PurchaseRecordLegOut(
                 seq=int(row["leg_seq"]),
                 qty_kg=float(row["quantity_kg"]),
+                unit_price_krw=_recorded_unit_price(row),
                 amount_krw=float(row["amount_krw"]),
                 purchase_date=row["purchase_date"],
                 arrival_date=row["arrival_date"],

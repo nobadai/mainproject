@@ -12,7 +12,7 @@
 ①  AUTO-BACKFILL 승인은 지금처럼 즉시 전이 (회귀)
 ②  사람 승인은 전이를 안 부르고 AWAITING_PURCHASE_RECORD
 ③  기록 → 사본 약정의 회차 값 · 합계 · 지급일 · 등급이 기록값 · apply_approval 1회
-④  seq 집합이 다르면 · 수량/금액 0 · 도착일 < 매입일 · 중복 기록 → 거부
+④  seq 집합이 다르면 · 수량/단가 0 · 소수점 단가 · 도착일 < 매입일 · 중복 기록 → 거부
 ⑤  재시도가 기록 없는 사람 승인을 건너뛰고, 기록 있는 것은 기록값으로
 ⑥  기록값이 선정안과 다르면 재검증 · 불통과면 저장 0 · 전이 0 · 같으면 재검증 안 부름
 ⑦  매입일 < 승인 실행 as_of · 지급기일 < 마지막 재무 일마감일 → 거부 (회차마다)
@@ -20,8 +20,10 @@
     · 지급기일 == 마감일 → 승인 기준일 == 매입일 == 마감일 일 때만 받는다 (재무 합의 9/16)
 ⑨  기록값 재검증이 재무 · 물류 SCENARIO_VALIDATION 의 실제 판정으로 갈린다
 ⑧  다른 sim_run_id 의 같은 request_id 기록은 별개
-⑩  선검사 — 1회차 매입일 != 승인한 날 · 소수점 수량 · 소수점 금액을 사람 말로 거부
+⑩  선검사 — 1회차 매입일 != 승인한 날 · 소수점 수량 · 수량으로 안 나뉘는 금액을 사람 말로 거부
     (매입안 계약이 알기 어려운 말로 막기 전에 · 2026-09-16)
+⑫  🔴 사람은 **단가**를 적고 금액은 수량 × 단가로 난다 (사용자 결정 2026-09-16) ·
+    그 금액이 기록 표 · 약정 사본 · 전이로 그대로 가고 **원장 단가가 정수로 떨어진다**
 ⑪  🔴 전이가 롤백하며 FAILED 로 끝나도 기록 행은 남는다 · 응답은 201 FAILED 그대로 ·
     그 승인을 다시 적으면 409 · 기록 적재가 터지면 전이를 안 부른다
     (기록과 전이는 두 트랜잭션 · 2026-09-16 · `#729`)
@@ -276,14 +278,14 @@ def _본문(**over: Any) -> dict[str, Any]:
             {
                 "seq": 1,
                 "qty_kg": 100,
-                "amount_krw": 500000,
+                "unit_price_krw": 5000,
                 "purchase_date": "2026-09-11",
                 "arrival_date": "2026-09-12",
             },
             {
                 "seq": 2,
                 "qty_kg": 200,
-                "amount_krw": 1000000,
+                "unit_price_krw": 5000,
                 "purchase_date": "2026-09-14",
                 "arrival_date": "2026-09-15",
             },
@@ -305,7 +307,7 @@ def _실매입(**over: Any) -> dict[str, Any]:
     body["legs"][0] = {
         "seq": 1,
         "qty_kg": 90,
-        "amount_krw": 480000,
+        "unit_price_krw": 5400,
         "purchase_date": "2026-09-11",
         "arrival_date": "2026-09-13",
     }
@@ -387,12 +389,12 @@ def test_기록하면_기록값으로_덮은_사본으로_전이가_한_번_선�
     assert sim_run_id == 실행축, "축은 승인 실행 행에서 온다"
 
     첫회, 둘째 = commitment.arrival_schedule
-    assert (첫회.seq, 첫회.qty_kg, 첫회.amount_krw) == (1, 90.0, 480000.0)
+    assert (첫회.seq, 첫회.qty_kg, 첫회.amount_krw) == (1, 90.0, 486000.0), "금액 = 수량 × 단가"
     assert (첫회.purchase_date, 첫회.arrival_date) == (date(2026, 9, 11), date(2026, 9, 13))
     assert 첫회.payment_due_date == date(2026, 9, 18), "지급일 = 기록 매입일 + N5(7)"
     assert (둘째.qty_kg, 둘째.amount_krw) == (200.0, 1000000.0)
     assert commitment.total_qty_kg == 290.0
-    assert commitment.total_amount_krw == 1480000.0
+    assert commitment.total_amount_krw == 1486000.0
     assert commitment.grades == ("특",), "등급이 기록값이 아니다"
     assert commitment.approval_id == f"H1-{업무키}-1", "승인 id 는 선정안 그대로다"
 
@@ -540,8 +542,8 @@ def test_회차_집합이_선정안과_다르면_거부한다(세상: dict[str, 
     assert 세상["store"] == [] and 세상["conns"] == []
 
 
-@pytest.mark.parametrize("칸", ["qty_kg", "amount_krw"])
-def test_수량이나_금액이_0_이면_거부한다(칸: str) -> None:
+@pytest.mark.parametrize("칸", ["qty_kg", "unit_price_krw"])
+def test_수량이나_단가가_0_이면_거부한다(칸: str) -> None:
     body = _본문()
     body["legs"][0][칸] = 0
 
@@ -597,20 +599,21 @@ def test_선정안과_다르면_기록값_사본으로_재검증한다(세상: d
 
     [사본] = 세상["reval"].scenarios
     첫회 = 사본["split_plan"][0]
-    assert (첫회["qty_kg"], 첫회["amount_krw"]) == (90, 480000)
+    assert (첫회["qty_kg"], 첫회["amount_krw"]) == (90, 486000)
     assert (첫회["date"], 첫회["expected_arrival_date"]) == ("2026-09-11", "2026-09-13")
-    assert (사본["total_qty_kg"], 사본["total_amount_krw"]) == (290, 1480000)
+    assert (사본["total_qty_kg"], 사본["total_amount_krw"]) == (290, 1486000)
     지급 = 사본["payment_schedule"][0]
     assert (지급["purchase_date"], 지급["payment_date"]) == ("2026-09-11", "2026-09-18")
-    assert (지급["qty_kg"], 지급["amount_krw"]) == (90, 480000)
+    assert (지급["qty_kg"], 지급["amount_krw"]) == (90, 486000)
     assert 지급["amount_max_krw"] == 90 * 6000, "상한 금액은 기록 수량 × max_price"
     배분 = 사본["sourcing_plan"]
     assert {line["grade"] for line in 배분} == {"특"}, "한 기록 = 한 등급"
     assert sum(line["qty_kg"] for line in 배분) == 290
     # 🔴 **단가도 기록값에서 다시 난다** (2026-09-16). 선정안 단가를 그대로 두면
     #   `Scenario.validate_quadruple_match` 가 깨져 두 부서가 payload 를 못 읽는다.
-    #   1,480,000 ÷ 290 이 정수로 안 떨어져 나머지 줄이 하나 붙는다 — **합은 정확하다.**
-    assert sum(line["qty_kg"] * line["grade_unit_price"] for line in 배분) == 1480000
+    #   회차 단가가 갈려(5,400 · 5,000) 1,486,000 ÷ 290 이 정수로 안 떨어지므로 나머지
+    #   줄이 하나 붙는다 — **합은 정확하다.**
+    assert sum(line["qty_kg"] * line["grade_unit_price"] for line in 배분) == 1486000
 
 
 def test_등급만_달라도_재검증한다(세상: dict[str, Any]) -> None:
@@ -891,37 +894,80 @@ def test_2회차_매입일은_승인한_날과_달라도_받는다(세상: dict[
 
 
 @pytest.mark.parametrize("회차", [0, 1])
-def test_수량에_소수점이_있으면_거부한다(세상: dict[str, Any], 회차: int) -> None:
+def test_수량에_소수점이_있으면_본문에서_거부한다(회차: int) -> None:
+    """★ 수량도 정수다 — 반 kg 은 장부가 받지 않는다."""
     body = _본문()
     body["legs"][회차]["qty_kg"] = 100.5
-    문 = _전이()
+
+    with pytest.raises(ValidationError):
+        PurchaseRecordIn(**body)
+
+
+@pytest.mark.parametrize("회차", [0, 1])
+def test_소수점_수량은_선검사가_사람_말로도_거부한다(세상: dict[str, Any], 회차: int) -> None:
+    """★ 본문이 먼저 막지만 **사람 말로 된 문구는 남는다** — 입구를 안 지나는 부름의 방어선."""
+    legs = [
+        RecordedLeg(
+            seq=one["seq"],
+            qty_kg=one["qty_kg"] + (0.5 if i == 회차 else 0),
+            amount_krw=one["qty_kg"] * one["unit_price_krw"],
+            purchase_date=date.fromisoformat(one["purchase_date"]),
+            arrival_date=date.fromisoformat(one["arrival_date"]),
+        )
+        for i, one in enumerate(_본문()["legs"])
+    ]
+    approval = svc.current_approval(업무키)
+    assert approval is not None
 
     with pytest.raises(DecisionRejected) as caught:
-        _기록한다(세상, body, 문)
+        pr._check_recordable_values(approval, legs)
 
     말 = str(caught.value)
     assert caught.value.conflict is False
     assert 말 == pr.WHOLE_QTY_MESSAGE.format(seq=회차 + 1)
     assert 말 == f"수량은 1kg 단위로 적어 주세요 — {회차 + 1}회차"
     assert "재검증" not in 말
-    assert 세상["store"] == [] and 세상["conns"] == [] and 문.calls == []
 
 
 @pytest.mark.parametrize("회차", [0, 1])
-def test_금액에_소수점이_있으면_거부한다(세상: dict[str, Any], 회차: int) -> None:
+def test_단가에_소수점이_있으면_본문에서_거부한다(회차: int) -> None:
+    """🔴 **단가는 정수다** (사용자 결정 2026-09-16). 소수 단가는 본문이 서지도 않는다."""
     body = _본문()
-    body["legs"][회차]["amount_krw"] = 500000.5
-    문 = _전이()
+    body["legs"][회차]["unit_price_krw"] = 5000.5
+
+    with pytest.raises(ValidationError):
+        PurchaseRecordIn(**body)
+
+
+@pytest.mark.parametrize("회차", [0, 1])
+def test_수량으로_안_나뉘는_금액은_단가_문구로_거부한다(세상: dict[str, Any], 회차: int) -> None:
+    """★ 입구를 안 지나는 부름의 **마지막 방어선**이다 (2026-09-16).
+
+    본문은 단가만 받으므로 여기까지 올 수 없다. 그래도 `RecordedLeg` 를 직접 짓는
+    자리가 소수 단가를 흘리면 원장 `unit_price_krw_per_kg` 가 소수가 되므로, 선검사가
+    **원장과 같은 식(금액 ÷ 수량)** 으로 미리 잰다.
+    """
+    legs = [
+        RecordedLeg(
+            seq=one["seq"],
+            qty_kg=one["qty_kg"],
+            amount_krw=one["qty_kg"] * one["unit_price_krw"] + (1 if i == 회차 else 0),
+            purchase_date=date.fromisoformat(one["purchase_date"]),
+            arrival_date=date.fromisoformat(one["arrival_date"]),
+        )
+        for i, one in enumerate(_본문()["legs"])
+    ]
+    approval = svc.current_approval(업무키)
+    assert approval is not None
 
     with pytest.raises(DecisionRejected) as caught:
-        _기록한다(세상, body, 문)
+        pr._check_recordable_values(approval, legs)
 
     말 = str(caught.value)
     assert caught.value.conflict is False
-    assert 말 == pr.WHOLE_AMOUNT_MESSAGE.format(seq=회차 + 1)
-    assert 말 == f"금액은 원 단위 정수로 적어 주세요 — {회차 + 1}회차"
+    assert 말 == pr.WHOLE_UNIT_PRICE_MESSAGE.format(seq=회차 + 1)
+    assert 말 == f"단가는 원 단위 정수로 적어 주세요 — {회차 + 1}회차"
     assert "재검증" not in 말
-    assert 세상["store"] == [] and 세상["conns"] == [] and 문.calls == []
 
 
 def test_정수에_같은_날이면_선검사를_지나_기존_흐름대로_선다(세상: dict[str, Any]) -> None:
@@ -932,6 +978,79 @@ def test_정수에_같은_날이면_선검사를_지나_기존_흐름대로_선�
     assert len(전이.calls) == 1
     assert len(세상["store"]) == 2
     assert len(세상["reval"].scenarios) == 1, "선정안과 다른데 재검증을 건너뛰었다"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⑫ 사람은 단가를 적고 금액은 수량 × 단가로 난다 (사용자 결정 2026-09-16)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 🔴 **왜.** 매입 원장의 `purchase_items.unit_price_krw_per_kg` 는 원장이 **금액 ÷ 수량**
+#    으로 만든다. 금액을 받으면 안 나뉘는 날 단가가 소수로 남고(실측 480kg · 275,000원 →
+#    572.916667), 원장에서 반올림하면 DB CHECK 가 40원 차이로 거부한다. 입구가 단가를
+#    받으면 금액이 수량 × 단가라 그 나눗셈이 **언제나 적은 단가 그대로** 떨어진다.
+
+
+def _단가기록(*, 단가: int = 5400) -> dict[str, Any]:
+    """1회차 단가만 선정안(5,000)과 다른 기록."""
+    body = _본문()
+    body["legs"][0]["unit_price_krw"] = 단가
+    return body
+
+
+def test_기록_금액은_수량_곱하기_단가다(세상: dict[str, Any]) -> None:
+    """① 저장된 `master_purchase_records.amount_krw` 가 수량 × 단가다."""
+    _기록한다(세상, _단가기록())
+
+    행1, 행2 = 세상["store"]
+    assert (행1["quantity_kg"], 행1["amount_krw"]) == (100, 540000), "100kg × 5,400"
+    assert (행2["quantity_kg"], 행2["amount_krw"]) == (200, 1000000), "200kg × 5,000"
+
+
+def test_그_금액이_약정_사본과_전이로_그대로_간다(세상: dict[str, Any]) -> None:
+    """② 🔴 **금액의 주인은 여전히 하나다** — 입구에서 난 값이 아래로 그대로 흐른다."""
+    _, 전이 = _기록한다(세상, _단가기록())
+
+    commitment, _ = 전이.calls[0]
+    assert [leg.amount_krw for leg in commitment.arrival_schedule] == [540000, 1000000]
+    assert commitment.total_amount_krw == 1540000
+
+    [사본] = 세상["reval"].scenarios
+    assert 사본["split_plan"][0]["amount_krw"] == 540000
+    assert 사본["total_amount_krw"] == 1540000
+    assert 사본["payment_schedule"][0]["amount_krw"] == 540000
+
+
+def test_원장_단가가_정수로_떨어지고_Line_금액과_맞는다(세상: dict[str, Any]) -> None:
+    """⑤ 🔴 **이 판의 이유다.** 기록 약정을 매입 원장 계산에 그대로 태워서 잰다.
+
+    ```text
+    DB CHECK  |line_amount_krw − quantity_kg × unit_price_krw_per_kg| < 0.1
+    ```
+
+    ⚠️ **DB 를 안 탄다** — `build_purchase_rows` 는 순수 계산이다.
+    """
+    from decimal import Decimal
+
+    from app.master import ledger
+    from app.master.transition import purchase_id_for
+
+    _, 전이 = _기록한다(세상, _단가기록())
+    commitment, _ = 전이.calls[0]
+
+    rows = ledger.build_purchase_rows(
+        commitment,
+        purchase_ids={
+            leg.seq: purchase_id_for(commitment, leg.seq) for leg in commitment.arrival_schedule
+        },
+        sim_run_id=실행축,
+    )
+
+    assert [row.unit_price_krw_per_kg for row in rows] == [Decimal(5400), Decimal(5000)]
+    for row in rows:
+        assert row.unit_price_krw_per_kg == row.unit_price_krw_per_kg.to_integral_value(), (
+            f"원장 단가가 정수가 아니다: {row.unit_price_krw_per_kg}"
+        )
+        assert row.line_amount_krw == row.quantity_kg * row.unit_price_krw_per_kg
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1135,10 +1254,10 @@ def test_조회가_선정안_기본값과_대기_상태를_낸다(세상: dict[s
 
     assert out.status == "AWAITING_PURCHASE_RECORD"
     assert out.plan.grade == "상"
-    assert [(leg.seq, leg.qty_kg, leg.amount_krw) for leg in out.plan.legs] == [
-        (1, 100.0, 500000.0),
-        (2, 200.0, 1000000.0),
-    ]
+    assert [(leg.seq, leg.qty_kg, leg.unit_price_krw, leg.amount_krw) for leg in out.plan.legs] == [
+        (1, 100.0, 5000.0, 500000.0),
+        (2, 200.0, 5000.0, 1000000.0),
+    ], "폼 기본 단가는 안의 sourcing_plan[].grade_unit_price 에서 온다"
     assert out.record is None
 
 
@@ -1155,6 +1274,32 @@ def test_조회가_기록과_반영_상태를_낸다(
     assert out.status == "APPLIED"
     assert out.record is not None and out.record.grade == "특"
     assert out.record.legs[0].qty_kg == 90.0
+    # ★ 기록 단가는 `amount_krw ÷ quantity_kg` 다 — 표에 칸을 더하지 않았다 (DDL 없음).
+    #   입력이 단가라 486,000 ÷ 90 이 **정확히** 5,400 으로 돌아온다.
+    assert (out.record.legs[0].unit_price_krw, out.record.legs[0].amount_krw) == (5400.0, 486000.0)
+
+
+def test_안에_단가가_없으면_폼_기본_단가는_비어_있다(세상: dict[str, Any]) -> None:
+    """⑥ 🔴 **지어내지 않는다.** 금액 ÷ 수량으로 채우면 안이 적지 않은 값이 폼에 앉는다."""
+    del 세상["row"]["response_payload"]["scenarios"][0]["sourcing_plan"][0]["grade_unit_price"]
+
+    out = pr.get_purchase_record(업무키)
+
+    assert [leg.unit_price_krw for leg in out.plan.legs] == [None, None]
+    assert [leg.amount_krw for leg in out.plan.legs] == [500000.0, 1000000.0], "금액은 그대로 온다"
+
+
+def test_등급_줄이_여럿이면_폼_기본_단가는_비어_있다(세상: dict[str, Any]) -> None:
+    """★ 줄마다 단가가 갈리면 「이 회차의 단가」가 하나로 정해지지 않는다 — 집지 않는다."""
+    안 = 세상["row"]["response_payload"]["scenarios"][0]
+    안["sourcing_plan"] = [
+        {"market": "가락", "grade": "상", "qty_kg": 200, "grade_unit_price": 5000},
+        {"market": "가락", "grade": "특", "qty_kg": 100, "grade_unit_price": 5500},
+    ]
+
+    out = pr.get_purchase_record(업무키)
+
+    assert [leg.unit_price_krw for leg in out.plan.legs] == [None, None]
 
 
 def test_자동_승인_조회는_기록_대상이_아니다(세상: dict[str, Any]) -> None:
