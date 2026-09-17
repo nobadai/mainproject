@@ -443,7 +443,8 @@ def _records(as_of: date, sim_run_id: str | None) -> dict[tuple[str, str], Recor
 def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], str],
           request_id: str, sim_run_id: str | None = None, *,
           run_id: Any = None,
-          records: dict[tuple[str, str], RecordedTotals] | None = None) -> Plan | None:
+          records: dict[tuple[str, str], RecordedTotals] | None = None,
+          decided_requests: frozenset[str] = frozenset()) -> Plan | None:
     label = str(scenario.get("label") or "")
     sourcing = _sourcing(scenario.get("sourcing_plan") or [])
     if sourcing is None:
@@ -477,7 +478,13 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
             for r in scenario.get("rationale") or []
         ],
         risks=[str(x) for x in scenario.get("risks") or []],
-        pending=decision is None,
+        #  🔴 **「대기」는 안이 아니라 요청(품목·날)의 사실이다** (2026-09-17).
+        #     전에는 `decision is None` — (요청, 안 이름) 한 쌍으로만 봐서, 같은 요청에서
+        #     보수안이 승인되면 **고르지 않은 기본안이 「승인 대기」로 남았다.** 매입 탭 통계와
+        #     대시보드 배지가 그 수를 셌다 (REH-0914 08-31 · 3건인데 기다리는 것은 양파 1건).
+        #  ★ 낱말(`state` 「후보」)은 안 바꾼다 — 주인은 `plan_state.py` 다. 형제 안은
+        #    「후보」 그대로이고, **기다리는 수에서만** 빠진다.
+        pending=request_id not in decided_requests,
         approved=decision == "APPROVE",
         #  🔴 **`approved` 하나로는 못 가른다** — 승인만 된 안과 실매입까지 적은 안이
         #     둘 다 참이다. 낱말과 판정의 주인은 `app/api/plan_state.py` 하나이고
@@ -710,6 +717,9 @@ def build(
         for row in data["decisions"]
         if row["scenario_label"]
     }
+    #  ★ 결정이 난 요청. `decided` 와 **같은 행**에서 뽑는다 — 무엇을 결정으로 치는지
+    #    (안 이름이 붙은 행)가 두 곳에서 갈리면 「승인됨」과 「대기 아님」이 따로 논다.
+    decided_requests = frozenset(request_id for request_id, _label in decided)
     chosen, picked_text = _pick(runs, sim_run_id)
     #  ★ 안과 **같은 실행 · 같은 날**의 실매입 기록. 열쇠는 `(품목, 안 이름)`.
     records = _records(as_of, sim_run_id)
@@ -725,6 +735,7 @@ def build(
                 #     그때 «못 읽었다» 로 두는 것이 맞다 — 지어내지 않는다.
                 run_id=run.get("run_id"),
                 records=records,
+                decided_requests=decided_requests,
             )
             if plan is None:
                 skipped += 1

@@ -61,7 +61,11 @@ class Plan(BaseModel):
     payments: Table = Field(description="언제 얼마 내나")
     reasons: list[Reason] = Field(description="이 안을 왜 냈나. 여섯 갈래를 다 채운다")
     risks: list[str] = Field(description="걸리는 것. 비어 있으면 안 적는다")
-    pending: bool = Field(description="아직 사람이 안 고른 안인가")
+    #  🔴 **요청(품목·날) 단위다** (2026-09-17). 같은 요청에서 다른 안이 결정되면 이 안도
+    #     대기가 아니다 — 「후보」 낱말(`state`)은 그대로 둔다.
+    pending: bool = Field(
+        description="이 안의 요청(품목·날)에 아직 결정이 없나. 형제 안이 결정되면 거짓이다"
+    )
     approved: bool = Field(default=False, description="이미 승인된 안인가")
     #  🔴 **`approved` 를 안 지운다** — 쓰는 화면이 있다 (`console/purchase/page.tsx`).
     #     `state` 는 그것이 못 가르는 것(승인 vs 실매입 기록됨)을 마저 가른다.

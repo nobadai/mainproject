@@ -19,6 +19,7 @@
     ③ state 네 갈래가 실제 상태를 가린다 (후보 · 승인됨 · 매입 기록됨)
     ④ approved 가 그대로 있다 — 쓰는 화면이 있다
     ⑤ 상태 어휘의 주인이 하나다 (`app/api/plan_state.py`) — 대시보드와 같은 것
+    ⑥ 「승인 대기」는 요청(품목·날) 단위다 — 형제 안이 결정되면 대기가 아니다 (09-17)
 
 🔴 **실 DB 에 안 닿는다.** `_read` 와 실매입 기록 조회를 대역으로 세우고, 「읽어 온 값을
    어떻게 싣는가」만 본다.
@@ -255,7 +256,9 @@ def test_approved_가_그대로_있다(tab):
     ).plans
 
     보수, 기본 = plans
-    assert 보수.approved is False and 보수.pending is True
+    #  🔴 `보수.pending` 이 `True` 였다 — 같은 요청에서 기본안이 승인됐는데 보수안을
+    #     「승인 대기」로 셌다 (2026-09-17 정정). 대기는 요청 단위다 · ⑥ 참조.
+    assert 보수.approved is False and 보수.pending is False
     assert 기본.approved is True and 기본.pending is False
 
 
@@ -281,3 +284,66 @@ def test_매입_탭이_내는_낱말은_그_넷_안이다(tab):
 
     assert [p.state for p in plans] == ["후보", "승인됨", "매입 기록됨"]
     assert {p.state for p in plans} <= set(plan_state.PLAN_STATES)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ⑥  「승인 대기」는 요청(품목·날) 단위다 (2026-09-17)
+#
+#  전에는 (요청, 안 이름) 한 쌍으로만 봐서, 같은 요청에서 보수안이 승인되면 고르지 않은
+#  기본안이 「승인 대기」로 남았다. 실 DB (REH-0914 · 08-31) 에서 매입 탭 통계와 대시보드
+#  배지가 3건을 셌는데, 기다리는 것은 양파 1건이었다.
+#
+#  🔴 낱말은 안 바꾼다 — 형제 안은 「후보」 그대로이고 **대기 수에서만** 빠진다.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _waiting(tabout) -> float | None:
+    return next(s for s in tabout.stats if s.label == "승인 대기").raw
+
+
+def test_같은_요청에_결정이_있으면_형제_안도_대기가_아니다(tab):
+    tabout = tab(
+        data=_data(
+            [_run("REQ-A", _scenario("보수"), _scenario("기본"))],
+            [_approval("REQ-A", "보수")],
+        )
+    )
+    보수, 기본 = tabout.plans
+
+    assert (보수.pending, 기본.pending) == (False, False)
+    assert _waiting(tabout) == 0
+    #  ★ 낱말의 주인은 `plan_state.py` 다 — 여기서 「후보」를 딴 말로 바꾸지 않는다
+    assert (보수.state, 기본.state) == ("승인됨", "후보")
+
+
+def test_결정이_없으면_그대로_대기다(tab):
+    """★ 규칙 8 — 수를 상수와 대 보지 않는다. **결정 하나를 넣고 빼서** 수가 따라오는지 본다."""
+    runs = [
+        _run("REQ-배추", _scenario("보수"), _scenario("기본")),
+        _run("REQ-양파", _scenario("공격"), item="양파"),
+    ]
+
+    결정전 = tab(data=_data(runs))
+    결정후 = tab(data=_data(runs, [_approval("REQ-배추", "보수")]))
+
+    assert [p.pending for p in 결정전.plans] == [True, True, True]
+    assert [p.pending for p in 결정후.plans] == [False, False, True]
+    #  ★ 결정이 난 요청의 안 둘이 **같이** 빠지고, 결정 없는 양파는 그대로 남는다
+    assert (_waiting(결정전), _waiting(결정후)) == (3, 1)
+
+
+def test_대기_판정과_승인_판정은_같은_결정_행에서_나온다(tab):
+    """🔴 무엇을 「결정」으로 치는지가 두 곳에서 갈리면 「승인됨」과 「대기 아님」이 따로 논다.
+
+    `decided` 는 **안 이름이 붙은 행**만 본다. 안 이름 없는 행(`REQUEST_CHANGE`)만 있는
+    요청을 대기에서 빼면, 그 요청의 안은 「후보」인데 아무도 기다리지 않는 것으로 셈된다.
+    """
+    tabout = tab(
+        data=_data(
+            [_run("REQ-A", _scenario("보수"))],
+            [{"request_id": "REQ-A", "decision": "REQUEST_CHANGE", "scenario_label": None}],
+        )
+    )
+    (plan,) = tabout.plans
+
+    assert plan.state == "후보"
+    assert plan.pending is True
