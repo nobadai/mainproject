@@ -163,7 +163,11 @@ def _read(
             " i.unit_price_krw_per_kg, i.line_amount_krw"
             " FROM {} p JOIN {} i USING (purchase_id)"
             " WHERE p.purchase_type = 'MASTER_APPROVAL' AND p.purchase_date <= %(as_of)s"
-            " ORDER BY p.purchase_date, i.purchase_item_id"
+            #  🔵 **최신순이다** (2026-09-17). 오래된 순이면 오늘 산 줄이 수백 줄 맨 아래에
+            #     깔린다 (REH-0914 08-31 · 291줄). 같은 날 안에서도 뒤집어 **통째로 역순**이다.
+            #  ⚠️ 순서에 기대는 계산은 없다 — 이번 주 매입액 · 입고 예정은 합이고, 도착일 맞춤은
+            #     `arrivals` 쪽 순서를 쓴다. 화면이 자르는 것은 페이지뿐이다(`page.tsx`).
+            " ORDER BY p.purchase_date DESC, i.purchase_item_id DESC"
         ).format(table("purchases"), table("purchase_items")),
         {"as_of": as_of},
     )
