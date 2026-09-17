@@ -418,6 +418,42 @@ def test_13b_비ACTIVE_Lot_은_후보가_아니다(conn: psycopg.Connection) -> 
     assert 후보 == ()
 
 
+def test_13c_기준일_뒤에_들어온_Lot_은_후보가_아니다(conn: psycopg.Connection) -> None:
+    """🔴 **아직 안 들어온 물건에서는 뺄 수 없다 (#812 · #818).**
+
+    종전에는 `_available_lots` 가 `received_at` 을 안 봐서 **기준일보다 뒤에 입고된
+    Lot** 이 후보로 올라왔다. 신선도는 `as_of` 기준이라 경과일이 음수가 되고,
+    `한계 − 경과` 가 **한계보다 큰 값**으로 커진다 (실측 화면 「배추 10일 한계 ·
+    신선도 잔여 188일」).
+
+    ★ 이 판은 **값을 깎아서**가 아니라 **모집단으로** 막혔는지를 본다 — 미래 Lot 을
+      후보에서 빼면 한계를 넘는 신선도는 나올 자리가 없다.
+    """
+    _lot(conn, "LOT-지난", qty="100", received_at=date(2026, 1, 1))
+    _lot(conn, "LOT-그날", qty="100", received_at=AS_OF)
+    _lot(conn, "LOT-미래", qty="100", received_at=AS_OF + timedelta(days=1))
+
+    후보 = recommend_fefo_candidates(conn, sim_run_id=SIM_RUN_ID, item_id=ITEM_ID, as_of=AS_OF)
+
+    assert [c.lot_id for c in 후보] == ["LOT-지난", "LOT-그날"]
+    #  한계 30일(fixture)을 넘는 신선도는 미래 Lot 에서만 나온다.
+    assert all(c.remaining_freshness_days is not None for c in 후보)
+    assert max(c.remaining_freshness_days for c in 후보) <= 30
+
+
+def test_13d_미래_Lot_은_품목_가용에도_안_선다(conn: psycopg.Connection) -> None:
+    """🔴 후보에서만 빼면 안 된다 — `item_free_stock_qty` 도 같은 모집단을 봐야 한다.
+
+    둘이 갈리면 *"예약은 잡히는데 붙일 Lot 이 없는"* 예약이 생긴다.
+    """
+    _lot(conn, "LOT-미래", qty="100", received_at=AS_OF + timedelta(days=1))
+
+    결과 = _부분예약(conn, required="100")
+
+    assert 결과.applied is False
+    assert 결과.reserved_qty_kg == Decimal(0)
+
+
 # ── 14~20. Allocation ───────────────────────────────────────────────────
 
 
