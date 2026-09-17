@@ -16,7 +16,9 @@ ML 파이프라인은 **창고를 두 개** 쓴다.
 """
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -102,10 +104,72 @@ def get_source_connection() -> psycopg.Connection[dict[str, Any]]:
     )
 
 
+#: 읽기 한 판이 빌려 쓰는 커넥션 자리. **창고가 둘이라 칸도 둘**이다
+#: (`service` · `source`) — 섞으면 서비스 질의가 원본 창고로 간다.
+_READ_SCOPE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "ml_read_connection_scope", default=None
+)
+
+
+@contextmanager
+def read_connection_scope() -> Iterator[None]:
+    """이 블록 안의 **SELECT 들이 창고마다 커넥션 하나를 나눠 쓴다** (2026-09-17).
+
+    ```text
+    종전   fetch_all 한 번 = psycopg.connect 한 번   예측 한 판에 4개
+    지금   창고마다 처음 한 번만 연다               서비스 1 · 원본 1
+    ```
+
+    🔴 **창고를 섞지 않는다.** `source=True` 와 `source=False` 는 **다른 데이터베이스**라
+       커넥션 칸을 따로 둔다 (`service` · `source`). 한 칸으로 두면 서비스 조회가
+       원본 창고에 가서 «표가 없다» 가 된다.
+
+    🔴 **읽기에만 건다** · **질의가 터지면 그 커넥션을 버린다** · **스레드마다 따로다.**
+       세 규칙의 이유는 `app/finance/db.py::read_connection_scope` 에 적어 두었다.
+
+    ★ 범위를 안 열면 아무것도 안 바뀐다.
+    """
+    holder: dict[str, Any] = {}
+    token = _READ_SCOPE.set(holder)
+    try:
+        yield
+    finally:
+        _READ_SCOPE.reset(token)
+        for slot in ("service", "source"):
+            borrowed = holder.pop(slot, None)
+            if borrowed is not None:
+                borrowed.close()
+
+
+@contextmanager
+def _read_cursor(*, source: bool) -> Iterator[Any]:
+    """읽기 커서 하나. 범위가 열려 있으면 **그 창고의** 커넥션을 빌린다."""
+    connect = get_source_connection if source else get_connection
+    holder = _READ_SCOPE.get()
+    if holder is None:
+        with connect() as connection, connection.cursor() as cursor:
+            yield cursor
+        return
+    slot = "source" if source else "service"
+    connection = holder.get(slot)
+    if connection is None:
+        connection = connect()
+        holder[slot] = connection
+    try:
+        with connection.cursor() as cursor:
+            yield cursor
+    except Exception:
+        holder.pop(slot, None)
+        try:
+            connection.close()
+        except Exception:  # noqa: BLE001,S110  이미 끊긴 커넥션은 조용히 버린다 —
+            pass  #  닫다가 난 오류를 올리면 **진짜 오류(아래 raise)를 덮는다**
+        raise
+
+
 def fetch_all(query: Query, params: Params = None, *, source: bool = False) -> list[dict[str, Any]]:
     """다건 조회. ``source=True`` 면 원본 창고에서 읽는다."""
-    connect = get_source_connection if source else get_connection
-    with connect() as connection, connection.cursor() as cursor:
+    with _read_cursor(source=source) as cursor:
         cursor.execute(query, params)
         return cursor.fetchall()
 
@@ -114,8 +178,7 @@ def fetch_one(
     query: Query, params: Params = None, *, source: bool = False
 ) -> dict[str, Any] | None:
     """단건 조회. ``source=True`` 면 원본 창고에서 읽는다."""
-    connect = get_source_connection if source else get_connection
-    with connect() as connection, connection.cursor() as cursor:
+    with _read_cursor(source=source) as cursor:
         cursor.execute(query, params)
         return cursor.fetchone()
 

@@ -57,7 +57,10 @@ Header   logistics_runtime_fixture.*_status      «그 축을 확인했나» 만
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import threading
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -89,6 +92,7 @@ __all__ = [
     "receivable_from",
     "record_schedule",
     "schedule_fact_dates_at",
+    "schedule_view_scope",
 ]
 
 
@@ -552,10 +556,74 @@ class InboundScheduleView:
         )
 
 
+class _ViewScope:
+    """한 요청 안에서 `load_schedule_views` 가 낸 답을 들고 있는 자리.
+
+    🔴 **열쇠마다 자물쇠가 하나씩 있다.** 한 화면이 물류를 **동시에** 두 갈래로 읽으면
+       (대시보드가 그렇다) 둘이 같은 순간에 «없다» 를 보고 **둘 다 질의를 보낸다** —
+       그러면 안 묶은 것과 같다. 먼저 온 쪽이 자물쇠를 잡고 읽고, 뒤에 온 쪽은 기다렸다
+       담긴 답을 집는다.
+
+    ⚠️ **답이 안 담기는 경우도 있다** — 먼저 온 쪽이 예외로 터진 때다. 그때 뒤 쪽은
+       자기가 다시 읽는다. 실패를 담아 두면 한 번의 실패가 그 판 전체를 죽인다.
+    """
+
+    def __init__(self) -> None:
+        self._answers: dict[tuple[str, date], tuple[InboundScheduleView, ...]] = {}
+        self._guard = threading.Lock()
+        self._locks: dict[tuple[str, date], threading.Lock] = {}
+
+    def lock_for(self, key: tuple[str, date]) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())
+
+    def get(self, key: tuple[str, date]) -> tuple[InboundScheduleView, ...] | None:
+        return self._answers.get(key)
+
+    def put(self, key: tuple[str, date], views: tuple[InboundScheduleView, ...]) -> None:
+        self._answers[key] = views
+
+
+#: 한 요청 안에서 `load_schedule_views` 가 낸 답. **범위 밖에서는 `None` 이고,
+#: 그때는 종전 그대로 매번 읽는다.**
+_VIEW_SCOPE: ContextVar[_ViewScope | None] = ContextVar(
+    "logistics_schedule_view_scope", default=None
+)
+
+
+@contextmanager
+def schedule_view_scope() -> Iterator[None]:
+    """이 블록 안에서 **같은 `(sim_run_id, as_of)` 일정 조회를 한 번만** 한다.
+
+    🔴 **읽기 전용 한 판에만 쓴다.** 대시보드 화면이 물류를 두 갈래로 읽어
+       (`logistics.query.build` · `logistics.query.dashboard_stock`) 같은 289행 질의가
+       한 요청에 **두 번** 나갔다 (실측 2026-09-17 · 0.145s + 0.139s). 두 갈래는 같은
+       날 · 같은 실행을 묻고 그 사이에 아무것도 쓰지 않으므로 답이 같다.
+
+    ⚠️ **쓰는 흐름(도착 처리 · 승인 · 취소)을 이 범위로 감싸면 안 된다.** 취소가
+       들어간 뒤에도 옛 목록이 나온다 — `inbound_reconciliation` 경로가 그렇다.
+
+    ★ **스레드를 건너 나눠 쓸 수 있다.** `ContextVar` 는 새 스레드에 저절로 따라가지
+      않으므로, 부르는 쪽이 `contextvars.copy_context()` 로 떠서 넘긴다 —
+      `app/api/dashboard/query.py` 가 그렇게 한다. 나눠 쓰는 것은 **답(불변 튜플)**
+      뿐이고 커넥션은 각자 자기 것을 쓴다.
+
+    ★ 범위를 안 열면 아무것도 안 바뀐다.
+    """
+    token = _VIEW_SCOPE.set(_ViewScope())
+    try:
+        yield
+    finally:
+        _VIEW_SCOPE.reset(token)
+
+
 def load_schedule_views(
     conn: Any, *, sim_run_id: str, as_of: date
 ) -> tuple[InboundScheduleView, ...]:
     """`as_of` 시점에 살아 있던 일정 + 그날까지의 계보. **한 질의다.**
+
+    ★ `schedule_view_scope()` 안이면 같은 `(sim_run_id, as_of)` 는 **처음 한 번만**
+      읽는다. 범위 밖이면 종전 그대로 매번 읽는다.
 
     ```text
     created_as_of <= as_of                              그날 이미 장부에 서 있었다
@@ -586,6 +654,26 @@ def load_schedule_views(
 
     :raises ScheduleReferenceBroken: 일정의 매입 줄·품목 참조가 깨졌을 때.
     """
+    scope = _VIEW_SCOPE.get()
+    if scope is None:
+        return _load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+    key = (sim_run_id, as_of)
+    #  ★ 자물쇠를 잡고 **다시 본다.** 기다리는 동안 앞사람이 담아 놨을 수 있다.
+    with scope.lock_for(key):
+        answer = scope.get(key)
+        if answer is not None:
+            return answer
+        views = _load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+        #  ★ 답이 선 **뒤에** 담는다 — 위에서 터지는 날에는 아무것도 안 담겨서,
+        #    같은 범위의 다음 호출이 자기가 다시 읽는다.
+        scope.put(key, views)
+        return views
+
+
+def _load_schedule_views(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[InboundScheduleView, ...]:
+    """질의 한 번. **`load_schedule_views` 의 알맹이이고 범위를 모른다.**"""
     schema = _schema()
     rows = _rows(
         conn,
@@ -629,7 +717,7 @@ def load_schedule_views(
         {"sim": sim_run_id, "as_of": as_of},
     )
     _reject_broken_reference(rows, sim_run_id=sim_run_id, as_of=as_of)
-    return tuple(
+    views = tuple(
         InboundScheduleView(
             inbound_id=row["inbound_id"],
             sim_run_id=row["sim_run_id"],
@@ -645,6 +733,7 @@ def load_schedule_views(
         )
         for row in rows
     )
+    return views
 
 
 def _reject_broken_reference(
