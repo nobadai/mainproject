@@ -146,6 +146,53 @@ export function lotAction(sellPriority: unknown, disposalCandidate: unknown): st
   return "특이사항 없음";
 }
 
+/** 건수 한 칸. 숫자가 아니면 0 으로 세지 않고 `null`(모름)로 돌려준다. */
+function count(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/**
+ * 「입고일 + 품목」 묶음의 **재고 처리 결과** → 사람 말.
+ *
+ * 🔴 **완료의 형태가 둘이다** (#805). 재고가 선 완료(`stock_applied`)와 수용 0 으로
+ *    «만들 재고가 없어» 끝난 완료(`settled_without_stock`)는 둘 다 정상 완료다.
+ *    종전처럼 「재고 반영 0 / 1건」 한 칸만 적으면 뒤쪽이 **미처리 건으로 잘못 읽힌다.**
+ *    그래서 「아직」·「실패」·「미처리」라는 말을 이 칸에 쓰지 않는다.
+ *
+ * 🔴 **화면이 판정하지 않는다.** 네 건수는 Backend `_logistics_receipt_rollup` 이
+ *    정본 계약값(`stock_applied` · `settled_without_stock`)을 그대로 센 것이고,
+ *    여기서는 더하고 빼서 문장으로 옮기기만 한다.
+ *
+ * ⚠️ 「처리 중」은 **「재고 반영 대기」가 아니다.** 두 완료 형태 중 어느 쪽에도 아직
+ *    닿지 않았다는 사실뿐이라, 검수 전일 수도 있다 — 어느 단계인지는 옆 「검수 결과」
+ *    칸이 말한다. 여기서 단계를 단정하지 않는다.
+ *
+ * 🔴 「확인 못 함」(`settled_unknown_count`)은 **0 건이 아니라 모름이다.** 그날 입고
+ *    일정을 못 읽어 두 완료 형태를 가릴 수 없었던 건이다.
+ */
+export function stockApplyText(row: {
+  receipt_count?: unknown;
+  stock_applied_count?: unknown;
+  settled_without_stock_count?: unknown;
+  settled_unknown_count?: unknown;
+}): string {
+  const total = count(row.receipt_count);
+  if (total === null) return "—";
+  const applied = count(row.stock_applied_count) ?? 0;
+  const settled = count(row.settled_without_stock_count) ?? 0;
+  const unknown = count(row.settled_unknown_count) ?? 0;
+
+  const parts: string[] = [];
+  if (applied > 0) parts.push(`재고 반영 완료 ${applied}건`);
+  if (settled > 0) parts.push(`반영할 재고 없음 ${settled}건`);
+  if (unknown > 0) parts.push(`확인 못 함 ${unknown}건`);
+  //  남은 건 = 전체 − 두 완료 − 모름. 음수가 나오면(계약이 어긋난 경우) 지어내지 않는다.
+  const rest = total - applied - settled - unknown;
+  if (rest > 0) parts.push(`처리 중 ${rest}건`);
+  return parts.length === 0 ? "—" : parts.join(" · ");
+}
+
 /** 검수 결과 묶음 → 사람 말. 섞여 있으면 **섞여 있다고 그대로 보여 준다.** */
 export function verdictText(verdicts: unknown, unknownCount: unknown): string {
   const list = Array.isArray(verdicts) ? verdicts : [];

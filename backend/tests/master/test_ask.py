@@ -825,7 +825,17 @@ def _logistics_item(item_id, name, *, on_hand, available, reserved, unallocated=
     )
 
 
-def _logistics_receipt(receipt_id, item, arrived, *, ordered, accepted=None, verdict="PASS"):
+def _logistics_receipt(
+    receipt_id,
+    item,
+    arrived,
+    *,
+    ordered,
+    accepted=None,
+    verdict="PASS",
+    stock_applied=True,
+    settled_without_stock=None,
+):
     from datetime import date
     from decimal import Decimal
 
@@ -848,7 +858,8 @@ def _logistics_receipt(receipt_id, item, arrived, *, ordered, accepted=None, ver
         inspected_qty_kg=None if accepted is None else Decimal(accepted),
         lot_id=f"LOT-{receipt_id}",
         in_move_id=f"MOVE-{receipt_id}",
-        stock_applied=True,
+        stock_applied=stock_applied,
+        settled_without_stock=settled_without_stock,
     )
 
 
@@ -1139,6 +1150,212 @@ def test_logistics_report_receipt_rollup_keeps_none_total(logistics_report_stubs
     assert baechu["ordered_qty_kg"] == "70"
     # 합격 수량을 못 읽은 건이 있으므로 합계도 못 읽은 것이다 (0 이 아니다).
     assert baechu["accepted_qty_kg"] is None
+
+
+def test_logistics_report_rollup_counts_both_kinds_of_completion(logistics_report_stubs, monkeypatch):
+    """🔴 **완료의 형태가 둘이다** (#805) — 「반영할 재고 없음」도 정상 완료다.
+
+    수용 0 으로 끝난 건을 `stock_applied` 한 칸으로만 세면 보고서에서 「재고 반영
+    0 / 1건」으로 보여 **미처리 건으로 잘못 읽힌다.**
+    """
+    from datetime import date
+
+    from app.logistics import console_service
+    from app.logistics.schemas import ConsoleArrivalSummary, ConsoleInboundResponse
+
+    monkeypatch.setattr(
+        console_service,
+        "get_inbound_console",
+        lambda **_kwargs: ConsoleInboundResponse(
+            sim_run_id="SIM-1",
+            as_of=date(2026, 9, 3),
+            in_transit_status="UNRESOLVED",
+            in_transit=None,
+            receipts=[
+                # 재고가 선 완료.
+                _logistics_receipt("R-APPLIED", "무", "2026-09-02", ordered=100, accepted=100),
+                # 🔴 수용 0 으로 재고 없이 끝난 완료 — 「아직」이 아니다.
+                _logistics_receipt(
+                    "R-SETTLED",
+                    "무",
+                    "2026-09-02",
+                    ordered=50,
+                    accepted=0,
+                    stock_applied=False,
+                    settled_without_stock=True,
+                ),
+                # 두 완료 어느 쪽에도 아직 닿지 않은 건.
+                _logistics_receipt(
+                    "R-WORKING",
+                    "무",
+                    "2026-09-02",
+                    ordered=20,
+                    accepted=20,
+                    stock_applied=False,
+                    settled_without_stock=False,
+                ),
+                # 🔴 `None` 은 「모른다」다 — `False` 가 아니다.
+                _logistics_receipt(
+                    "R-UNKNOWN",
+                    "무",
+                    "2026-09-02",
+                    ordered=30,
+                    accepted=30,
+                    stock_applied=False,
+                    settled_without_stock=None,
+                ),
+            ],
+            arrival_summary=ConsoleArrivalSummary(
+                source_status="UNRESOLVED",
+                due_count=0,
+                blocked_count=0,
+                not_due_count=0,
+                unresolved_count=0,
+                overdue_count=0,
+            ),
+        ),
+    )
+
+    rollup = _logistics_facts()["inbound"]["period_receipt_rollup"]
+    row = next(r for r in rollup if r["item"] == "무")
+    assert row["receipt_count"] == 4
+    assert row["stock_applied_count"] == 1
+    assert row["settled_without_stock_count"] == 1
+    # 🔴 「0건」과 「모름」을 가른다 — 모름을 미처리로 접지 않는다.
+    assert row["settled_unknown_count"] == 1
+
+
+def test_logistics_report_rollup_does_not_rejudge_settlement(logistics_report_stubs, monkeypatch):
+    """🔴 보고서가 완료 여부를 **다시 판정하지 않는다.**
+
+    `accepted_qty_kg == 0` 이어도 정본이 「아니다」라고 하면 아닌 것이다. 여기서
+    수량을 보고 되재면 콘솔과 보고서가 경계에서 갈린다.
+    """
+    from datetime import date
+
+    from app.logistics import console_service
+    from app.logistics.schemas import ConsoleArrivalSummary, ConsoleInboundResponse
+
+    monkeypatch.setattr(
+        console_service,
+        "get_inbound_console",
+        lambda **_kwargs: ConsoleInboundResponse(
+            sim_run_id="SIM-1",
+            as_of=date(2026, 9, 3),
+            in_transit_status="UNRESOLVED",
+            in_transit=None,
+            receipts=[
+                # 수용 0 이지만 정본은 settled 가 아니라고 말한다.
+                _logistics_receipt(
+                    "R-ZERO",
+                    "무",
+                    "2026-09-02",
+                    ordered=50,
+                    accepted=0,
+                    stock_applied=False,
+                    settled_without_stock=False,
+                ),
+            ],
+            arrival_summary=ConsoleArrivalSummary(
+                source_status="UNRESOLVED",
+                due_count=0,
+                blocked_count=0,
+                not_due_count=0,
+                unresolved_count=0,
+                overdue_count=0,
+            ),
+        ),
+    )
+
+    row = next(r for r in _logistics_facts()["inbound"]["period_receipt_rollup"] if r["item"] == "무")
+    assert row["settled_without_stock_count"] == 0
+    assert row["settled_unknown_count"] == 0
+
+
+def test_logistics_report_available_range_uses_only_days_with_data(logistics_report_stubs):
+    """🔴 요청 기간을 실제 데이터 기간으로 **복사하지 않는다.**
+
+    시뮬레이션이 안 연 날은 `null` 이고 「0kg」이 아니다. 그런 날은 범위 계산에서 빠져야
+    공용 머리말이 「요청 기간 vs 사용 가능 데이터」를 사실대로 적는다.
+    """
+    facts = _logistics_facts(start="2026-09-01", end="2026-09-03")
+    trend = facts["trend"]
+    covered = [row["date"] for row in trend if row["on_hand_qty_kg"] is not None]
+
+    assert facts["available_start_date"] == covered[0]
+    assert facts["available_end_date"] == covered[-1]
+    # 값이 없는 날은 범위 밖이다 — 요청 기간 양끝을 그대로 베끼지 않는다.
+    assert all(
+        facts["available_start_date"] <= row["date"] <= facts["available_end_date"]
+        for row in trend
+        if row["on_hand_qty_kg"] is not None
+    )
+
+
+def test_logistics_report_available_range_is_none_when_no_day_is_open(
+    logistics_report_stubs, monkeypatch
+):
+    """추이가 전부 `null` 이면 범위는 `None` 이다 — 0 일짜리 범위를 지어내지 않는다."""
+    from app.logistics import historical_repository
+
+    monkeypatch.setattr(historical_repository, "snapshot_days_between", lambda *a, **k: set())
+
+    facts = _logistics_facts()
+    assert all(row["on_hand_qty_kg"] is None for row in facts["trend"])
+    assert facts["available_start_date"] is None
+    assert facts["available_end_date"] is None
+    # 🔴 물류에는 권위 있는 데이터 모드가 없다 — 문자열을 지어내지 않는다.
+    assert facts["data_mode"] is None
+
+
+def test_logistics_report_takes_the_period_the_user_picked_on_screen(monkeypatch):
+    """화면에서 **직접 고른 날짜**가 물류 보고서 기간까지 실제로 닿는가.
+
+    🔴 재무·판매만 받던 자리라, 물류는 사용자가 기간을 골라도 무시되고 있었다.
+    """
+    from datetime import date
+
+    from app.master import ask_service
+    from app.master.ask_schemas import AskRequest
+
+    seen: dict[str, object] = {}
+
+    def _record(**kwargs):
+        seen.update(kwargs)
+        return {"kind": "LOGISTICS"}
+
+    monkeypatch.setattr(ask_service, "render_logistics_chat_report", _record)
+    result = ask_service.ask(
+        AskRequest(
+            utterance="재고·물류 보고서 만들어줘",
+            as_of=AS_OF,
+            policy_version="v1.3",
+            date_from=date(2026, 6, 1),
+            date_to=date(2026, 6, 10),
+        ),
+        service=svc(
+            intent_json(
+                action="DOMAIN_ACTION",
+                domain_action="LOGISTICS_REPORT_GENERATE",
+                slots={"period": "TODAY"},
+                confidence="HIGH",
+            )
+        ),
+    )
+
+    assert result.outcome == "DOMAIN_ACTION_ANSWERED"
+    assert (seen["start_date"], seen["end_date"]) == (date(2026, 6, 1), date(2026, 6, 10))
+
+
+def test_screen_picked_period_still_reaches_finance_and_sales(monkeypatch):
+    """물류를 더하면서 **재무·판매가 떨어지지 않았는가** — 같은 집합 하나가 셋을 태운다."""
+    from app.master import ask_service
+
+    assert ask_service._REPORT_DATE_RANGE_ACTIONS == {
+        "FINANCE_REPORT_GENERATE",
+        "SALES_REPORT_GENERATE",
+        "LOGISTICS_REPORT_GENERATE",
+    }
 
 
 def test_logistics_report_empty_period_is_a_normal_answer(logistics_report_stubs):

@@ -996,7 +996,35 @@ def _logistics_receipt_rollup(receipts: list[Any]) -> list[dict[str, Any]]:
                 "inspection_unknown_count": sum(
                     1 for r in rows_in_group if not r.inspection_verdict
                 ),
+                #: 재고가 실제로 선 완료 건수.
                 "stock_applied_count": sum(1 for r in rows_in_group if r.stock_applied),
+                #: 🔴 **«반영할 재고 없음» 도 완료다** (#805). 수용 0 으로 끝난 건은
+                #:    재고가 안 생길 뿐 처리가 끝난 것이라, 「재고 반영 N/M건」 한 칸만
+                #:    내리면 미처리 건으로 잘못 읽힌다.
+                #:
+                #: 🔴 **여기서 다시 판정하지 않는다.** 정본은
+                #:    `inbound_schedules.InboundScheduleView.settled_without_stock` 이고
+                #:    콘솔이 `inbound_id` 로 받아 적은 값을 그대로 센다. `accepted_qty_kg
+                #:    == 0` 이나 `receipt_status` 로 재계산하면 경계에서 콘솔과 갈린다.
+                "settled_without_stock_count": sum(
+                    1 for r in rows_in_group if r.settled_without_stock is True
+                ),
+                #: 🔴 **`None` 은 «모른다» 다 — `False` 가 아니다.** 그날 입고 일정을 못
+                #:    읽었으면 「반영 대기」인지 「반영할 재고 없음」인지 가릴 수 없다.
+                #:    「0건」과 「모름」을 가르는 `inspection_unknown_count` 와 같은 규율이다.
+                #:
+                #: ★ **`stock_applied` 가 참이면 모름이 아니다.** 재고가 이미 섰으므로
+                #:   어느 완료인지 알고 있다 — 그 건까지 「확인 못 함」으로 세면 아는
+                #:   사실을 모른다고 말하는 것이 된다.
+                #:
+                #: 🔴 **`pending` 을 지어내지 않는다.** `receipt_count` 에서 둘을 빼면
+                #:    검수 전 건과 못 읽은 건까지 「재고 반영 대기」로 단정하게 된다 —
+                #:    그 판정의 근거가 이 자리에 없다.
+                "settled_unknown_count": sum(
+                    1
+                    for r in rows_in_group
+                    if not r.stock_applied and r.settled_without_stock is None
+                ),
             }
         )
     out.sort(key=lambda row: (row["arrived_at"], row["item"]), reverse=True)

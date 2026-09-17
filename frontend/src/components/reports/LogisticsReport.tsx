@@ -15,6 +15,7 @@ import {
   lotAction,
   lotDisplayName,
   monthDay,
+  stockApplyText,
   verdictText,
 } from "./logisticsReportLabels";
 
@@ -145,7 +146,8 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
     <ReportChrome title="재고·물류 운영 보고서" subtitle="입고 · 검수" facts={facts} page={2}>
       <p className="m-0 mb-3 text-[11px] text-[#70857b]">창고 도착 전 입고 예정과 검수 진행 상황을 보여줍니다.</p>
       <div className="grid grid-cols-4 gap-3">
-        <Metric label="도착 예정" value={`${text(arrival.due_count, "0")}건`} detail={Number(arrival.due_count) > 0 ? "오늘 받을 수 있는 입고" : "예정된 입고 없음"} />
+        {/* 🔴 「오늘」이 아니다 — 이 보고서는 과거 `as_of` 도 조회한다 (화면 「기준일」과 같은 말). */}
+        <Metric label="도착 예정" value={`${text(arrival.due_count, "0")}건`} detail={Number(arrival.due_count) > 0 ? "기준일에 받을 수 있는 입고" : "예정된 입고 없음"} />
         <Metric label="도착 지연" value={`${text(arrival.overdue_count, "0")}건`} detail={Number(arrival.overdue_count) > 0 ? "예정일이 지난 입고" : "지연된 입고 없음"} />
         {/* 내부 BLOCKED 를 그대로 쓰지 않는다 — 사람이 읽을 말로만 적는다. */}
         <Metric label="처리 보류" value={`${text(arrival.blocked_count, "0")}건`} detail="입고 처리에 필요한 정보 확인 필요" />
@@ -175,7 +177,7 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
           ? <Empty>해당 기간 입고 없음</Empty>
           : <>
               {/* ★ 원장 한 줄씩이 아니라 「입고일 + 품목」 실적이다 — 내부 Receipt ID 를 싣지 않는다. */}
-              <Table headers={["입고일", "품목", "입고 건수", "주문량", "합격", "보류", "거절", "검수 결과", "재고 반영"]}>
+              <Table headers={["입고일", "품목", "입고 건수", "주문량", "합격", "보류", "거절", "검수 결과", "재고 처리"]}>
                 {receiptRollup.slice(0, MAX_ROWS).map((row) => <tr key={`${text(row.arrived_at)}-${text(row.item)}`} className="border-t border-[#e6eee9]">
                   <td className="px-2 py-2">{monthDay(row.arrived_at)}</td>
                   <td>{text(row.item)}</td>
@@ -185,8 +187,8 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
                   <td>{kg(row.hold_qty_kg)}</td>
                   <td>{kg(row.rejected_qty_kg)}</td>
                   <td>{verdictText(row.inspection_verdicts, row.inspection_unknown_count)}</td>
-                  {/* 검수 → 재고 반영까지가 사용자가 보는 마지막 단계다. 세는 것은 Backend 다. */}
-                  <td>{text(row.stock_applied_count, "0")} / {text(row.receipt_count, "0")}건</td>
+                  {/* 🔴 완료의 형태가 둘이다 — 「반영할 재고 없음」도 정상 완료다 (#805). 세는 것은 Backend 다. */}
+                  <td>{stockApplyText(row)}</td>
                 </tr>)}
               </Table>
               <More total={receiptRollup.length} shown={Math.min(MAX_ROWS, receiptRollup.length)} />
