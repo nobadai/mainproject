@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
@@ -219,6 +219,17 @@ function clarificationText(
 /** 분류가 못 돈 뒤 보내기를 더 잠가 두는 시간(초). **자동 재시도는 없다 — 사람이 누른다.** */
 const FALLBACK_COOLDOWN_SEC = 5;
 
+/**
+ * 바닥에서 이만큼 안이면 «바닥을 보고 있다» 로 본다(px).
+ *
+ * **이 값은 알림 버튼에만 쓴다.** 스크롤을 움직일지 말지는 여기서 안 정한다 —
+ * 판은 «내 글» 일 때만 내려간다.
+ *
+ * 딱 0 으로 두면 안 된다 — 한 줄 반쯤 남은 자리, 소수점 높이, 확대 배율 때문에
+ * 바닥까지 내려도 1~2px 이 남는 일이 흔하다. 그러면 바닥인데도 버튼이 뜬다.
+ */
+const STICK_PX = 40;
+
 function traceOf(res: AskResponse): LlmTraceData {
   return {
     intent: res.intent,
@@ -308,9 +319,62 @@ export function MasterConsole({ session }: { session: Session }) {
   const tail = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLInputElement>(null);
 
+  /* ── 자기가 보낸 글에만 내려간다 ──────────────────────────────────────
+   *
+   * 예전엔 `turns` 가 늘 때마다 **무조건** 바닥으로 내려갔다. 위로 올려 지난 답을
+   * 읽는 중에 새 글이 하나만 붙어도 읽던 자리가 끌려 내려갔다.
+   *
+   * **규칙은 하나뿐이다 — 내려가는 것은 `kind === "me"` 일 때뿐이다.**
+   * 답이 도착했을 때는 **어디에 있든 판을 움직이지 않는다.** 바닥 근처면 따라
+   * 내려가던 규칙은 없앴다 (2026-09-17 지시).
+   *
+   * ★ 새 글은 **아래에 붙는다.** 그러면 브라우저가 `scrollTop` 을 그대로 두므로
+   *   위에 보이던 내용은 한 픽셀도 안 움직인다 — **아무것도 안 하는 것**이
+   *   자리를 지키는 것이다. 그래서 `scrollTop` 보정을 따로 두지 않는다.
+   *
+   * 알림 버튼만 «바닥에서 얼마나 떨어졌나» 를 본다. 🔴 효과가 도는 시점은 새 글이
+   * **이미 붙은 뒤**라 그대로 재면 늘어난 높이만큼 부풀려진다. 그래서 직전 높이
+   * (`seenHeight`)를 들고 있다가 **붙기 전의 틈**을 되살려 잰다.
+   * ------------------------------------------------------------------ */
+
+  const scroller = useRef<HTMLDivElement>(null);
+  /** 마지막으로 본 판의 전체 높이. 새 글이 붙기 «전» 의 틈을 되살리는 데 쓴다. */
+  const seenHeight = useRef(0);
+  const [unread, setUnread] = useState(false);
+
+  function onScroll() {
+    const el = scroller.current;
+    if (!el) return;
+    seenHeight.current = el.scrollHeight;
+    //  바닥까지 내려왔으면 알릴 것이 없다 — 버튼은 스스로 사라진다
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX) setUnread(false);
+  }
+
+  /**
+   * 판을 바닥으로 민다.
+   *
+   * 🔴 **상태를 안 건드린다.** 효과 안에서 부르는 자리라, 여기서 `setUnread` 를
+   *    하면 `react-hooks/set-state-in-effect` 에 걸린다. 버튼은 아래 `onScroll` 이
+   *    바닥에 닿는 순간 스스로 지운다.
+   */
+  const scrollToTail = useCallback(() => {
+    tail.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, []);
+
   useEffect(() => {
-    tail.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns]);
+    const el = scroller.current;
+    if (turns.length === 0 || !el) return;
+
+    //  새 글이 붙기 **전** 의 바닥까지 거리. `scrollTop` 은 아래에 붙는 동안
+    //  안 바뀌므로, 직전 높이로 재면 붙기 전의 틈이 그대로 나온다.
+    const gapBefore = seenHeight.current - el.scrollTop - el.clientHeight;
+    seenHeight.current = el.scrollHeight;
+
+    //  ① 내가 보낸 글이면 바닥으로. ② 그 밖에는 **판을 건드리지 않는다** —
+    //     바닥에서 멀면 «새 메시지» 만 알린다.
+    if (turns.at(-1)?.kind === "me") scrollToTail();
+    else if (gapBefore > STICK_PX) setUnread(true);
+  }, [turns, scrollToTail]);
 
   useEffect(() => {
     localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({
@@ -698,7 +762,14 @@ export function MasterConsole({ session }: { session: Session }) {
           </div>
         ) : (
           <>
-            <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4">
+            {/* 안내 버튼이 구르는 판 위에 떠야 해서 `relative` 한 겹을 덧댄다.
+                높이 규칙(`min-h-0 flex-1`)은 덧댄 겹과 안쪽 판이 그대로 이어받는다. */}
+            <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={scroller}
+              onScroll={onScroll}
+              className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4"
+            >
               {turns.length === 0 && <Empty onPick={send} />}
               {reportPeriod !== "idle" && (
                 <ReportControls
@@ -758,6 +829,23 @@ export function MasterConsole({ session }: { session: Session }) {
                 </p>
               )}
               <div ref={tail} />
+            </div>
+
+            {/* 위에서 읽는 동안 새 글이 오면 여기서만 알린다 — 판은 안 움직인다. */}
+            {unread && (
+              <button
+                type="button"
+                onClick={() => {
+                  setUnread(false);
+                  scrollToTail();
+                }}
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-line
+                  bg-surface px-3 py-1 text-xs text-muted shadow-[0_6px_18px_-8px_rgba(21,26,22,.5)]
+                  transition hover:border-accent hover:text-accent-ink"
+              >
+                새 메시지 ↓
+              </button>
+            )}
             </div>
 
             <div className="border-t border-line px-4 py-3">
