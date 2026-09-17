@@ -65,13 +65,9 @@ import {
   verdictText,
 } from "./user_text";
 
-type Tab = "overview" | "cash" | "receivables" | "payables" | "expenses" | "loans" | "runs";
+type Tab = "overview" | "cash" | "receivables" | "payables" | "expenses" | "credit" | "loans" | "runs";
 const TABS: { key: Tab; label: string }[] = [
-  { key: "overview", label: "재무 현황" },
-  { key: "cash", label: "자금 흐름" },
-  { key: "receivables", label: "받을 돈" },
-  { key: "payables", label: "줄 돈" },
-  { key: "expenses", label: "비용" },
+  { key: "overview", label: "요약" }, { key: "cash", label: "현금흐름" }, { key: "receivables", label: "미수금" }, { key: "payables", label: "지급 예정" }, { key: "expenses", label: "운영비" }, { key: "credit", label: "여신" },
   { key: "loans", label: "차입" },
   { key: "runs", label: "실행 이력" },
 ];
@@ -121,6 +117,7 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
   if (tab === "receivables") return <Receivables simRun={simRun} asOf={asOf} />;
   if (tab === "payables") return <Payables simRun={simRun} asOf={asOf} />;
   if (tab === "expenses") return <Expenses simRun={simRun} asOf={asOf} />;
+  if (tab === "credit") return <><Panel title="여신" subtitle="거래처별 신용 한도와 사용 상태를 확인하고 관리합니다."><p className="m-0 text-sm text-ink2">한도·현재 미수·가용 여신은 Finance read model 값을 그대로 표시합니다.</p></Panel><CreditPanel simRun={simRun} asOf={asOf} /><CreditLimitForm simRun={simRun} asOf={asOf} refreshKey={0} onSaved={() => undefined} /></>;
   if (tab === "loans") return <Loans simRun={simRun} asOf={asOf} />;
   return <Runs simRun={simRun} />;
 }
