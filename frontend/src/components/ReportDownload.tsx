@@ -5,6 +5,7 @@ import { useRef, useState } from "react";
 import { ApiError, runReport } from "@/lib/api";
 import { userErrorText } from "@/lib/procurementLabels";
 import { FinanceReport } from "@/components/reports/FinanceReport";
+import { LogisticsReport } from "@/components/reports/LogisticsReport";
 import { SalesReport } from "@/components/reports/SalesReport";
 import { createReportPdfBlob, triggerBrowserDownload } from "@/components/reports/reportExport";
 import { filename, type ReportFacts } from "@/components/reports/reportFormat";
@@ -71,17 +72,25 @@ export function ReportDownload({ requestId }: { requestId: string }) {
 }
 
 
+/** 보고서 종류 하나 = 컴포넌트 하나 + PDF 이름 하나. **빠진 종류가 남의 보고서로 새지 않는다.** */
+const DOMAIN_REPORTS = {
+  FINANCE: { view: FinanceReport, slug: "finance" },
+  SALES: { view: SalesReport, slug: "sales" },
+  LOGISTICS: { view: LogisticsReport, slug: "logistics" },
+} as const;
+
 export function DomainReportPreview({
   kind,
   facts,
 }: {
-  kind: "FINANCE" | "SALES";
+  kind: keyof typeof DOMAIN_REPORTS;
   facts: ReportFacts;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preparedPdf, setPreparedPdf] = useState<{ blob: Blob; filename: string } | null>(null);
+  const { view: ReportView, slug } = DOMAIN_REPORTS[kind];
 
   async function downloadPdf() {
     console.debug("[report-pdf] 01 click", { exporting, hasTarget: Boolean(root.current) });
@@ -92,7 +101,7 @@ export function DomainReportPreview({
       return;
     }
     const reportRoot = root.current;
-    const reportFilename = filename(kind === "FINANCE" ? "finance" : "sales", facts);
+    const reportFilename = filename(slug, facts);
     console.debug("[report-pdf] 02 target found", { filename: reportFilename });
     setExporting(true);
     setError(null);
@@ -121,7 +130,7 @@ export function DomainReportPreview({
   return (
     <>
       <div ref={root} data-report-root className="domain-report-print overflow-auto rounded-xl bg-[#cdd6d1] p-4">
-        {kind === "FINANCE" ? <FinanceReport facts={facts} /> : <SalesReport facts={facts} />}
+        <ReportView facts={facts} />
       </div>
       <div className="domain-report-controls mt-2 flex gap-2">
         <button type="button" onClick={downloadPdf} disabled={exporting} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink disabled:opacity-45">

@@ -63,7 +63,7 @@ app/logistics        물류 도메인 · Agent · 그리고 이 조회 조립
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from typing import Any, cast
@@ -497,7 +497,13 @@ def get_inventory_console(
 # ── GET /logistics/inbound ──────────────────────────────────────────────
 
 
-def _inbound_receipts(conn: Any, *, sim_run_id: str, as_of: date) -> list[ConsoleInboundReceipt]:
+def _inbound_receipts(
+    conn: Any,
+    *,
+    sim_run_id: str,
+    as_of: date,
+    settled_by_inbound: Mapping[str, bool] | None = None,
+) -> list[ConsoleInboundReceipt]:
     """그날까지 도착한 Receipt. 🔴 **상태를 사건에서 유도한다.**
 
     ```text
@@ -510,6 +516,11 @@ def _inbound_receipts(conn: Any, *, sim_run_id: str, as_of: date) -> list[Consol
        그대로 실으면 도착만 한 날에도 «입고 완료» 로 보인다.
 
     ⚠️ **NULL 수량을 0 으로 바꾸지 않는다** (DDL 주석).
+
+    :param settled_by_inbound: 입고 일정이 낸 «수용 0 으로 끝났나» 한 벌 (#805).
+        🔴 **여기서 그 판정을 다시 만들지 않는다** — `inbound_schedules` 가 주인이고
+        이 함수는 `inbound_id` 로 받아 적기만 한다. `None`(못 읽음)이거나 그 입고가
+        목록에 없으면 칸도 `None` 이다 — **«아니다» 가 아니라 «모른다»** 다.
     """
     return [
         ConsoleInboundReceipt(
@@ -531,6 +542,11 @@ def _inbound_receipts(conn: Any, *, sim_run_id: str, as_of: date) -> list[Consol
             in_move_id=receipt.in_move_id,
             # Lot 과 원장 IN 이 **둘 다** 있어야 재고가 섰다고 본다.
             stock_applied=receipt.stock_applied,
+            settled_without_stock=(
+                None
+                if settled_by_inbound is None or receipt.inbound_id is None
+                else settled_by_inbound.get(receipt.inbound_id)
+            ),
         )
         for receipt in historical_repository.receipt_state_at(
             conn, sim_run_id=sim_run_id, as_of=as_of
@@ -580,7 +596,19 @@ def get_inbound_console(
     else:
         due_source = receivable_at(conn, sim_run_id=sim_run_id, as_of=as_of)
     selection = arrival.select_due_inbound(due_source, as_of=as_of)
-    receipts = _inbound_receipts(conn, sim_run_id=sim_run_id, as_of=as_of)
+
+    #  ★ «수용 0 으로 재고 없이 끝난 입고» 사실을 Receipt 줄에 얹는다 (#805).
+    #    🔴 판정은 `inbound_schedules` 가 이미 했다 — 여기서 다시 세지 않고 받아 적는다.
+    #    일정을 못 읽은 날은 `None` 이라 화면이 «모른다» 로 그린다.
+    views = None if runtime is None else runtime.inbound_schedule_views
+    settled_by_inbound = (
+        None
+        if views is None
+        else {view.inbound_id: view.settled_without_stock for view in views}
+    )
+    receipts = _inbound_receipts(
+        conn, sim_run_id=sim_run_id, as_of=as_of, settled_by_inbound=settled_by_inbound
+    )
 
     return ConsoleInboundResponse(
         sim_run_id=sim_run_id,

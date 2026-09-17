@@ -30,7 +30,7 @@ export function date(value: unknown): string {
   return text(value, "기록 없음");
 }
 
-export function filename(kind: "finance" | "sales", facts: ReportFacts): string {
+export function filename(kind: "finance" | "sales" | "logistics", facts: ReportFacts): string {
   const start = text(facts.start_date, "");
   const end = text(facts.end_date, "");
   const range = start && end && start !== end ? `${start}_${end}` : end || start || "report";

@@ -51,6 +51,7 @@ const DOMAIN_ACTION_LABEL: Record<DomainAction, string> = {
   SALES_PROPOSALS_TODAY: "오늘 판매안 조회",
   SALES_CONFIRMED_TODAY: "확정 판매 조회",
   SALES_REPORT_GENERATE: "판매 보고서 생성",
+  LOGISTICS_REPORT_GENERATE: "재고·물류 보고서 생성",
   PARTNER_LIST: "거래처 목록 조회",
   PARTNER_CREATE: "거래처 등록",
   PARTNER_DETAIL_GET: "거래처 상세 조회",

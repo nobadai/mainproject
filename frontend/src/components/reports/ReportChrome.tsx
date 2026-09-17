@@ -17,7 +17,13 @@ export function ReportChrome({
   const availableStart = facts.available_start_date;
   const availableEnd = facts.available_end_date;
   const requestedAndAvailableDiffer = Boolean(availableStart && availableEnd && (availableStart !== facts.start_date || availableEnd !== facts.end_date));
-  const mode = facts.data_mode ? String(facts.data_mode) : "PREVIEW · 실행 모드 미확인";
+  //  🔴 **모를 때 「PREVIEW」라고 적지 않는다.** 이 칸의 값은 `sim_runs.run_type` 이고
+  //     그 값 공간에 `PREVIEW` 는 없다 (`WALK` · `BURN_IN`). 게다가 이 저장소에서
+  //     「PREVIEW」는 이미 **「부서가 실제 값에 안 붙은 예시값」** 이라는 다른 뜻으로
+  //     쓰인다 (`console/DomainShell.tsx`) — 진짜 원장 숫자에 그 딱지를 붙이게 된다.
+  //     세 보고서가 같은 머리말을 쓰므로 재무·판매도 같은 거짓 설명을 하고 있었다
+  //     (`sim_run_id` 가 `sim_runs` 에 없으면 `data_type` 이 `null` 이 된다).
+  const mode = facts.data_mode ? String(facts.data_mode) : "실행 모드 미확인";
   return (
     <article data-report-page className="report-page bg-white text-[#16241f] shadow-xl print:shadow-none">
       <div className="h-2 bg-[#0e2419]" />

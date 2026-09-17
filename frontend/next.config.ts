@@ -12,6 +12,19 @@ const backendOrigin = process.env.BACKEND_ORIGIN ?? "http://127.0.0.1:8000";
 
 const nextConfig: NextConfig = isDev
   ? {
+      /**
+       * 개발 모드에 Next 가 띄우는 **동그란 `N` 배지**를 끈다.
+       *
+       * 화면 구석에 떠서 마우스로 끌어 옮길 수 있는 그것이고, 우리 코드가 그리는 것이
+       * 아니라 `next dev` 가 넣는다. 사이드바 브랜드 배지(`햇`)·사용자 이니셜 동그라미와
+       * 생김새가 겹쳐 **콘솔이 띄운 것으로 오해하게 만든다.**
+       *
+       * ⚠️ 끄는 것은 표시기뿐이다 — 컴파일·런타임 오류는 그대로 화면에 뜬다
+       *    (`node_modules/next/dist/docs/.../devIndicators.md`).
+       *
+       * ★ 배포 빌드(`output: "export"`)에는 원래 안 들어가므로 산출물은 그대로다.
+       */
+      devIndicators: false,
       experimental: {
         /**
          * 🔴 프록시 상한. **`lib/api.ts` 의 `EXECUTE_TIMEOUT_MS` 와 같은 값이다.**
