@@ -14,6 +14,7 @@ import { DomainReadResult } from "@/components/console/DomainReadResult";
 import { SalesConversation } from "@/components/console/SalesConversation";
 import { Markdownish } from "@/components/console/ml/Markdownish";
 import { ApiError, ask, execute } from "@/lib/api";
+import { useSimRun } from "@/components/console/RunPicker";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
@@ -209,6 +210,7 @@ export function MasterConsole({ session }: { session: Session }) {
   //  🔴 시연용 기준일 (`#431`). `ask` · `execute` 가 실제로 싣는 값과 같은 곳을 읽는다
   //     — 머리에 적힌 날짜와 서버에 보내는 날짜가 갈리면 안 된다.
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  const simRun = useSimRun();
   //  세션 판정(하이드레이션 · 로그인 리다이렉트)은 **셸이 이미 했다**
   //  (`app/console/layout.tsx`). 여기까지 왔으면 사람이 있다.
   const [tab, setTab] = useState<"master" | "runs">("master");
@@ -297,14 +299,14 @@ export function MasterConsole({ session }: { session: Session }) {
   }
 
   /** ① 발화문 분류. **확인이 필요하면 아무것도 실행하지 않는다.** */
-  async function send(text: string) {
+  async function send(text: string, context?: { dateFrom?: string; dateTo?: string }) {
     const utterance = text.trim();
     if (!utterance || locked) return;
     setDraft("");
     push({ kind: "me", text: utterance });
     setBusy(true);
     try {
-      const res: AskResponse = await ask(utterance);
+      const res: AskResponse = await ask(utterance, { simRunId: simRun || undefined, dateFrom: context?.dateFrom, dateTo: context?.dateTo });
       //  분류가 못 돌았으면 연달아 누르지 못하게 몇 초 더 잠근다.
       if (classifyFailed(res)) setCooldown(FALLBACK_COOLDOWN_SEC);
       if (res.confirm_required) {
@@ -617,7 +619,7 @@ export function MasterConsole({ session }: { session: Session }) {
         ) : (
           <>
             <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4">
-              {turns.length === 0 && <Empty onPick={send} />}
+              {turns.length === 0 && <Empty onPick={send} onReport={(dateFrom, dateTo, preset) => void send(preset ? `${preset} 재무 보고서 만들어줘` : "재무 보고서 만들어줘", { dateFrom, dateTo })} />}
 
               {turns.map((turn, i) => (
                 <TurnView
@@ -841,7 +843,7 @@ const DAY_STEPS = [
   "하루 닫기",
 ];
 
-function Empty({ onPick }: { onPick: (text: string) => void }) {
+function Empty({ onPick, onReport }: { onPick: (text: string) => void; onReport: (dateFrom?: string, dateTo?: string, preset?: string) => void }) {
   //: 눌러서 바로 답이 나오는 말만 둔다. **순서가 뜻이다** — 잔액 같은 «점» 에서
   //  «흐름» 을 거쳐 «보고서» 로 간다 (재무 요청 2026-09-16).
   //
@@ -898,6 +900,13 @@ function Empty({ onPick }: { onPick: (text: string) => void }) {
           </button>
         ))}
       </div>
+      <ReportControls onReport={onReport} />
     </div>
   );
+}
+
+function ReportControls({ onReport }: { onReport: (dateFrom?: string, dateTo?: string, preset?: string) => void }) {
+  const [from, setFrom] = useState(""); const [to, setTo] = useState(""); const [custom, setCustom] = useState(false); const [error, setError] = useState("");
+  const submit = () => { if (custom && (!from || !to)) return setError("시작일과 종료일을 모두 선택해 주세요."); if (from > to) return setError("종료일은 시작일 이후여야 합니다."); setError(""); onReport(custom ? from : undefined, custom ? to : undefined); };
+  return <section className="mt-5 rounded-lg border border-line bg-sunk p-3"><p className="m-0 text-sm font-semibold">보고 기간</p><div className="mt-2 flex flex-wrap gap-2">{["최근 7일", "최근 30일", "최근 3개월", "최근 1년"].map((label) => <button key={label} type="button" onClick={() => onReport(undefined, undefined, label)} className="rounded border border-line bg-surface px-2 py-1 text-xs">{label}</button>)}<button type="button" onClick={() => setCustom(true)} className="rounded border border-line bg-surface px-2 py-1 text-xs">직접 선택</button></div>{custom && <div className="mt-3 grid gap-2 sm:grid-cols-2"><label className="text-xs">시작일<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1 block w-full rounded border border-line bg-surface p-2" /></label><label className="text-xs">종료일<input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1 block w-full rounded border border-line bg-surface p-2" /></label></div>}{error && <p className="mb-0 mt-2 text-xs text-red-700">{error}</p>}<button type="button" onClick={submit} className="mt-3 rounded bg-accent px-3 py-2 text-xs font-semibold text-white">재무 보고서 생성</button></section>;
 }
