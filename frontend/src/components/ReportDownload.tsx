@@ -101,8 +101,7 @@ export function DomainReportPreview({
       const blob = await createReportPdfBlob({ root: reportRoot });
       setPreparedPdf({ blob, filename: reportFilename });
       triggerBrowserDownload(blob, reportFilename);
-    } catch (cause) {
-      console.error("[report-pdf] failed", { stage: "browser download", error: cause });
+    } catch {
       setError("보고서를 다운로드하지 못했습니다. 다시 시도해 주세요.");
     } finally {
       setExporting(false);
@@ -114,15 +113,14 @@ export function DomainReportPreview({
     try {
       triggerBrowserDownload(preparedPdf.blob, preparedPdf.filename);
       setError(null);
-    } catch (cause) {
-      console.error("[report-pdf] failed", { stage: "browser download fallback", error: cause });
+    } catch {
       setError("보고서를 다운로드하지 못했습니다. 다시 시도해 주세요.");
     }
   }
 
   return (
     <>
-      <div ref={root} className="domain-report-print overflow-auto rounded-xl bg-[#cdd6d1] p-4">
+      <div ref={root} data-report-root className="domain-report-print overflow-auto rounded-xl bg-[#cdd6d1] p-4">
         {kind === "FINANCE" ? <FinanceReport facts={facts} /> : <SalesReport facts={facts} />}
       </div>
       <div className="domain-report-controls mt-2 flex gap-2">
