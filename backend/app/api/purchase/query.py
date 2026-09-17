@@ -172,7 +172,9 @@ def _read(
         {"as_of": as_of},
     )
     decisions = fetch_all(
-        sql.SQL("SELECT request_id, decision, scenario_label FROM {}").format(
+        #  🔴 `decision_seq` 를 같이 읽는다 (2026-09-17) — 결정 표는 append-only 라 번복도
+        #     새 행이고 **최대 회차가 유효하다**. 순서를 안 읽으면 되돌린 승인이 남는다.
+        sql.SQL("SELECT request_id, decision_seq, decision, scenario_label FROM {}").format(
             table("master_decisions")
         ),
     )
@@ -310,6 +312,34 @@ def _pick(
         f"그날 실행 {len(runs)}건 중 {len(ready)}건이 돌았고 "
         f"{len(with_plans)}건이 안을 냈습니다 — 품목별 최신 하나를 보입니다 ({names}){aside}"
     )
+
+
+def _current_decisions(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """업무 키마다 **지금 유효한 결정 하나** — 최대 `decision_seq` 행 (2026-09-17).
+
+    🔴 **마스터와 같은 규칙이다.** `master/pending_transition_repository.approved_decisions`
+    가 `DISTINCT ON (request_id) … ORDER BY decision_seq DESC` 로, `decision.mark_current`
+    가 파이썬에서 같은 일을 한다. 결정 표는 append-only 라 번복도 새 행이다.
+
+    ⚠️ 전에는 순서를 안 봐서, 승인 뒤 「승인 되돌리기」(`REQUEST_CHANGE` · 안 이름 없음)를
+    적어도 옛 `APPROVE` 행이 남아 **「승인됨」 · 「매입 기록됨」으로 떴다.** 실측 — FINAL-0918
+    09-14 배추(`REQ-20260914-0001` · 05:50 승인 → 06:08 되돌림)가 「매입 기록됨」이었다.
+    같은 요청에 안을 바꿔 여러 번 승인한 경우도 **전부** 「승인됨」이었다.
+
+    ★ 되돌린 요청은 안 이름 붙은 유효 결정이 없으므로 「후보」 · 대기로 돌아간다 —
+      낱말은 `plan_state.py` 가 정하고 여기서 새로 만들지 않는다.
+
+    ⚠️ 검사 대역은 `decision_seq` 를 안 넣기도 한다 — 그때는 **목록 순서**를 회차로 읽는다
+      (뒤에 온 행이 새것). 실 조회는 늘 그 칸을 싣는다.
+    """
+    current: dict[Any, tuple[Any, dict[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        seq = row.get("decision_seq")
+        order = index if seq is None else seq
+        kept = current.get(row["request_id"])
+        if kept is None or order >= kept[0]:
+            current[row["request_id"]] = (order, row)
+    return [row for _order, row in current.values()]
 
 
 def _no_plan_note(
@@ -726,7 +756,7 @@ def build(
     runs = data["runs"]
     decided = {
         (row["request_id"], row["scenario_label"]): row["decision"]
-        for row in data["decisions"]
+        for row in _current_decisions(data["decisions"])
         if row["scenario_label"]
     }
     #  ★ 결정이 난 요청. `decided` 와 **같은 행**에서 뽑는다 — 무엇을 결정으로 치는지
