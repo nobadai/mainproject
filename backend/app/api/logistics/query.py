@@ -1172,6 +1172,11 @@ def _outbound_pane(ob: ConsoleOutboundResponse, inv: ConsoleInventoryResponse) -
     #       「처리 중 예약」 표가 이미 예약 축으로 보여 준다. 여기는 **Lot 축**이다.
     #
     #  🔴 raw `lot_id` 를 표에 싣지 않는다 — Lot 은 **입고일**로 가른다.
+    #
+    #  ★ **카드를 품목마다 나눈다** (#812). 한 표에 몰면 품목 칸에 「배추」가 일곱 번,
+    #    「무」가 일곱 번 찍히고 순위가 중간에서 1 로 되돌아간다 — 19줄이 한 덩어리라
+    #    어디까지가 한 품목인지 눈으로 세야 했다. 후보는 원래 품목마다 독립이므로
+    #    카드도 그렇게 나누면 **품목 칸과 순위 설명이 둘 다 필요 없어진다.**
     미배정합계: dict[str, Decimal] = {}
     품목이름: dict[str, str] = {}
     for resv in fefo_targets:
@@ -1179,24 +1184,41 @@ def _outbound_pane(ob: ConsoleOutboundResponse, inv: ConsoleInventoryResponse) -
             미배정합계.get(resv.item_id, Decimal(0)) + resv.unallocated_qty_kg
         )
         품목이름.setdefault(resv.item_id, resv.item_name or resv.item_id)
-    for item_id in sorted(candidates_by_item):
-        for rank, cand in enumerate(candidates_by_item[item_id], start=1):
-            fefo_rows.append(
-                {
-                    "item": 품목이름.get(item_id, item_id),
-                    "received": _md(cand.received_at),
-                    "grade": cand.grade or "등급 미확정",
-                    "qty": _kg_cell(cand.available_qty_kg),
-                    "fresh": _days(cand.remaining_freshness_days),
-                    "rank": rank,
-                }
-            )
-    #  ★ **무엇을 얼마나 배정해야 하는지**는 한 줄로 따로 적는다 — 후보 줄마다 같은
-    #    숫자를 되풀이하지 않는다.
-    미배정말 = " · ".join(
-        f"{품목이름[item_id]} {_kg(총량)} kg"
-        for item_id, 총량 in sorted(미배정합계.items(), key=lambda pair: -float(pair[1]))
+
+    #  ★ 배정할 몫이 많은 품목을 위에 둔다 — 먼저 손봐야 할 것이 먼저 보인다.
+    순서 = sorted(
+        (item_id for item_id in candidates_by_item if candidates_by_item[item_id]),
+        key=lambda item_id: -float(미배정합계.get(item_id, Decimal(0))),
     )
+    fefo_cards: list[Card] = [
+        Card(
+            key=f"fefo-{item_id}",
+            title=f"{품목이름.get(item_id, item_id)} 출고 후보",
+            #  ★ 배정해야 할 양은 **제 카드 머리에** 한 번 적는다. 줄마다 되풀이하던
+            #    「Lot 미배정」 칸이 그 자리였다.
+            subtitle=(f"Lot 미배정 {_kg(미배정합계.get(item_id, Decimal(0)))} kg · "
+                      "위에서부터 먼저 내보냅니다"),
+            source_ref="inventory_reservations · inventory_lots",
+            table=_t(
+                [("received", "입고일", "left"), ("grade", "등급", "left"),
+                 ("qty", "가용", "right"), ("fresh", "신선도 잔여", "right"),
+                 ("rank", "순위", "right")],
+                [
+                    {
+                        "received": _md(cand.received_at),
+                        "grade": cand.grade or "등급 미확정",
+                        "qty": _kg_cell(cand.available_qty_kg),
+                        "fresh": _days(cand.remaining_freshness_days),
+                        "rank": rank,
+                    }
+                    for rank, cand in enumerate(candidates_by_item[item_id], start=1)
+                ],
+                empty_text="추천할 출고 후보가 없습니다",
+            ),
+        )
+        for item_id in 순서
+    ]
+    fefo_rows = [row for card in fefo_cards if card.table for row in card.table.rows]
 
     return Pane(
         key="outbound",
@@ -1213,40 +1235,27 @@ def _outbound_pane(ob: ConsoleOutboundResponse, inv: ConsoleInventoryResponse) -
                  raw=float(len(fefo_targets))),
             #  ★ **«후보 건수» 가 아니라 «후보 Lot 수» 다** — 예약마다 세던 때는 같은
             #    Lot 이 여러 번 세어져 숫자가 부풀었다 (실측 19 → 56).
+            #  🔴 **«자동 배정» 처럼 보이면 안 된다** — 도메인 계약도 «추천만 한다 —
+            #     고르지도 쓰지도 않는다» 이다 (`get_fefo_candidates_by_item`). 카드가
+            #     품목마다 서므로 그 말은 **여기 한 번만** 적는다.
             Stat(label="출고 후보 Lot", value=f"{len(fefo_rows):,}", unit="개",
-                 detail="예약이 있어야 후보가 나옵니다",
+                 detail="추천입니다 — 자동으로 배정되지 않습니다",
                  tone="neutral", raw=float(len(fefo_rows))),
         ],
-        cards=[
+        #  ★ 그릴 후보가 하나도 없어도 **카드는 선다** — 빈 화면이 «왜 없는지» 를
+        #    말해야 한다. 예약이 없으면 후보도 없다는 것이 그 답이다.
+        cards=fefo_cards or [
             Card(
                 key="fefo", title="신선도 우선 출고 후보",
-                #  🔴 **«자동 배정» 처럼 보이면 안 된다** — 도메인 계약도 «추천만 한다 —
-                #     고르지도 쓰지도 않는다» 이다 (`get_fefo_candidates_by_item`).
-                subtitle="신선도가 먼저 소진되는 Lot 부터 추천합니다 — 자동 배정은 아닙니다",
+                subtitle="신선도가 먼저 소진되는 Lot 부터 추천합니다",
                 source_ref="inventory_reservations · inventory_lots",
-                #  ★ 배정해야 할 양은 **여기 한 줄로** 적는다. 후보 줄마다 되풀이하면
-                #    같은 숫자가 수십 번 나오고, 그것이 종전 표의 「Lot 미배정」 칸이었다.
-                lead=(
-                    None if not 미배정말 else Note(
-                        tone="neutral",
-                        text=f"아직 Lot 을 못 정한 몫: **{미배정말}**",
-                    )
-                ),
                 table=_t(
-                    #  🔴 **예약 축 두 칸(「예약」 · 「Lot 미배정」)을 뺐다** (#812).
-                    #     후보는 품목당 한 벌이라 그 둘이 붙으면 같은 Lot 이 예약 수만큼
-                    #     복제된다 — 위 주석의 56줄이 그것이다.
-                    [("item", "품목", "left"), ("received", "입고일", "left"),
-                     ("grade", "등급", "left"), ("qty", "가용", "right"),
-                     ("fresh", "신선도 잔여", "right"), ("rank", "후보 순위", "right")],
-                    fefo_rows,
-                    empty_text="추천할 출고 후보가 없습니다",
+                    [("received", "입고일", "left"), ("grade", "등급", "left"),
+                     ("qty", "가용", "right"), ("fresh", "신선도 잔여", "right"),
+                     ("rank", "순위", "right")],
+                    [],
+                    empty_text="Lot 을 정해야 할 예약이 없습니다",
                 ),
-                #  🔴 **«순위» 가 창고 전체 순위로 읽히면 안 된다** — 품목마다 1 부터다.
-                #  🔴 **«가용» 을 예약마다 쓸 수 있는 양으로 읽으면 안 된다** — 그 Lot
-                #     하나에서 아직 아무 할당에도 안 묶인 몫이고, 예약들이 **나눠 쓴다.**
-                footer=("후보 순위는 품목마다 1 부터 셉니다. 가용은 그 Lot 에 남은 몫이고 "
-                        "예약들이 나눠 쓰는 양입니다 — 예약마다 따로 있는 것이 아닙니다."),
             ),
         ],
     )

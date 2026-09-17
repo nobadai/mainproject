@@ -435,9 +435,10 @@ def test_FEFO_는_미할당이_남은_예약에만_그리고_끝난_예약은_�
     pane = logistics_query._outbound_pane(ob, _INV)
     #  🔴 품목마다 한 번 묻고(164번 묻던 자리), 표에는 미할당이 남은 예약만 오른다.
     assert 물은것 == [(ITEM_ON_SCREEN,)]
-    fefo = 카드(pane, "fefo").table
-    #  🔴 raw Reservation ID 를 싣지 않는다 — 품목으로 읽는다.
-    assert fefo is not None and [row["item"] for row in fefo.rows] == [ITEM_ON_SCREEN]
+    #  🔴 raw Reservation ID 를 싣지 않는다 — **카드 제목이 품목**이다.
+    assert [c.title for c in pane.cards] == [f"{ITEM_ON_SCREEN} 출고 후보"]
+    fefo = 카드(pane, f"fefo-{ITEM_ON_SCREEN}").table
+    assert fefo is not None and len(fefo.rows) == 1
     예약 = next(s for s in pane.stats if s.label == "예약")
     assert 예약.value == "2" and "2건은 뺐습니다" in (예약.detail or "")  # 숨기지 않고 적는다
 
@@ -457,20 +458,19 @@ def test_FEFO_후보는_품목당_한_벌이고_예약마다_복제되지_않는
     ])
     pane = logistics_query._outbound_pane(ob, _INV)
     assert 물은것 == [(ITEM_ON_SCREEN,)]
-    fefo = 카드(pane, "fefo").table
+    #  ★ 카드가 품목마다 하나다 — 한 표에 몰면 품목 칸이 줄마다 되풀이된다.
+    카드하나 = 카드(pane, f"fefo-{ITEM_ON_SCREEN}")
+    fefo = 카드하나.table
     assert fefo is not None
     #  예약 둘인데 후보는 **한 줄**이다 (대역이 품목당 후보 하나를 준다).
-    assert [(row["item"], row["rank"]) for row in fefo.rows] == [(ITEM_ON_SCREEN, 1)]
-    #  예약 축 칸은 표에 없다 — 있으면 그 자리에서 복제가 생긴다.
+    assert [row["rank"] for row in fefo.rows] == [1]
+    #  예약 축 칸도 품목 칸도 표에 없다 — 있으면 그 자리에서 복제가 생긴다.
     칸 = [c.key for c in fefo.columns]
-    assert "resv" not in 칸 and "need" not in 칸
-    #  배정해야 할 양은 **한 줄로** 적는다 (100 + 50).
-    lead = 카드(pane, "fefo").lead
-    assert lead is not None and f"{ITEM_ON_SCREEN} 150 kg" in lead.text
-    #  🔴 «1» 이 창고 전체 순위로 읽히면 안 된다.
-    assert "후보 순위는 품목마다 1 부터" in (카드(pane, "fefo").footer or "")
-    #  🔴 가용을 예약마다 쓸 수 있는 양으로 읽으면 안 된다.
-    assert "나눠 쓰는 양" in (카드(pane, "fefo").footer or "")
+    assert "resv" not in 칸 and "need" not in 칸 and "item" not in 칸
+    #  배정해야 할 양은 **카드 머리에** 한 번 적는다 (100 + 50).
+    assert "Lot 미배정 150 kg" in (카드하나.subtitle or "")
+    #  🔴 «자동 배정» 처럼 보이면 안 된다 — 카드가 여럿이라 pane 통계가 한 번 말한다.
+    assert "자동으로 배정되지 않습니다" in (통계(pane, "출고 후보 Lot").detail or "")
 
 
 def test_그릴_예약이_없으면_FEFO_를_묻지도_않는다(monkeypatch):
