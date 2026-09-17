@@ -87,10 +87,53 @@ _EMPTY_COMMITTED = "아직 확정된 매입이 없습니다 — 안이 승인되
 #: 낡는다 (전에는 둘 다 「지급일 규칙이 아직 미결」이었고 같이 틀렸다 · ``_payments`` 참조).
 _PAY_EMPTY_SINGLE = "한 번에 사는 안이라 지급 계획을 따로 만들지 않습니다"
 
+#: 실행 조회(`runs`)가 응답 본문에서 **뽑는 칸** — 이 모듈이 `payload` 에서 읽는 전부다.
+#:
+#: 🔵 (2026-09-17) 전에는 `response_payload` 를 통째로 끌어왔다 — REH-0914 08-31 41행이
+#:   1.6MB 인데 읽는 칸은 6% 남짓이었다 (scenarios 79KB · judgment 14KB · reason 2.5KB).
+#:   V13 01-26 은 137행 7.8MB 였다.
+#:
+#: 🔴 **여기 없는 칸을 `payload` 에서 읽으면 조용히 비어 온다** — `.get()` 이라 예외도
+#:    안 난다(안별 컷 사유 · 사유 문장이 「사유를 남긴 실행이 없습니다」로 바뀐다).
+#:    그래서 `tests/api/test_purchase_read_narrow.py` 가 이 모듈 소스를 읽어 `payload`
+#:    에서 부르는 `.get("…")` 이 전부 여기 있는지 본다. 칸을 새로 읽으면 **여기에 먼저** 적는다.
+#:
+#: 값이 튜플이면 그 칸 안에서 다시 **그 하위 칸만** 뽑는다 (`judgment` 는 컷 사유만 쓴다).
+_RUN_PAYLOAD: dict[str, tuple[str, ...]] = {
+    "scenarios": (),
+    "judgment": ("rejected_reasons",),
+    "reason": (),
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  DB 읽기
 # ══════════════════════════════════════════════════════════════════════════
+
+def _payload_projection() -> Any:
+    """`response_payload` 에서 `_RUN_PAYLOAD` 칸만 뽑아 **같은 모양의 객체**로 만든다.
+
+    ★ 읽는 쪽 코드는 한 글자도 안 바뀐다 — `run["payload"]["scenarios"]` 그대로다.
+    ⚠️ 원본에 칸이 없으면 뽑은 객체에는 `null` 로 선다. 읽는 쪽이 전부 `.get(…) or …` 라
+       「칸 없음」과 「null」이 같은 판정으로 간다 (실측 — PROCUREMENT 15,235행 중 judgment
+       없는 행 3,098 · scenarios 없는 행 3,072 · 본문이 SQL NULL 인 행 0).
+    """
+    from psycopg import sql
+
+    def field(key: str, sub: tuple[str, ...]) -> sql.Composable:
+        path = sql.SQL("response_payload->{}").format(sql.Literal(key))
+        if not sub:
+            return sql.SQL("{}, {}").format(sql.Literal(key), path)
+        inner = sql.SQL(", ").join(
+            sql.SQL("{}, {}->{}").format(sql.Literal(k), path, sql.Literal(k)) for k in sub
+        )
+        return sql.SQL("{}, jsonb_build_object({})").format(sql.Literal(key), inner)
+
+    body = sql.SQL(", ").join(field(k, sub) for k, sub in _RUN_PAYLOAD.items())
+    return sql.SQL(
+        "CASE WHEN response_payload IS NULL THEN NULL ELSE jsonb_build_object({}) END"
+    ).format(body)
+
 
 def _read(
     as_of: date, *, window_days: int | None = None, sim_run_id: str | None = None
@@ -147,10 +190,11 @@ def _read(
             #     실행이 여러 행이라(실측 75행) 키만으로는 본 것과 다른 안이 승인될 수
             #     있다 — 마스터 승인 경로가 `history_run_id` 를 받는 이유와 같다.
             "SELECT run_id, request_id, item, end_code, runtime_status, created_at,"
-            " sim_run_id, response_payload AS payload"
+            #  🔵 본문은 **쓰는 칸만** 뽑아 같은 모양(`payload`)으로 싣는다 (`_RUN_PAYLOAD`).
+            " sim_run_id, {} AS payload"
             " FROM {} WHERE as_of = %(as_of)s AND cycle = 'PROCUREMENT'"
             " ORDER BY created_at DESC"
-        ).format(table("master_agent_runs")),
+        ).format(_payload_projection(), table("master_agent_runs")),
         {"as_of": as_of},
     )
     #  🔴 레슨 ③ — purchases 와 purchase_items 를 조인하면 total_amount_krw 가
@@ -171,10 +215,23 @@ def _read(
         ).format(table("purchases"), table("purchase_items")),
         {"as_of": as_of},
     )
+    #  🔵 **그날 실행의 요청 ID 로 좁힌다** (2026-09-17). 전에는 조건이 없어 결정 표 전부
+    #     (11,427행)를 읽었다. 읽은 결정을 쓰는 자리는 `build` 가 **그날 고른 실행의 요청**을
+    #     찾는 것 하나이고, 그 요청은 전부 위 `runs` 안에 있다 — 그래서 결과가 같다.
+    #  ★ 걷기 축으로 거르는 것이 아니다 — `runs` 는 모든 걷기의 행이다. docstring 의 이유 둘
+    #    (건수를 센다 · 주입)은 여기 안 걸린다: 결정으로 세는 수가 없고, 주입 검사는 `_read`
+    #    를 통째로 갈아 끼운다.
+    #  🟡 **그날 실행이 없어도 조회를 낸다** — 빈 목록이면 0행이다(실 DB 로 확인 · 2026-09-18).
+    #     `WHERE` 는 **SELECT 줄과 떨어진 자리에** 붙인다. 번복 고침(`#820`)이 그 SELECT 줄에
+    #     `decision_seq` 를 더하고, 그 검사는 실행 없이 결정 조회 문면을 본다 — 둘이 어느 순서로
+    #     들어와도 줄이 안 부딪치고 검사도 안 깨지게 한다.
+    request_ids = sorted({str(r["request_id"]) for r in runs if r["request_id"] is not None})
     decisions = fetch_all(
         sql.SQL("SELECT request_id, decision, scenario_label FROM {}").format(
             table("master_decisions")
-        ),
+        )
+        + sql.SQL(" WHERE request_id = ANY(%(request_ids)s)"),
+        {"request_ids": request_ids},
     )
     items = fetch_all(sql.SQL("SELECT item_id, item_name FROM {}").format(table("items")))
     #  확정 매입의 도착일은 원장에 없다. 그날 실행의 시나리오에서 **금액으로**
