@@ -156,7 +156,7 @@ export function ForecastChart({
               y={y(t) + 3.5}
               textAnchor="end"
               className="tabular font-mono"
-              fontSize={10}
+              fontSize={14}
               fill="var(--color-mut2)"
             >
               {Math.round(t).toLocaleString("ko-KR")}
@@ -182,7 +182,7 @@ export function ForecastChart({
               x={W - PAD.right}
               y={y(anchor) - 4}
               textAnchor="end"
-              fontSize={9.5}
+              fontSize={13.5}
               fill="var(--color-mut2)"
             >
               출발점 {Math.round(anchor).toLocaleString("ko-KR")}
@@ -268,7 +268,7 @@ export function ForecastChart({
             y={H - 12}
             textAnchor="middle"
             className="tabular font-mono"
-            fontSize={9.5}
+            fontSize={13.5}
             fontWeight={600}
             fill="var(--color-t-info)"
           >
@@ -283,7 +283,7 @@ export function ForecastChart({
               y={H - 12}
               textAnchor="middle"
               className="tabular font-mono"
-              fontSize={9.5}
+              fontSize={13.5}
               fill={r.lead === 0 ? "var(--color-t-info)" : "var(--color-mut2)"}
               fontWeight={r.lead === 0 ? 600 : 400}
             >
@@ -294,7 +294,7 @@ export function ForecastChart({
       </svg>
 
       <figcaption
-        className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]"
+        className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[15px]"
         style={{ color: "var(--color-mut)" }}
       >
         <span className="flex items-center gap-1.5">

@@ -45,7 +45,10 @@ class Plan(BaseModel):
     틀린 값이 뜬다. 그 자리는 ``cut_unit_price`` 다.
     """
 
-    key: str = Field(description="보수 · 기본 · 공격")
+    #  🔴 설명이 낡았었다 (2026-09-17) — 「보수 · 기본 · 공격」이라 적혀 있었는데 실제 값은
+    #     `query._plan` 이 품목을 앞에 붙인 「배추 · 보수」다. 대시보드 `plan_state.plan_label`
+    #     과 말로 한 승인(`MasterConsole.planLabel`)이 그 모양을 쪼개 읽는다.
+    key: str = Field(description="품목 · 안 이름 (예: 배추 · 보수)")
     coverage: str = Field(description="며칠치인가")
     knob: str = Field(description="무엇으로 조절한 안인가")
     qty_kg: float = Field(description="사는 양 (kg)")
@@ -61,9 +64,16 @@ class Plan(BaseModel):
     payments: Table = Field(description="언제 얼마 내나")
     reasons: list[Reason] = Field(description="이 안을 왜 냈나. 여섯 갈래를 다 채운다")
     risks: list[str] = Field(description="걸리는 것. 비어 있으면 안 적는다")
-    pending: bool = Field(description="아직 사람이 안 고른 안인가")
+    #  🔴 **요청(품목·날) 단위다** (2026-09-17). 같은 요청에서 다른 안이 결정되면 이 안도
+    #     대기가 아니다 — 「후보」 낱말(`state`)은 그대로 둔다.
+    pending: bool = Field(
+        description="이 안의 요청(품목·날)에 아직 결정이 없나. 형제 안이 결정되면 거짓이다"
+    )
     approved: bool = Field(default=False, description="이미 승인된 안인가")
-    #  🔴 **`approved` 를 안 지운다** — 쓰는 화면이 있다 (`console/purchase/page.tsx`).
+    #  🔴 **`approved` 를 안 지운다** — 읽는 자리가 있다: 대시보드 서버
+    #     (`api/dashboard/query.py` `_state` → `plan_state.state_of(approved=…)`).
+    #     ~~쓰는 화면이 있다 (`console/purchase/page.tsx`)~~ — **낡았다** (2026-09-17).
+    #     매입 화면은 이제 `state` 를 읽고 이 칸은 안 읽는다.
     #     `state` 는 그것이 못 가르는 것(승인 vs 실매입 기록됨)을 마저 가른다.
     state: str = Field(
         default="후보",
@@ -114,5 +124,9 @@ class PurchaseTab(BaseModel):
     #     없고(`purchases` 에 승인자 칸 없음), 마스터가 `purchases.decision_id`(FK)로
     #     `master_decisions` 를 가리키게 하기로 정했다. 칸이 선 뒤에 조인해 읽는다.
     committed: Table = Field(description="승인을 거친 뒤에 생기는 확정 매입")
-    committed_note: Note = Field(description="승인 전에는 표가 빈다는 안내")
+    #  🔴 설명이 낡았었다 (2026-09-17) — 「승인 전에는 표가 빈다는 안내」는 빈 표 문구
+    #     (`committed.empty_text`)의 일이고, 이 글은 **어떤 줄을 봤고 무엇을 뺐나**를 적는다.
+    committed_note: Note = Field(
+        description="어떤 줄을 봤나 — 기준일까지 줄 수 · 도착일을 못 맞춘 줄 · 다른 걷기라 뺀 줄"
+    )
     source: Source = Field(description="예시값인지 실제 값인지")

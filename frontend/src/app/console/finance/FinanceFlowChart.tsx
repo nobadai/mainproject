@@ -72,19 +72,19 @@ export function FinanceFlowChart({ rows }: { rows: ClosingItem[] }) {
               dataKey="index"
               axisLine={false}
               tickLine={false}
-              tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+              tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
               tickFormatter={(index: number) => points[index]?.label ?? ""}
               minTickGap={28}
             />
             <YAxis
               axisLine={false}
               tickLine={false}
-              tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+              tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
               tickFormatter={(value: number) => manwon(value)}
               width={72}
             />
             <Tooltip content={<FlowTooltip />} cursor={{ fill: "var(--color-grid)" }} />
-            <Legend wrapperStyle={{ fontSize: 11.5 }} />
+            <Legend wrapperStyle={{ fontSize: 15.5 }} />
             <ReferenceLine y={0} stroke="var(--color-hair)" />
             <Bar dataKey="수금" stackId="flow" fill="var(--color-t-good)" isAnimationActive={false} />
             {OUTFLOW.map((series) => (
@@ -99,7 +99,7 @@ export function FinanceFlowChart({ rows }: { rows: ClosingItem[] }) {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <p className="mb-0 mt-2 text-[12px] leading-relaxed text-ink2">
+      <p className="mb-0 mt-2 text-[16px] leading-relaxed text-ink2">
         위쪽은 들어온 돈, 아래쪽은 나간 돈입니다. 가로축은 마감된 날만 차례로 놓은 것이라,
         칸 간격이 실제 날짜 간격을 뜻하지 않습니다.
         {empty.length > 0 && (
@@ -120,7 +120,7 @@ function FlowTooltip({ active, payload }: { active?: boolean; payload?: TooltipE
   const point = payload?.[0]?.payload;
   if (!active || !point) return null;
   return (
-    <div className="min-w-56 rounded-lg border border-hair bg-panel p-3 text-[12px] shadow-lg">
+    <div className="min-w-56 rounded-lg border border-hair bg-panel p-3 text-[16px] shadow-lg">
       <p className="mb-2 mt-0 font-semibold">{point.label}</p>
       <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
         <Row label="수금" value={point.수금} tone="good" />

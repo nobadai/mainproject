@@ -149,7 +149,7 @@ export function PartnerProfileForm({ partnerId }: { partnerId: string }) {
           value={draft.pricing_contract_type}
           onChange={(v) => setDraft({ ...draft, pricing_contract_type: v })}
         />
-        <label className="flex items-end gap-2 text-[11.5px]">
+        <label className="flex items-end gap-2 text-[15.5px]">
           <input
             type="checkbox"
             checked={draft.active}
@@ -163,18 +163,18 @@ export function PartnerProfileForm({ partnerId }: { partnerId: string }) {
         <button
           onClick={save}
           disabled={!dirty || saving}
-          className="rounded-lg border px-3 py-2 text-[12px] disabled:opacity-50"
+          className="rounded-lg border px-3 py-2 text-[16px] disabled:opacity-50"
           style={{ borderColor: "var(--color-hair)" }}
         >
           {saving ? "저장 중" : "저장"}
         </button>
-        <span className="text-[11.5px] text-ink2">
+        <span className="text-[15.5px] text-ink2">
           {dirty ? `${Object.keys(update).length}개 칸이 바뀌었습니다` : "바뀐 칸이 없습니다"}
           {saved && !dirty && " · 저장됐습니다"}
         </span>
       </div>
-      {error && <p className="mb-0 mt-2 text-[11.5px] text-ink2">{error}</p>}
-      <p className="mb-0 mt-2 text-[11px] text-ink2">
+      {error && <p className="mb-0 mt-2 text-[15.5px] text-ink2">{error}</p>}
+      <p className="mb-0 mt-2 text-[15px] text-ink2">
         담당자·전화·이메일 칸은 `partners` 에 없습니다 — 마이그레이션이 필요합니다. 여신 한도는{" "}
         {profile.credit_source} 가 답합니다.
       </p>
@@ -198,13 +198,13 @@ function Field({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="mt-2 flex flex-col gap-1 text-[11.5px]">
+    <label className="mt-2 flex flex-col gap-1 text-[15.5px]">
       <span className="text-ink2">{label}</span>
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
         spellCheck={false}
-        className="rounded-md border px-2 py-1 text-[12px]"
+        className="rounded-md border px-2 py-1 text-[16px]"
         style={{ borderColor: "var(--color-hair)" }}
       />
     </label>

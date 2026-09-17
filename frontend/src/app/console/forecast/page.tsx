@@ -113,7 +113,7 @@ function ForecastPane() {
               boxShadow: c.item === data.selected ? "0 0 0 1px var(--color-t-info)" : undefined,
             }}
           >
-            <span className="flex flex-wrap items-center gap-1.5 text-[13px] font-semibold">
+            <span className="flex flex-wrap items-center gap-1.5 text-[17px] font-semibold">
               {c.item}
               <span className="ml-auto flex flex-wrap gap-1.5">
                 <Pill text={c.grade} tone="info" />
@@ -125,13 +125,13 @@ function ForecastPane() {
                        아래 줄에 그대로 있습니다. 서버의 `review` 는 그대로 둡니다. */}
               </span>
             </span>
-            <span className="tabular font-mono text-[22px] leading-none">
+            <span className="tabular font-mono text-[26px] leading-none">
               {c.predicted.toLocaleString("ko-KR")}
-              <span className="ml-1 font-sans text-[10.5px]" style={{ color: "var(--color-mut)" }}>
+              <span className="ml-1 font-sans text-[14.5px]" style={{ color: "var(--color-mut)" }}>
                 {c.unit} · {c.target_date}
               </span>
             </span>
-            <span className="text-[10.5px] leading-snug" style={{ color: "var(--color-mut)" }}>
+            <span className="text-[14.5px] leading-snug" style={{ color: "var(--color-mut)" }}>
               예상 구간 {c.lower.toLocaleString("ko-KR")}~{c.upper.toLocaleString("ko-KR")} · 폭{" "}
               {c.ci_width}
               {c.spec && (
@@ -164,7 +164,7 @@ function ForecastPane() {
                   ? "끄면 실제 업무 화면처럼 보입니다 — 예측을 만든 날에는 진짜 정답을 알 수 없습니다"
                   : "켜면 지난 날짜의 진짜 가격도 함께 그립니다 (시연할 때 씁니다)"
               }
-              className="rounded-lg px-3 py-1.5 text-[12.5px] font-medium"
+              className="rounded-lg px-3 py-1.5 text-[16.5px] font-medium"
               style={
                 showActual
                   ? { background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }
@@ -246,7 +246,7 @@ function Tab({
       type="button"
       onClick={onClick}
       aria-pressed={on}
-      className="relative rounded-lg border px-3 py-1.5 text-[12px] font-medium transition"
+      className="relative rounded-lg border px-3 py-1.5 text-[16px] font-medium transition"
       style={{
         borderColor: on ? "var(--color-nav)" : "var(--color-hair)",
         background: on ? "var(--color-nav)" : "var(--color-panel)",
@@ -260,7 +260,7 @@ function Tab({
         //    지금과 똑같아집니다.
         <span
           aria-label={`결정할 것 ${badge}건`}
-          className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold leading-none"
+          className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[14px] font-bold leading-none"
           style={{ background: "var(--color-t-bad)", color: "#fff" }}
         >
           {badge}

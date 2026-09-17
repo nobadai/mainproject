@@ -21,11 +21,19 @@ import {
   SourceTag,
   StatRow,
 } from "@/components/console/Blocks";
+import { Table as PagedTable, type Column as PagedColumn } from "@/components/console/ConsoleData";
 import { useTab } from "@/components/console/useTab";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
 //     `useTab` 의 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
-import { purchase, type Plan, type PurchaseTab, type Tone } from "@/lib/screen";
+import {
+  purchase,
+  type Cell,
+  type Plan,
+  type PurchaseTab,
+  type Table as ScreenTable,
+  type Tone,
+} from "@/lib/screen";
 
 /**
  * 상태 낱말 → 색. **낱말은 서버가 정한다** (`app/api/plan_state.py` 의 넷).
@@ -37,7 +45,9 @@ import { purchase, type Plan, type PurchaseTab, type Tone } from "@/lib/screen";
  *    화면이 조용히 빈 배지를 내면, 사람은 상태가 없는 줄로 읽는다.
  */
 const STATE_TONE: Record<string, Tone> = {
-  //  기다리는 것 — 사람이 아직 할 일이 남았다
+  //  결정이 안 난 안. 🔴 ~~기다리는 것 — 사람이 아직 할 일이 남았다~~ 낡았다 (2026-09-17).
+  //  같은 요청에서 다른 안이 결정되면 「후보」여도 **기다리지 않는다** — 기다리는지는
+  //  `plan.pending` 이 말하고(초록 테두리), 이 색은 낱말만 따른다.
   후보: "warn",
   //  결정이 났다
   승인됨: "good",
@@ -46,6 +56,48 @@ const STATE_TONE: Record<string, Tone> = {
   //  안 사기로 한 것
   반려: "bad",
 };
+
+/**
+ * 칸 값 → 화면 글자. 🔴 **`null` 은 「—」다 — 0 도 빈칸도 아니다** (규칙 3).
+ *
+ * ★ 공용 `DataTable`(Blocks)의 `cellText` 와 **같은 규칙**이다. 확정 매입 표를 검색 · 쪽
+ *   나누기 부품(`ConsoleData.Table`)으로 바꾸면서 그 규칙을 여기로 옮겼다 — 부품을 바꾸다
+ *   `String(null)` 이 「null」로 찍히거나 빈칸이 되면 «못 맞췄다» 가 화면에서 사라진다.
+ */
+function cellText(v: Cell | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return typeof v === "number" ? v.toLocaleString("ko-KR") : String(v);
+}
+
+/**
+ * 확정 매입 표. **검색 · 10줄씩** (2026-09-17).
+ *
+ * ★ 부품은 운영 콘솔 공용 `ConsoleData.Table` 을 **고치지 않고** 쓴다 — 재무 · 판매 표와
+ *   조작법이 같아진다. 공용 `DataTable`(Blocks)은 대시보드 · 물류가 쓰므로 안 건드린다.
+ * 🔴 줄 수는 API 가 준 그대로다 — 화면은 **쪽만** 나눈다. 이번 주 매입액 · 입고 예정은
+ *    API 가 전체 줄로 셌다 (FINAL-0918 09-14 · 495줄 · 111KB 를 한 번에 받는다).
+ * ⚠️ 줄이 0 이면 공용 부품 대신 `DataTable` 로 그린다 — `ConsoleData.Table` 은 빈 표를
+ *    「검색 조건에 맞는 항목이 없습니다」로 적는데, 그건 API 가 준 빈 표 안내와 다른 말이다.
+ */
+function CommittedTable({ table }: { table: ScreenTable }) {
+  //  🔴 매입 번호 칸(`approval`)은 **화면에서만** 가린다 · 근거는 아래 Panel 주석
+  const shown = table.columns.filter((c) => c.key !== "approval");
+  if (table.rows.length === 0) return <DataTable table={{ ...table, columns: shown }} />;
+  const columns: PagedColumn<Record<string, Cell>>[] = shown.map((c) => ({
+    key: c.key,
+    label: c.label,
+    //  ★ 공용 부품은 left · right 만 안다. 확정 매입 칸에 center 는 없다
+    align: c.align === "right" ? "right" : "left",
+    mono: c.mono,
+    render: (row) => cellText(row[c.key]),
+  }));
+  return (
+    <>
+      <PagedTable columns={columns} rows={table.rows} pageSize={10} />
+      <Note note={table.note} />
+    </>
+  );
+}
 
 /**
  * 이 안이 지금 어느 상태인가.
@@ -75,16 +127,16 @@ function PlanCard({ plan }: { plan: Plan }) {
         className="flex flex-wrap items-center gap-2 border-b px-4 py-3"
         style={{ borderColor: "var(--color-hair-soft)" }}
       >
-        <strong className="text-[14px] font-semibold">{plan.key}</strong>
+        <strong className="text-[18px] font-semibold">{plan.key}</strong>
         <Pill text={plan.knob} tone="info" />
         <PlanState plan={plan} />
-        <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+        <span className="ml-auto text-[15.5px]" style={{ color: "var(--color-mut)" }}>
           {plan.coverage}
         </span>
       </header>
 
       <div className="flex flex-col gap-3.5 p-4">
-        <dl className="m-0 flex flex-col gap-1.5 text-[12.5px]">
+        <dl className="m-0 flex flex-col gap-1.5 text-[16.5px]">
           {[
             ["사는 양", `${plan.qty_kg.toLocaleString("ko-KR")} kg`, true],
             ["예상 금액", `${plan.amount_krw.toLocaleString("ko-KR")} 원`, false],
@@ -94,7 +146,7 @@ function PlanCard({ plan }: { plan: Plan }) {
               <dt className="m-0" style={{ color: "var(--color-mut)" }}>
                 {k}
               </dt>
-              <dd className={`tabular m-0 font-mono ${hero ? "text-[19px]" : "text-[13px]"}`}>{v}</dd>
+              <dd className={`tabular m-0 font-mono ${hero ? "text-[23px]" : "text-[17px]"}`}>{v}</dd>
             </div>
           ))}
           {/*
@@ -111,7 +163,7 @@ function PlanCard({ plan }: { plan: Plan }) {
             style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
           >
             <dt className="m-0 font-semibold">이보다 비싸면 안 산다</dt>
-            <dd className="tabular m-0 font-mono text-[14px] font-semibold">
+            <dd className="tabular m-0 font-mono text-[18px] font-semibold">
               {plan.cut_unit_price === null
                 ? "이 실행에는 기준이 없습니다"
                 : `${plan.cut_unit_price.toLocaleString("ko-KR")} 원/kg`}
@@ -120,39 +172,40 @@ function PlanCard({ plan }: { plan: Plan }) {
         </dl>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             회차
           </h3>
           <DataTable table={plan.legs} />
         </section>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             지급
           </h3>
           <DataTable table={plan.payments} />
         </section>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             근거
           </h3>
-          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[15.5px] leading-relaxed">
             {plan.reasons.map((r, i) => (
               <li key={i} className="flex flex-wrap items-baseline gap-1.5">
                 <span
-                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[14px] font-semibold"
                   style={{ background: "var(--color-sunk)", color: "var(--color-ink2)" }}
                 >
                   {r.source}
                 </span>
                 {r.carried && <Pill text="어제 기억" tone="sim" />}
+                {/*
+                  🔴 근거 꼬리표(`r.ref`)를 **화면에서만** 가린다 (2026-09-17).
+                     `FC-…` · `INV-LOT-RCPT-SIM-CHAIN-…` 같은 내부 식별자라 업무가 안 읽는다.
+                  ⚠️ API 에서는 빼지 않는다 — 모든 근거에 `ref_id` 가 있어야 한다 (규칙 4).
+                     되짚을 때는 API 응답에서 읽는다.
+                */}
                 <span className="min-w-0 flex-1">{r.text}</span>
-                {r.ref && (
-                  <span className="font-mono text-[10px]" style={{ color: "var(--color-mut2)" }}>
-                    {r.ref}
-                  </span>
-                )}
               </li>
             ))}
           </ul>
@@ -160,10 +213,10 @@ function PlanCard({ plan }: { plan: Plan }) {
 
         {plan.risks.length > 0 && (
           <section className="flex flex-col gap-2">
-            <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-t-warn)" }}>
+            <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-t-warn)" }}>
               걸리는 것
             </h3>
-            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
+            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[15.5px] leading-relaxed">
               {plan.risks.map((r) => (
                 <li key={r} className="flex gap-2">
                   <i aria-hidden style={{ color: "var(--color-t-warn)" }}>·</i>
@@ -208,7 +261,15 @@ export default function PurchasePage() {
         마스터가 purchases.decision_id(FK)를 세운 뒤 조인해 읽기로 했다.
       */}
       <Panel title="확정된 매입" subtitle="승인을 거친 뒤에 생깁니다" footer="승인은 아래 서랍에서 합니다.">
-        <DataTable table={data.committed} />
+        {/*
+          🔴 매입 번호 칸(`approval`)을 **화면에서만** 가린다 (2026-09-17). 값은 API 에 남는다.
+             잰 것 — REH-0914 08-31 · FINAL-0918 09-14 · V13 01-26 세 실행에서
+             ① 줄이 (품목 · 사는 날)만으로 **겹침 0** (291 · 495 · 21줄) — 번호 없이도 줄이 갈린다
+             ② 번호 44~52자 · 끝이 전부 `D1-S1` — 다른 칸에 없는 정보가 없다
+             ③ 재무 API 도 `purchase_id` 를 싣지만 **재무 화면은 안 그린다** — 맞대 볼 화면이 없다
+          ⚠️ 이름을 고치는 쪽(「매입 번호」)은 API 가 했다 — 칸이 원래 「승인」으로 틀려 있었다.
+        */}
+        <CommittedTable table={data.committed} />
         <Note note={data.committed_note} />
       </Panel>
     </>

@@ -77,7 +77,7 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
         }}
         className="flex flex-wrap items-center gap-2"
       >
-        <label className="flex min-w-[220px] flex-1 items-center gap-2 text-[12.5px] text-muted">
+        <label className="flex min-w-[220px] flex-1 items-center gap-2 text-[16.5px] text-muted">
           <span className="shrink-0">매입 판단 번호</span>
           <input
             value={id}
@@ -90,13 +90,13 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
              */
             onFocus={(e) => e.currentTarget.select()}
             placeholder="매입 판단 번호를 입력하세요"
-            className="min-w-0 flex-1 rounded-lg border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent"
+            className="min-w-0 flex-1 rounded-lg border border-line bg-surface px-3 py-2 text-[17px] text-ink outline-none focus:border-accent"
           />
         </label>
         <button
           type="submit"
           disabled={busy || !id.trim()}
-          className="rounded-lg bg-accent px-4 py-2 text-[13.5px] font-semibold text-white disabled:opacity-45"
+          className="rounded-lg bg-accent px-4 py-2 text-[17.5px] font-semibold text-white disabled:opacity-45"
         >
           {busy ? "조회 중…" : "조회"}
         </button>
@@ -104,13 +104,13 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
 
       {known.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] text-faint">방금 만든 판단</span>
+          <span className="text-[15px] text-faint">방금 만든 판단</span>
           {known.map((key, i) => (
             <button
               key={key}
               type="button"
               onClick={() => void load(key)}
-              className={`rounded-full border px-2.5 py-0.5 text-[11.5px] ${
+              className={`rounded-full border px-2.5 py-0.5 text-[15.5px] ${
                 key === data?.request_id
                   ? "border-accent bg-accent-wash text-accent-ink"
                   : "border-line bg-sunk text-muted hover:border-accent"
@@ -123,7 +123,7 @@ export function RunHistoryPanel({ known }: { known: string[] }) {
       )}
 
       {error && (
-        <div className="rounded-lg border border-warn/25 bg-warn-wash p-3 text-[13px] text-warn">
+        <div className="rounded-lg border border-warn/25 bg-warn-wash p-3 text-[17px] text-warn">
           {error}
         </div>
       )}
@@ -143,16 +143,16 @@ export function HistoryView({ data }: { data: RunHistoryData }) {
   return (
     <>
       <div className="flex flex-col gap-1 border-b border-line pb-3">
-        <h3 className="m-0 text-[15px] font-semibold">
+        <h3 className="m-0 text-[19px] font-semibold">
           {requestLabel(data.request_id) ?? "매입 판단"}
         </h3>
-        <p className="m-0 text-[12.5px] text-muted">
+        <p className="m-0 text-[16.5px] text-muted">
           기준일 {formatKoreanDate(data.as_of)}
           {item && ` · 품목 ${item}`}
           {ranAt && ` · ${ranAt}에 실행`}
         </p>
         {/* 같은 번호로 다시 돌리면 실행이 쌓이고 서버는 마지막 것을 돌려준다 */}
-        <p className="m-0 text-[11.5px] text-faint">
+        <p className="m-0 text-[15.5px] text-faint">
           같은 판단을 여러 번 다시 만들었다면 가장 마지막 결과를 보여 줍니다.
         </p>
       </div>
@@ -166,14 +166,14 @@ export function HistoryView({ data }: { data: RunHistoryData }) {
 function Steps({ rows }: { rows: Record<string, unknown>[] }) {
   if (rows.length === 0)
     return (
-      <p className="m-0 text-[13px] text-muted">
+      <p className="m-0 text-[17px] text-muted">
         이 판단은 부서 확인을 한 단계도 거치지 못했습니다.
       </p>
     );
 
   return (
     <section>
-      <p className="mb-1.5 text-[12px] font-semibold text-muted">
+      <p className="mb-1.5 text-[16px] font-semibold text-muted">
         이 매입 판단이 거친 단계 · {rows.length}단계
       </p>
       <ol className="m-0 flex list-none flex-col gap-1 p-0">
@@ -184,13 +184,13 @@ function Steps({ rows }: { rows: Record<string, unknown>[] }) {
           return (
             <li
               key={i}
-              className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 rounded-lg border border-line-soft bg-surface px-3 py-2 text-[13px]"
+              className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 rounded-lg border border-line-soft bg-surface px-3 py-2 text-[17px]"
             >
-              <span className="w-5 shrink-0 text-right text-[12px] text-faint">{i + 1}</span>
+              <span className="w-5 shrink-0 text-right text-[16px] text-faint">{i + 1}</span>
               {dept && <b className="shrink-0 font-semibold">{dept}</b>}
               <span className="flex-1">{stepLabel(row.agent, row.mode)}</span>
               <span
-                className={`rounded px-1.5 py-px text-[11.5px] font-medium ${
+                className={`rounded px-1.5 py-px text-[15.5px] font-medium ${
                   attention ? "bg-warn-wash text-warn" : "bg-accent-wash text-accent-ink"
                 }`}
               >
@@ -225,14 +225,14 @@ function decisionSentence(row: DecisionOut): string {
 function Decisions({ rows, latestRunId }: { rows: DecisionOut[]; latestRunId: string | null }) {
   if (rows.length === 0)
     return (
-      <p className="m-0 rounded-lg border border-line bg-sunk p-3 text-[13px] text-muted">
+      <p className="m-0 rounded-lg border border-line bg-sunk p-3 text-[17px] text-muted">
         아직 결정이 없습니다. <b className="text-ink">미결정</b>이며 거절된 것이 아닙니다.
       </p>
     );
 
   return (
     <section>
-      <p className="mb-1.5 text-[12px] font-semibold text-muted">결정 기록 · {rows.length}건</p>
+      <p className="mb-1.5 text-[16px] font-semibold text-muted">결정 기록 · {rows.length}건</p>
       <ol className="m-0 flex list-none flex-col gap-1.5 p-0">
         {rows.map((row) => (
           <li
@@ -242,20 +242,20 @@ function Decisions({ rows, latestRunId }: { rows: DecisionOut[]; latestRunId: st
             }`}
           >
             <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
-              <span className="text-[13.5px]">{decisionSentence(row)}</span>
+              <span className="text-[17.5px]">{decisionSentence(row)}</span>
               {row.is_current ? (
-                <span className="rounded-full bg-accent px-1.5 py-px text-[10.5px] font-semibold text-white">
+                <span className="rounded-full bg-accent px-1.5 py-px text-[14.5px] font-semibold text-white">
                   현재 결정
                 </span>
               ) : (
-                <span className="text-[11px] text-faint">이전 결정</span>
+                <span className="text-[15px] text-faint">이전 결정</span>
               )}
             </div>
             {row.condition_text && (
-              <p className="m-0 mt-1 text-[12.5px] text-muted">요청한 조건: {row.condition_text}</p>
+              <p className="m-0 mt-1 text-[16.5px] text-muted">요청한 조건: {row.condition_text}</p>
             )}
             {row.follow_up_request_id && (
-              <p className="m-0 mt-1 text-[12px] text-muted">
+              <p className="m-0 mt-1 text-[16px] text-muted">
                 이 요청으로 매입안을 다시 만들었습니다
                 {requestLabel(row.follow_up_request_id)
                   ? ` (${requestLabel(row.follow_up_request_id)})`
@@ -264,14 +264,14 @@ function Decisions({ rows, latestRunId }: { rows: DecisionOut[]; latestRunId: st
               </p>
             )}
             {row.history_run_id && latestRunId && row.history_run_id !== latestRunId && (
-              <p className="m-0 mt-1 text-[12px] text-warn">
+              <p className="m-0 mt-1 text-[16px] text-warn">
                 이 결정은 위에 보이는 결과보다 앞선 결과를 보고 내렸습니다.
               </p>
             )}
           </li>
         ))}
       </ol>
-      <p className="m-0 mt-2 text-[11.5px] text-faint">
+      <p className="m-0 mt-2 text-[15.5px] text-faint">
         결정을 바꾸면 이전 결정은 지우지 않고 함께 남깁니다.
       </p>
     </section>

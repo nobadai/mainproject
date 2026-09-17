@@ -65,9 +65,9 @@ function Card({
       style={{ borderColor: "var(--color-hair)" }}
     >
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <h2 className="m-0 text-[13.5px] font-semibold">{title}</h2>
+        <h2 className="m-0 text-[17.5px] font-semibold">{title}</h2>
         {subtitle && (
-          <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+          <span className="text-[15.5px]" style={{ color: "var(--color-mut)" }}>
             {subtitle}
           </span>
         )}
@@ -92,7 +92,7 @@ function RunButton({
       type="button"
       onClick={onClick}
       disabled={busy}
-      className="rounded-lg px-3 py-1.5 text-[12px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-45"
+      className="rounded-lg px-3 py-1.5 text-[16px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-45"
       style={{ background: "var(--color-nav)", color: "#f4f3ee" }}
     >
       {busy ? "검사 중…" : children}
@@ -170,26 +170,26 @@ function QualityCard({ onDone }: { onDone: () => void }) {
     >
       {err && (
         <p
-          className="m-0 rounded-lg px-3.5 py-2.5 text-[12px]"
+          className="m-0 rounded-lg px-3.5 py-2.5 text-[16px]"
           style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
         >
           {err}
         </p>
       )}
       {when && when !== "없음" && (
-        <p className="m-0 text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[15.5px]" style={{ color: "var(--color-mut2)" }}>
           {when === "방금"
             ? "방금 다시 잰 결과입니다"
             : "매일 아침 자동으로 점검한 결과입니다"}
         </p>
       )}
       {when === "없음" && !err && (
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
           점검 결과가 아직 없습니다 — 아침 자동 점검 뒤에 채워집니다.
         </p>
       )}
       {!when && !err && (
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
           읽는 중…
         </p>
       )}
@@ -238,7 +238,7 @@ function TodayClaude({
         //    진단이 통째로 빕니다.
         right={<RerunButton what="claude" label="지금 만들기" onDone={onDone} />}
       >
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
           오늘 진단 결과가 아직 없습니다 — 아침 작업이 끝난 뒤 실행됩니다.
         </p>
       </Card>
@@ -258,14 +258,14 @@ function TodayClaude({
     >
       {err && (
         <p
-          className="m-0 rounded-lg px-3.5 py-2.5 text-[12px]"
+          className="m-0 rounded-lg px-3.5 py-2.5 text-[16px]"
           style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
         >
           {err}
         </p>
       )}
       {!text && !err && (
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
           불러오는 중…
         </p>
       )}
@@ -342,19 +342,19 @@ function History({ skip, tick }: { skip: string | null; tick: number }) {
       right={<DateRange onChange={onRange} />}
     >
       {err && (
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-t-bad)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-t-bad)" }}>
           {err}
         </p>
       )}
       {!days && !err && (
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
           불러오는 중…
         </p>
       )}
       {days?.length === 0 && (
         //  ★ 빈 목록을 조용히 두지 않습니다 — «AI 가 아무 말도 안 했다» 가 아니라
         //    «그 기간을 골랐다» 입니다.
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
           이 기간에 남겨진 보고서가 없습니다
         </p>
       )}
@@ -368,7 +368,7 @@ function History({ skip, tick }: { skip: string | null; tick: number }) {
           if (reports.length === 0) return null;
           return (
             <div key={d.date}>
-              <p className="m-0 mb-1 font-mono text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+              <p className="m-0 mb-1 font-mono text-[15.5px]" style={{ color: "var(--color-mut)" }}>
                 {d.date}
               </p>
               <ul className="m-0 flex list-none flex-wrap gap-1.5 p-0">
@@ -377,7 +377,7 @@ function History({ skip, tick }: { skip: string | null; tick: number }) {
                     <button
                       type="button"
                       onClick={() => show(f.file)}
-                      className="flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11.5px] transition hover:bg-sunk"
+                      className="flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[15.5px] transition hover:bg-sunk"
                       style={{
                         borderColor: open === f.file ? "var(--color-t-info)" : "var(--color-hair)",
                       }}
@@ -387,13 +387,13 @@ function History({ skip, tick }: { skip: string | null; tick: number }) {
                              다섯 번 도는 날도 있습니다). 시각이 없으면 어느
                              것이 어느 것인지 못 고릅니다. */}
                       {f.time && (
-                        <span className="font-mono text-[10.5px]" style={{ color: "var(--color-mut2)" }}>
+                        <span className="font-mono text-[14.5px]" style={{ color: "var(--color-mut2)" }}>
                           {f.time.slice(0, 5)}
                         </span>
                       )}
                       {f.verdict && <Verdict level={f.verdict} />}
                       {f.is_claude && (
-                        <span className="text-[10px]" style={{ color: "var(--color-t-sim)" }}>
+                        <span className="text-[14px]" style={{ color: "var(--color-t-sim)" }}>
                           AI
                         </span>
                       )}
@@ -411,7 +411,7 @@ function History({ skip, tick }: { skip: string | null; tick: number }) {
                   ) : (
                     //  ★ `.txt` 는 수치가 세로로 줄 맞춰져 있습니다.
                     //    문서로 그리면 줄 맞춤이 깨집니다.
-                    <pre className="tabular m-0 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">
+                    <pre className="tabular m-0 whitespace-pre-wrap break-words font-mono text-[15px] leading-relaxed">
                       {text}
                     </pre>
                   )}

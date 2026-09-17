@@ -48,7 +48,7 @@ export function RunPicker({ asOf }: { asOf: string }) {
 
   return (
     <div
-      className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-panel px-4 py-3 text-[11.5px]"
+      className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-panel px-4 py-3 text-[15.5px]"
       style={{ borderColor: "var(--color-hair)" }}
     >
       <Pill text={simRun ? "LIVE" : "NO RUN"} tone={simRun ? "good" : "sim"} />
@@ -58,7 +58,7 @@ export function RunPicker({ asOf }: { asOf: string }) {
           value={simRun}
           onChange={(event) => setSimRun(event.target.value)}
           disabled={state.loading || rows.length === 0}
-          className="w-[320px] rounded-md border px-2 py-1 font-mono text-[11px]"
+          className="w-[320px] rounded-md border px-2 py-1 font-mono text-[15px]"
           style={{ borderColor: "var(--color-hair)" }}
         >
           <option value="">

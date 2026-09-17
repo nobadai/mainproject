@@ -304,8 +304,8 @@ export function MasterDock({ session }: { session: Session }) {
             aria-expanded={open}
             className="flex min-w-0 flex-1 items-center gap-2 text-left"
           >
-            <b className="text-[12.5px] font-semibold">마스터에게 묻기</b>
-            <span className="truncate text-[11px]" style={{ color: "var(--color-mut2)" }}>
+            <b className="text-[16.5px] font-semibold">마스터에게 묻기</b>
+            <span className="truncate text-[15px]" style={{ color: "var(--color-mut2)" }}>
               {open ? "접으려면 누르세요" : "오늘 배추 얼마나 사야 해? · 창고에 얼마나 남았어?"}
             </span>
           </button>
@@ -313,7 +313,7 @@ export function MasterDock({ session }: { session: Session }) {
             type="button"
             onClick={toggleOpen}
             aria-expanded={open}
-            className="shrink-0 rounded-lg px-3 py-1.5 text-[12px] font-semibold transition"
+            className="shrink-0 rounded-lg px-3 py-1.5 text-[16px] font-semibold transition"
             style={{ background: "var(--color-nav)", color: "#f4f3ee" }}
           >
             {open ? "접기" : "열기"}
