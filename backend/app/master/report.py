@@ -649,16 +649,17 @@ def render_finance_chat_report(*, sim_run_id: str, as_of, start_date, end_date) 
     from app.finance.console_receivables import get_console_receivables
     from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
 
-    dashboard = get_finance_dashboard(sim_run_id=sim_run_id, as_of=as_of)
-    receivables = get_console_receivables(sim_run_id=sim_run_id, as_of=as_of)
-    payables = get_console_payables(sim_run_id=sim_run_id, as_of=as_of)
+    # 기말 상태 KPI는 요청 시점이 아니라 보고서 종료일의 동일 실행 read model을 쓴다.
+    dashboard = get_finance_dashboard(sim_run_id=sim_run_id, as_of=end_date)
+    receivables = get_console_receivables(sim_run_id=sim_run_id, as_of=end_date)
+    payables = get_console_payables(sim_run_id=sim_run_id, as_of=end_date)
     expenses = get_console_expenses(
         sim_run_id=sim_run_id,
-        as_of=as_of,
+        as_of=end_date,
         from_date=start_date,
         to_date=end_date,
     )
-    credit = get_console_credit(sim_run_id=sim_run_id, as_of=as_of)
+    credit = get_console_credit(sim_run_id=sim_run_id, as_of=end_date)
     days = max(1, min(400, (end_date - start_date).days + 1))
     cashflow = get_finance_cashflow(sim_run_id=sim_run_id, as_of=end_date, days=days)
     cashflow_dates = [row.close_date for row in getattr(cashflow, "cashflow", [])]
@@ -669,7 +670,7 @@ def render_finance_chat_report(*, sim_run_id: str, as_of, start_date, end_date) 
     return {
         "kind": "FINANCE",
         "sim_run_id": sim_run_id,
-        "as_of": as_of.isoformat(),
+        "as_of": end_date.isoformat(),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
         # 요청한 기간과 실제로 읽힌 원장 기간은 다른 사실이다. 데이터가 부족해도
