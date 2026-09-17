@@ -28,7 +28,6 @@ import {
   useConsoleData,
 } from "@/components/console/ConsoleData";
 import { DomainHeader } from "@/components/console/DomainShell";
-import { RunPicker, useSimRun } from "@/components/console/RunPicker";
 import { PartnerProfileForm } from "@/components/console/PartnerProfileForm";
 import { SalesCandidatePanel } from "@/components/console/SalesCandidatePanel";
 import {
@@ -45,9 +44,10 @@ import {
   STAGE_LABELS,
 } from "@/lib/console_api";
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { FINANCE_SALES_SIM_RUN_ID } from "@/lib/run_context";
 
 import { AgingBars } from "../finance/AgingBars";
-import { DataBasis, NoRunChosen, TechDetails } from "../finance/TechDetails";
+import { DataBasis, TechDetails } from "../finance/TechDetails";
 import {
   DATA_SOURCE_NOTE,
   itemText,
@@ -86,18 +86,14 @@ const TABS: { key: Tab; label: string }[] = [
 
 export default function SalesPage() {
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
-  const simRun = useSimRun();
+  const simRun = FINANCE_SALES_SIM_RUN_ID;
   const [tab, setTab] = useState<Tab>("overview");
   const [salesRefresh, setSalesRefresh] = useState(0);
   return (
     <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
       <DomainHeader title="판매" tabs={TABS} active={tab} onChange={setTab} />
       <DataBasis asOf={asOf} note={DATA_SOURCE_NOTE} />
-      {/* 🔴 실행 축은 내부 식별자다. 고르는 자리는 남기되 기본 화면에서 내린다. */}
-      <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
-        <RunPicker asOf={asOf} />
-      </TechDetails>
-      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} salesRefresh={salesRefresh} onSalesConfirmed={() => setSalesRefresh((value) => value + 1)} />}
+      <Body simRun={simRun} asOf={asOf} tab={tab} salesRefresh={salesRefresh} onSalesConfirmed={() => setSalesRefresh((value) => value + 1)} />
     </div>
   );
 }
