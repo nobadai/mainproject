@@ -508,7 +508,9 @@ def _domain_preview(intent: Intent, *, as_of: date) -> str:
     return "이 작업을 실행할까요?"
 
 
-def _domain_read(intent: Intent, *, as_of: date) -> DomainActionAnswer:
+def _domain_read(
+    intent: Intent, *, as_of: date, sim_run_id: str = SHOWN_SIM_RUN_ID
+) -> DomainActionAnswer:
     action = intent.domain_action or ""
     slots = _slots(intent)
 
@@ -595,7 +597,7 @@ def _domain_read(intent: Intent, *, as_of: date) -> DomainActionAnswer:
     if action == "FINANCE_REPORT_GENERATE":
         start, end = _period(intent, as_of=as_of)
         report = render_finance_chat_report(
-            sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, start_date=start, end_date=end
+            sim_run_id=sim_run_id, as_of=as_of, start_date=start, end_date=end
         )
         return DomainActionAnswer(
             domain="finance",
@@ -682,6 +684,7 @@ def _domain_write(
     as_of: date,
     policy_version: str,
     request_id: str,
+    sim_run_id: str | None = None,
     actor: str,
     utterance: str | None,
 ) -> DomainActionAnswer:
@@ -926,12 +929,13 @@ def _run_domain_action(
     as_of: date,
     policy_version: str,
     request_id: str,
+    sim_run_id: str | None = None,
     actor: str | None = None,
     utterance: str | None = None,
 ):
     action = intent.domain_action
     if action in _DOMAIN_READ_ACTIONS:
-        return _domain_read(intent, as_of=as_of)
+        return _domain_read(intent, as_of=as_of, sim_run_id=sim_run_id or SHOWN_SIM_RUN_ID)
     if action in _DOMAIN_WRITE_ACTIONS:
         if not actor:
             raise DecisionRejected(
@@ -995,6 +999,7 @@ def _ask_domain_action(
                 as_of=request.as_of,
                 policy_version=request.policy_version,
                 request_id=request_id,
+                sim_run_id=request.sim_run_id,
                 utterance=request.utterance,
             )
             assert isinstance(domain, DomainActionAnswer)
@@ -1050,6 +1055,19 @@ def ask(
     service = service or get_intent_service()
     request_id = request.request_id or make_request_id(request.as_of.isoformat())
     result = service.classify(request.utterance)
+    if request.date_from or request.date_to:
+        if request.date_from is None or request.date_to is None:
+            raise ValueError("시작일과 종료일을 모두 선택해 주세요.")
+        if request.date_from > request.date_to:
+            raise ValueError("시작일은 종료일보다 늦을 수 없습니다.")
+        intent = result.intent
+        if intent.domain_action in {"FINANCE_REPORT_GENERATE", "SALES_REPORT_GENERATE"}:
+            slots = _slots(intent).model_copy(update={
+                "start_date": request.date_from.isoformat(),
+                "end_date": request.date_to.isoformat(),
+            })
+            updated_intent = intent.model_copy(update={"slots": slots})
+            result = result.model_copy(update={"intent": updated_intent})
     intent = result.intent
 
     if intent.action == "UNKNOWN":

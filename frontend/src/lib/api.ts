@@ -137,13 +137,19 @@ export const AS_OF = DEFAULT_AS_OF;
 export const POLICY_VERSION = "v1.3";
 
 /** ① 발화문을 분류한다. **확인이 필요하면 아무것도 실행하지 않는다.** */
-export function ask(utterance: string): Promise<AskResponse> {
+export function ask(
+  utterance: string,
+  context?: { simRunId?: string; dateFrom?: string; dateTo?: string },
+): Promise<AskResponse> {
   return call<AskResponse>("/master/ask", {
     method: "POST",
     body: JSON.stringify({
       utterance,
       as_of: asOfSnapshot(),
       policy_version: POLICY_VERSION,
+      sim_run_id: context?.simRunId,
+      date_from: context?.dateFrom,
+      date_to: context?.dateTo,
     }),
   });
 }
