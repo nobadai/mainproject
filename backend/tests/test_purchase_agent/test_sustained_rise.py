@@ -111,8 +111,10 @@ def test_실제_기록_복사행과_보합이_섞여도_앵커에서_오르면_�
     assert filled_dates == {"2026-03-28", "2026-03-29", "2026-04-04", "2026-04-05"}
     assert not filled_dates & {d for d, _ in result.points}, "복사 행이 지점에 들어갔다"
     assert len(result.points) == 10
-    # lead_time 게이트 행 두 개(03-30 · 03-31)는 지점에 **남는다** — 기존 합의
+    # lead_time 게이트 행 두 개(03-30 · 03-31)는 **비교** 지점에 남는다 — 기존 합의
     assert [v for d, v in result.points if d in ("2026-03-30", "2026-03-31")] == [442, 442]
+    # 🔴 그러나 최소 개수에는 안 센다 — 확인된 모델 예측은 10 − 게이트 2 = 8
+    assert (result.model_points, result.flags_reported) == (8, True)
     # 상승률은 이 판정과 **따로** 본다 — +3.2% 라 ① 가격 경로는 임계에서 닫힌다
     assert compute_rise_rate_2w(forecast, day) < constraints["triggers"]["pre_purchase_rise_rate"]
 
@@ -169,6 +171,7 @@ def test_실제_기록_전부_quality_게이트면_하락이_아니라_보류(co
     assert result.verdict == TREND_WITHHELD
     assert result.withheld_reason == WITHHELD_INSUFFICIENT_POINTS
     assert result.points == () and result.first_decline is None
+    assert (result.model_points, result.flags_reported) == (0, True)
     sentence = sustained_rise_sentence(result.verdict, result.withheld_reason)
     assert "보류" in sentence and "아님" not in sentence and "내려가는" not in sentence
 
@@ -178,6 +181,7 @@ def test_실제_기록_전부_quality_게이트면_하락이_아니라_보류(co
     assert decision["by_trend"] is False
     assert decision["trend_verdict"] == TREND_WITHHELD
     assert decision["trend_withheld_reason"] == WITHHELD_INSUFFICIENT_POINTS
+    assert (decision["trend_compared_points"], decision["trend_model_points"]) == (0, 0)
 
 
 # ── 합성 입력 — 정의의 갈래 하나씩 ─────────────────────────────────────────
@@ -221,16 +225,86 @@ def test_복사행은_빼고_게이트는_사유로_가른다(constraints) -> No
         assert judge_sustained_rise(forecast, constraints).verdict == verdict, reason
 
 
-def test_표식이_없는_행은_일반_지점이다(constraints) -> None:
-    """``is_filled``/``gate_reason`` 칸이 **없으면 빼지 않는다**.
+def test_mock_호환_표식_칸이_아예_없는_입력은_전부_모델_예측으로_센다(constraints) -> None:
+    """**mock 호환 처리** — 창의 어느 행에도 표식 칸이 없다 (mock JSON 형식).
 
-    칸이 없다는 것은 «복사 행이다» 가 아니다 (``is_gate_excluded`` 선례와 같다).
+    표식이라는 개념이 없는 입력이라 빼지도 않고(``is_gate_excluded`` 선례) 비교 지점 전부를
+    최소 개수에 센다. 🔴 운영 입력은 두 칸이 ``NOT NULL`` 이라 이 갈래에 안 들어온다.
     """
     forecast = _합성([101, 102, 90, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114])
     for row in forecast["daily"]:
         for key in ("is_filled", "is_gated", "gate_reason"):
             row.pop(key)
-    assert judge_sustained_rise(forecast, constraints).verdict == TREND_DECLINED
+    result = judge_sustained_rise(forecast, constraints)
+    assert result.verdict == TREND_DECLINED
+    assert (result.flags_reported, result.model_points, len(result.points)) == (False, 14, 14)
+
+
+def test_운영_입력의_표식_누락은_비교에는_넣고_개수에는_안_센다(constraints) -> None:
+    """**운영 판정** — 표식이 실려 온 창에서 한 행만 표식이 빠졌다.
+
+    그 행이 모델 예측인지 **확인되지 않았다**. 비교에서 빼면 그 사이의 하락을 못 보고,
+    개수에 세면 확인 안 된 행이 «실제 모델 2개» 를 채운다 — 그래서 둘을 다르게 다룬다.
+    """
+    # D+1..D+4 lead_time 게이트(= 앵커) · D+5 모델 · D+6 표식 누락 · D+7~14 복사 행
+    values = [100, 100, 100, 100, 105, 95] + [95] * 8
+    gates = {k: "lead_time" for k in (1, 2, 3, 4)}
+    filled = set(range(7, 15))
+    forecast = _합성(values, gates=gates, filled=filled)
+    for key in ("is_filled", "is_gated"):
+        forecast["daily"][5].pop(key)  # D+6
+    result = judge_sustained_rise(forecast, constraints)
+    assert result.flags_reported is True
+    assert (result.model_points, len(result.points)) == (1, 6)
+    assert result.verdict == TREND_WITHHELD
+    assert result.withheld_reason == WITHHELD_INSUFFICIENT_POINTS
+
+    # 같은 행이 모델 예측으로 **확인되면** 개수가 차고 — 그 행의 하락이 판정에 잡힌다
+    확인 = _합성(values, gates=gates, filled=filled)
+    result = judge_sustained_rise(확인, constraints)
+    assert (result.model_points, result.verdict) == (2, TREND_DECLINED)
+    assert result.first_decline[2:] == (확인["daily"][5]["date"], 95)
+
+    # 표식이 빠진 행이 있어도 확인된 모델이 둘 이상이면 판정하고, 누락 행의 하락도 비교에 든다
+    둘_더 = _합성(values[:6] + [96, 97] + [97] * 6, gates=gates, filled=set(range(9, 15)))
+    for key in ("is_filled", "is_gated"):
+        둘_더["daily"][5].pop(key)
+    result = judge_sustained_rise(둘_더, constraints)
+    assert (result.model_points, len(result.points)) == (3, 8)
+    assert result.verdict == TREND_DECLINED and result.first_decline[3] == 95
+
+
+@pytest.mark.parametrize(
+    ("model_days", "values", "verdict"),
+    [
+        pytest.param((5,), [100, 100, 100, 100, 110], TREND_WITHHELD, id="게이트4_모델1_보류"),
+        pytest.param((5, 6), [100, 100, 100, 100, 110, 111], TREND_RISING, id="게이트4_모델2_상승"),
+        pytest.param(
+            (5, 6), [100, 95, 100, 100, 110, 111], TREND_DECLINED, id="게이트4_모델2_게이트행_하락"
+        ),
+        pytest.param(
+            (5, 6), [100, 100, 100, 100, 100, 100], TREND_NO_NET_RISE, id="게이트4_모델2_보합"
+        ),
+    ],
+)
+def test_lead_time_게이트는_비교에는_넣고_최소_개수에는_안_센다(
+    constraints, model_days, values, verdict
+) -> None:
+    """D+1..D+4 lead_time 게이트 넷 + 실제 모델 1개면 보류 · 2개 이상이면 **정상 판정**한다.
+
+    정상 판정에서 게이트 행은 궤적 비교에 들어간다 — 게이트 행 하나가 앵커 아래면 실제 하락이다.
+    """
+    gates = {k: "lead_time" for k in (1, 2, 3, 4)}
+    last = max(model_days)
+    filled = set(range(last + 1, 15))
+    forecast = _합성(values + [values[-1]] * (14 - len(values)), gates=gates, filled=filled)
+    result = judge_sustained_rise(forecast, constraints)
+    assert result.model_points == len(model_days)
+    assert len(result.points) == 4 + len(model_days)
+    assert result.verdict == verdict
+    if verdict == TREND_WITHHELD:
+        assert result.withheld_reason == WITHHELD_INSUFFICIENT_POINTS
+        assert result.first_decline is None
 
 
 def test_지점이_모자라면_하락이어도_보류다(constraints) -> None:
@@ -328,7 +402,7 @@ def test_축과_진입이_같은_함수의_답을_따른다(monkeypatch, constra
 
     def 끼운_판정(forecast_arg, constraints_arg) -> SustainedRise:
         calls.append("called")
-        return SustainedRise(verdict, None, 100, (("x", 1),), None)
+        return SustainedRise(verdict, None, 100, (("x", 1),), None, 1, True)
 
     monkeypatch.setattr(축_모듈, "judge_sustained_rise", 끼운_판정)
     monkeypatch.setattr(진입_모듈, "judge_sustained_rise", 끼운_판정)

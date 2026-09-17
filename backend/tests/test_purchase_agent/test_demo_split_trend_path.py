@@ -115,6 +115,8 @@ def test_시연_입력은_인위_조건임을_드러내고_가격_경로만_연�
     창 = forecast["daily"][:day]
     assert any(r["is_filled"] for r in 창) and any(r["gate_reason"] == "lead_time" for r in 창)
     assert any(a[1] == b[1] for a, b in pairwise(trend.points)), "보합이 섞여 있어야 한다"
+    # lead_time 게이트 두 행은 비교에만 들고 최소 개수에는 안 센다 — 확인된 모델 예측 8
+    assert (len(trend.points), trend.model_points, trend.flags_reported) == (10, 8, True)
     assert TIMING_AXIS in state["allowed_axes"]
 
 

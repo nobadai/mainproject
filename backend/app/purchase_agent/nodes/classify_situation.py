@@ -120,11 +120,16 @@ class SustainedRise(NamedTuple):
     withheld_reason: str | None
     #: 출발점 — ``current_price`` (ML 앵커). 못 읽었으면 ``None``
     anchor: float | None
-    #: 앵커 **외** 유효 모델 예측 지점 ``(날짜, 값)`` — 날짜 순
+    #: **비교 지점** — 앵커 외 (``is_filled`` 아님 AND quality 게이트 아님) 행 ``(날짜, 값)``.
+    #: 🔴 lead_time 게이트 행이 **들어 있다** — 궤적 비교에는 쓰고 최소 개수에는 안 센다
     points: tuple[tuple[str | None, float], ...]
     #: ``TREND_DECLINED`` 일 때 첫 하락 ``(앞 날짜, 앞 값, 뒤 날짜, 뒤 값)``
     #: · 앞 날짜가 ``None`` 이면 앵커다
     first_decline: tuple[str | None, float, str | None, float] | None
+    #: **최소 개수 산정 지점 수** — 비교 지점 중 실제 모델 예측으로 **확인된** 행만 센다
+    model_points: int
+    #: 창에 표식(``is_filled``/``is_gated``)이 실려 왔나. ``False`` 면 mock 호환 처리로 셌다
+    flags_reported: bool
 
     @property
     def holds(self) -> bool:
@@ -144,10 +149,12 @@ def judge_sustained_rise(forecast: dict, constraints: dict) -> SustainedRise:
 
         기간      daily[:D]  (D = ci_judgment_day = 14 → D+1..D+14)
         출발점    current_price (ML 앵커 · 0.4×어제 + 0.6×최근 7거래일 평균)
-        지점      앵커 + (is_filled 아님 AND quality 게이트 아님) 행
+        비교 지점  앵커 + (is_filled 아님 AND quality 게이트 아님) 행
                   ★ lead_time 게이트 행은 **넣는다** — 기존 합의 (ML 회신 08-27 ·
                     ``is_gate_excluded``). 그 값이 앵커와 같아 보합으로 읽힌다
-        판정      앵커 외 지점 < 최소 수          → 보류 (INSUFFICIENT_POINTS)
+        개수 지점  비교 지점 중 is_filled = False AND is_gated = False 로 **확인된** 행
+                  🔴 lead_time 게이트 행은 **안 센다** — 모델이 낸 값이 아니라 앵커를 옮긴 값이다
+        판정      개수 지점 < 최소 수              → 보류 (INSUFFICIENT_POINTS)
                   뒤 지점 < 앞 지점 한 번이라도     → 실제 하락
                   마지막 지점 <= 앵커              → 보합 (순상승 없음)
                   그 밖                            → 지속 상승
@@ -160,9 +167,16 @@ def judge_sustained_rise(forecast: dict, constraints: dict) -> SustainedRise:
       ⚠️ 값이 빈 행을 **조용히 건너뛰지 않는다** — 건너뛰면 그 사이의 하락을 못 본 채
         «하락 없음» 으로 통과한다.
 
-    ⚠️ **표식이 없는 행(``is_filled``/``gate_reason`` 칸 없음)은 일반 지점으로 쓴다** —
-      ``is_gate_excluded`` 의 «값이 없으면 제외하지 않는다» 와 같은 선례다. 운영 표는 두 칸이
-      ``NOT NULL`` 이라 mock 입력에서만 생긴다.
+    ⚠️ **표식 누락은 «실제 모델로 확인됨» 과 다르다** — 비교와 개수에서 다르게 다룬다::
+
+        비교     표식이 없어도 **넣는다** — ``is_gate_excluded`` 의 «값이 없으면 제외하지
+                 않는다» 선례. 빼면 그 사이의 하락을 못 본다
+        개수     운영 판정   창에 표식이 실려 온 입력(``flags_reported``). **확인된 행만** 센다 —
+                             표식이 빠진 행은 모델 예측인지 모르므로 최소 개수를 채우지 못한다.
+                             운영 표는 두 칸이 ``NOT NULL`` 이라 정상이면 생기지 않는다
+                 mock 호환   창의 어느 행에도 표식 칸이 없는 입력(mock JSON 형식). 표식이라는
+                             개념이 없는 입력이라 **비교 지점 전부를 모델 예측으로 센다** —
+                             전과 같은 처리이고, 이 갈래는 운영 입력에서는 서지 않는다
 
     🔴 **이 함수가 정하는 것은 궤적 하나다.** stable 조건과 상승률 임계(10%)는 ①이 따로
       보고, 이 판정이 통과해도 분할이 성립하거나 판단자가 불린다는 뜻이 아니다 — 회차 성립은
@@ -171,27 +185,51 @@ def judge_sustained_rise(forecast: dict, constraints: dict) -> SustainedRise:
     """
     day = constraints["situation"]["ci_judgment_day"]
     min_points = constraints["triggers"]["sustained_rise_min_model_points"]
+    window = (forecast.get("daily") or [])[:day]
+    flags_reported = any(
+        row.get("is_filled") is not None or row.get("is_gated") is not None for row in window
+    )
+    # 비교 지점 — lead_time 게이트 행 · 표식이 빠진 행도 **들어 있다**
+    rows = [row for row in window if not row.get("is_filled") and not is_gate_excluded(row)]
+    if flags_reported:
+        # 운영 판정 — 실제 모델 예측으로 **확인된** 행만 센다
+        model_points = sum(
+            1 for row in rows if row.get("is_filled") is False and row.get("is_gated") is False
+        )
+    else:
+        model_points = len(rows)  # mock 호환 — 위 docstring «표식 누락» 절
     anchor = forecast.get("current_price")
     # ⚠️ ``bool`` 을 먼저 막는다 — ``True`` 가 1원 앵커로 통과한다 (``require_capacity_kg``)
     if isinstance(anchor, bool) or not isinstance(anchor, int | float) or anchor <= 0:
-        return SustainedRise(TREND_WITHHELD, WITHHELD_MISSING_ANCHOR, None, (), None)
-    daily = forecast.get("daily") or []
-    if len(daily) < day:
-        return SustainedRise(TREND_WITHHELD, WITHHELD_SHORT_HORIZON, anchor, (), None)
-    rows = [row for row in daily[:day] if not row.get("is_filled") and not is_gate_excluded(row)]
+        anchor = None
+
+    def judged(
+        verdict: str,
+        *,
+        withheld_reason: str | None = None,
+        points: tuple = (),
+        first_decline: tuple | None = None,
+    ) -> SustainedRise:
+        return SustainedRise(
+            verdict, withheld_reason, anchor, points, first_decline, model_points, flags_reported
+        )
+
+    if anchor is None:
+        return judged(TREND_WITHHELD, withheld_reason=WITHHELD_MISSING_ANCHOR)
+    if len(window) < day:
+        return judged(TREND_WITHHELD, withheld_reason=WITHHELD_SHORT_HORIZON)
     if any(row.get("predicted") is None for row in rows):
-        return SustainedRise(TREND_WITHHELD, WITHHELD_MISSING_VALUE, anchor, (), None)
+        return judged(TREND_WITHHELD, withheld_reason=WITHHELD_MISSING_VALUE)
     points = tuple((row.get("date"), row["predicted"]) for row in rows)
-    if len(points) < min_points:
-        return SustainedRise(TREND_WITHHELD, WITHHELD_INSUFFICIENT_POINTS, anchor, points, None)
+    if model_points < min_points:
+        return judged(TREND_WITHHELD, withheld_reason=WITHHELD_INSUFFICIENT_POINTS, points=points)
     for (before_date, before), (after_date, after) in pairwise(((None, anchor), *points)):
         if after < before:
-            return SustainedRise(
-                TREND_DECLINED, None, anchor, points, (before_date, before, after_date, after)
-            )
+            decline = (before_date, before, after_date, after)
+            return judged(TREND_DECLINED, points=points, first_decline=decline)
     if points[-1][1] <= anchor:
-        return SustainedRise(TREND_NO_NET_RISE, None, anchor, points, None)
-    return SustainedRise(TREND_RISING, None, anchor, points, None)
+        return judged(TREND_NO_NET_RISE, points=points)
+    return judged(TREND_RISING, points=points)
 
 
 #: 보류 사유 → 사람이 읽는 말. 🔴 코드 이름을 화면에 내지 않는다.
@@ -199,7 +237,7 @@ _WITHHELD_WORDS = {
     WITHHELD_MISSING_ANCHOR: "예측의 기준 가격이 없다",
     WITHHELD_SHORT_HORIZON: "판정일까지의 예측이 모자라다",
     WITHHELD_MISSING_VALUE: "판정에 쓸 날짜 중 예측값이 빈 날이 있다",
-    WITHHELD_INSUFFICIENT_POINTS: "판정에 쓸 수 있는 예측 날짜가 모자라다",
+    WITHHELD_INSUFFICIENT_POINTS: "모델이 직접 낸 예측 날짜가 모자라다",
 }
 
 

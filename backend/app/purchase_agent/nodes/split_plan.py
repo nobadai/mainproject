@@ -161,7 +161,10 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
         #   «실제 하락» 이 같은 거짓으로 읽힌다 — ⑥ 고지와 흔적이 이 칸으로 가른다.
         "trend_verdict": trend.verdict,
         "trend_withheld_reason": trend.withheld_reason,
-        "trend_model_points": len(trend.points),
+        # 비교 지점(lead_time 게이트 행 포함)과 최소 개수 산정 지점(확인된 모델 예측)을 가른다
+        "trend_compared_points": len(trend.points),
+        "trend_model_points": trend.model_points,
+        "trend_flags_reported": trend.flags_reported,
         "trend_first_decline": list(trend.first_decline) if trend.first_decline else None,
         "rounds": 1,
     }
