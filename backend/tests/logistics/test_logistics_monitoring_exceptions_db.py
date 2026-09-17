@@ -36,29 +36,29 @@ import pytest
 
 from app.api.logistics.query import _SEVERITY, _severity_at
 from app.logistics import historical_repository, turnover
-from app.logistics.agent import exceptions as exception_repo
-from app.logistics.agent.detect import (
+from app.logistics.db import get_connection
+from app.logistics.monitoring import exceptions as exception_repo
+from app.logistics.monitoring.detect import (
     COMMITTED,
     ESCALATED_FRESHNESS_EXPIRED,
     REDETECT,
     detect_logistics_exceptions,
 )
-from app.logistics.agent.exceptions import (
+from app.logistics.monitoring.exceptions import (
     EmptyEvidence,
     live_exceptions,
     open_exception,
     resolve_exception,
     touch_exception,
 )
-from app.logistics.agent.observe import observe
-from app.logistics.agent.schemas import (
+from app.logistics.monitoring.observe import observe
+from app.logistics.monitoring.schemas import (
     CAPACITY_PRESSURE,
     FRESHNESS_PRESSURE,
     WAREHOUSE_SUBJECT_ID,
     ExceptionEvidence,
     ExceptionRow,
 )
-from app.logistics.db import get_connection
 from app.logistics.schemas import InventoryLogisticsSnapshot
 
 pytestmark = pytest.mark.db

@@ -28,7 +28,7 @@ import pytest
 from app.api.logistics import query as logistics_query
 from app.api.logistics import routes as logistics_routes
 from app.api.shown_run import SHOWN_SIM_RUN_ID
-from app.logistics.agent.schemas import ExceptionEvidence, ExceptionRow
+from app.logistics.monitoring.schemas import ExceptionEvidence, ExceptionRow
 
 AS_OF = date(2026, 3, 10)
 ITEM_ON_SCREEN = "배추"

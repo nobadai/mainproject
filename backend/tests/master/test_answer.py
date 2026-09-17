@@ -376,3 +376,78 @@ def test_부서_이름표는_한_곳에서만_센다():
     assert set(_AGENT_WORDS) == set(agent_labels())
     assert "판매" in _AGENT_WORDS
     assert "가격 예측" in _AGENT_WORDS
+
+
+# ── 물류 질문형 STATUS_QUERY — 완결된 답을 다시 펴지 않는다 ─────────────────
+
+#: 실제 질문형 payload 모양 (`logistics/query/status_query.py::_final_answer`).
+_Q_ANSWER = "현재 창고에 남아 있는 배추 재고는 총 3,197kg입니다. 재고가 남아 있는 Lot은 5개입니다."
+_QUESTION_PAYLOAD = {
+    "status_query": {
+        "question": "현재 창고에 배추가 얼마나 있습니까?",
+        "as_of": "2026-08-31",
+        "answer": _Q_ANSWER,
+        "tools_used": ["get_item_lots"],
+        "tool_trace": [
+            {
+                "tool": "get_item_lots",
+                "arguments": {"item_name": "배추"},
+                "result": {
+                    "item_id": "ITEM-BAECHU",
+                    "on_hand_kg": 3197.0,
+                    "lot_count": 131,
+                    "lots": [{"lot_id": "LOT-A", "remaining_qty_kg": 0.0, "status": "DEPLETED"}],
+                },
+            }
+        ],
+        "excluded_items": [],
+    }
+}
+
+
+def test_질문형_물류_조회는_답만_본문으로_나간다():
+    """🔴 LLM 이 쓴 완결된 답을 사실 줄로 다시 펴지 않는다 (`ml` 마크다운과 같은 규율)."""
+    facts = facts_from_status(status(answers={"inventory": _QUESTION_PAYLOAD}))
+
+    assert facts.markdown == _Q_ANSWER
+    assert facts.facts == ()  # 재료를 사실 줄로 펴지 않았다
+
+
+def test_질문형_물류_조회_본문에_내부_값이_새지_않는다():
+    """실측(2026-09-17)에서 새어 나가던 것들 — 하나라도 보이면 회귀다."""
+    facts = facts_from_status(status(answers={"inventory": _QUESTION_PAYLOAD}))
+    보이는_글 = render_answer(facts) + (facts.markdown or "")
+
+    for 금지 in (
+        "tool_trace", "tools_used", "arguments", "ITEM-BAECHU",
+        "lot_id", "LOT-A", "DEPLETED", "excluded_items", "uncertainties",
+    ):
+        assert 금지 not in 보이는_글, 금지
+
+
+def test_질문형_물류_조회도_구조화_payload_는_그대로_남는다():
+    """🔴 **지우는 것이 아니라 본문에서만 빼는 것이다** — 추적·디버깅은 계속 된다."""
+    outcome = status(answers={"inventory": _QUESTION_PAYLOAD})
+    facts_from_status(outcome)
+
+    보존 = outcome.answers["inventory"]["status_query"]
+    assert 보존["tool_trace"][0]["result"]["item_id"] == "ITEM-BAECHU"
+    assert 보존["tools_used"] == ["get_item_lots"]
+
+
+def test_질문_없는_물류_Overview_는_사실_줄_렌더링_그대로다():
+    """`STATUS_QUERY({})` 는 `status_query` 블록이 없어 기존 경로를 탄다 — 회귀 금지."""
+    facts = facts_from_status(status())  # 기본 헬퍼 = Overview payload
+    라벨 = {f.label for f in facts.facts}
+
+    assert facts.markdown is None
+    assert {"창고 여유", "보관 로트", "최단 잔여 신선도"} <= 라벨
+
+
+def test_물류_본문이_비어_있으면_Overview_처럼_편다():
+    """`answer` 가 비면 완결된 본문이 아니다 — 있는 값이라도 사실 줄로 낸다(감추지 않음)."""
+    payload = {"status_query": {"answer": "  ", "lot_count": 4}}
+    facts = facts_from_status(status(answers={"inventory": payload}))
+
+    assert facts.markdown is None
+    assert facts.facts != ()

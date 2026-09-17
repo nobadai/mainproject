@@ -29,7 +29,7 @@ from datetime import date, datetime
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
-from app.logistics.agent.schemas import DetectOut
+from app.logistics.monitoring.schemas import DetectOut
 from app.master.backtest_runner import WalkResult, _incident_reason, format_summary
 from app.master.inspection import (
     AFTER_INBOUND,
