@@ -17,7 +17,7 @@
     ① request_id · history_run_id 가 실린다
     ② 못 읽은 행 id 는 None 이다 — 지어내지 않는다
     ③ state 네 갈래가 실제 상태를 가린다 (후보 · 승인됨 · 매입 기록됨)
-    ④ approved 가 그대로 있다 — 쓰는 화면이 있다
+    ④ approved 가 그대로 있다 — 읽는 자리가 있다 (대시보드 서버 · 09-17 정정)
     ⑤ 상태 어휘의 주인이 하나다 (`app/api/plan_state.py`) — 대시보드와 같은 것
     ⑥ 「승인 대기」는 요청(품목·날) 단위다 — 형제 안이 결정되면 대기가 아니다 (09-17)
 
@@ -247,7 +247,11 @@ def test_기록을_못_읽어도_안_목록은_산다(tab, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_approved_가_그대로_있다(tab):
-    """🔴 쓰는 화면이 있다 (`console/purchase/page.tsx`). `state` 를 더하면서 지우지 않았다."""
+    """🔴 읽는 자리가 있다 — 대시보드 서버 `_state` 가 `plan.approved` 를 읽는다.
+
+    ~~쓰는 화면이 있다 (`console/purchase/page.tsx`)~~ — 낡았다 (2026-09-17). 매입 화면은
+    이제 `state` 를 읽는다. `state` 를 더하면서 `approved` 를 지우지 않았다.
+    """
     plans = tab(
         data=_data(
             [_run("REQ-A", _scenario("보수"), _scenario("기본"))],
