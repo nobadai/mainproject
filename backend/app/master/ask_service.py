@@ -351,7 +351,29 @@ def _period(intent: Intent, *, as_of: date) -> tuple[date, date]:
         return this_monday - timedelta(days=7), this_monday - timedelta(days=1)
     if period == "THIS_MONTH":
         return as_of.replace(day=1), as_of
+    if period == "LAST_7_DAYS":
+        return as_of - timedelta(days=6), as_of
+    if period == "LAST_30_DAYS":
+        return as_of - timedelta(days=29), as_of
+    if period == "LAST_3_MONTHS":
+        month = as_of.month - 2
+        year = as_of.year
+        if month <= 0:
+            month += 12
+            year -= 1
+        return as_of.replace(year=year, month=month, day=1), as_of
+    if period == "LAST_YEAR":
+        try:
+            return as_of.replace(year=as_of.year - 1), as_of
+        except ValueError:  # 2월 29일의 전년은 2월 28일
+            return as_of.replace(year=as_of.year - 1, day=28), as_of
     raise _DomainClarification("기간을 확인해 주세요.")
+
+
+def _has_report_period(intent: Intent) -> bool:
+    """Report generation must not silently turn an omitted period into TODAY."""
+    slots = _slots(intent)
+    return bool(slots.period or slots.start_date or slots.end_date)
 
 
 def _partner_id(intent: Intent, *, as_of: date) -> str:
@@ -492,7 +514,9 @@ def _domain_preview(intent: Intent, *, as_of: date) -> str:
     return "이 작업을 실행할까요?"
 
 
-def _domain_read(intent: Intent, *, as_of: date) -> DomainActionAnswer:
+def _domain_read(
+    intent: Intent, *, as_of: date, sim_run_id: str = SHOWN_SIM_RUN_ID
+) -> DomainActionAnswer:
     action = intent.domain_action or ""
     slots = _slots(intent)
 
@@ -579,7 +603,7 @@ def _domain_read(intent: Intent, *, as_of: date) -> DomainActionAnswer:
     if action == "FINANCE_REPORT_GENERATE":
         start, end = _period(intent, as_of=as_of)
         report = render_finance_chat_report(
-            sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, start_date=start, end_date=end
+            sim_run_id=sim_run_id, as_of=as_of, start_date=start, end_date=end
         )
         return DomainActionAnswer(
             domain="finance",
@@ -666,6 +690,7 @@ def _domain_write(
     as_of: date,
     policy_version: str,
     request_id: str,
+    sim_run_id: str | None = None,
     actor: str,
     utterance: str | None,
 ) -> DomainActionAnswer:
@@ -910,12 +935,13 @@ def _run_domain_action(
     as_of: date,
     policy_version: str,
     request_id: str,
+    sim_run_id: str | None = None,
     actor: str | None = None,
     utterance: str | None = None,
 ):
     action = intent.domain_action
     if action in _DOMAIN_READ_ACTIONS:
-        return _domain_read(intent, as_of=as_of)
+        return _domain_read(intent, as_of=as_of, sim_run_id=sim_run_id or SHOWN_SIM_RUN_ID)
     if action in _DOMAIN_WRITE_ACTIONS:
         if not actor:
             raise DecisionRejected(
@@ -951,6 +977,15 @@ def _ask_domain_action(
     *, request_id: str, request: AskRequest, result: IntentResult
 ) -> AskResponse:
     intent = result.intent
+    if intent.domain_action == "FINANCE_REPORT_GENERATE" and not _has_report_period(intent):
+        return _response(
+            request_id,
+            request,
+            result,
+            outcome="NEEDS_CLARIFICATION",
+            clarification="어느 기간의 재무 보고서를 생성할까요?",
+            note="보고 기간이 정해지기 전에는 재무 보고서를 생성하지 않았다.",
+        )
     missing = _missing_domain_slots(intent)
     if missing:
         return _response(
@@ -979,6 +1014,7 @@ def _ask_domain_action(
                 as_of=request.as_of,
                 policy_version=request.policy_version,
                 request_id=request_id,
+                sim_run_id=request.sim_run_id,
                 utterance=request.utterance,
             )
             assert isinstance(domain, DomainActionAnswer)
@@ -1034,6 +1070,19 @@ def ask(
     service = service or get_intent_service()
     request_id = request.request_id or make_request_id(request.as_of.isoformat())
     result = service.classify(request.utterance)
+    if request.date_from or request.date_to:
+        if request.date_from is None or request.date_to is None:
+            raise ValueError("시작일과 종료일을 모두 선택해 주세요.")
+        if request.date_from > request.date_to:
+            raise ValueError("시작일은 종료일보다 늦을 수 없습니다.")
+        intent = result.intent
+        if intent.domain_action in {"FINANCE_REPORT_GENERATE", "SALES_REPORT_GENERATE"}:
+            slots = _slots(intent).model_copy(update={
+                "start_date": request.date_from.isoformat(),
+                "end_date": request.date_to.isoformat(),
+            })
+            updated_intent = intent.model_copy(update={"slots": slots})
+            result = result.model_copy(update={"intent": updated_intent})
     intent = result.intent
 
     if intent.action == "UNKNOWN":

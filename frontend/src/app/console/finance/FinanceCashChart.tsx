@@ -66,7 +66,8 @@ export function FinanceCashChart({ rows }: { rows: ClosingItem[] }) {
     });
   }
 
-  const points: CashPoint[] = rows.map((row, index) => ({
+  const orderedRows = [...rows].sort((left, right) => left.close_date.localeCompare(right.close_date));
+  const points: CashPoint[] = orderedRows.map((row, index) => ({
     index,
     label: shortDate(row.close_date),
     base: shown.has("base") ? toNumber(row.base_cash_balance_krw) : null,

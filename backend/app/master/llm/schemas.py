@@ -137,7 +137,10 @@ class DomainSlots(BaseModel):
 
     start_date: str | None = None
     end_date: str | None = None
-    period: Literal["TODAY", "YESTERDAY", "THIS_WEEK", "LAST_WEEK", "THIS_MONTH"] | None = None
+    period: Literal[
+        "TODAY", "YESTERDAY", "THIS_WEEK", "LAST_WEEK", "THIS_MONTH",
+        "LAST_7_DAYS", "LAST_30_DAYS", "LAST_3_MONTHS", "LAST_YEAR",
+    ] | None = None
     note: str | None = None
 
 

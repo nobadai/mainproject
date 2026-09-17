@@ -150,7 +150,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
       <Panel title="판매 후보 생성" subtitle="업무 요청만 보냅니다 — 원가·여신·판정은 각 도메인이 답합니다">
         <div className="grid gap-2 sm:grid-cols-3">
           <Select
-            label="거래처"
+            label="거래처 *"
             value={form.partner_id}
             onChange={(value) => setForm({ ...form, partner_id: value })}
             disabled={partners.loading || Boolean(partners.error)}
@@ -162,7 +162,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>판매 대상 고객사를 선택합니다.</FieldHelp>
           <Select
-            label="품목"
+            label="품목 *"
             value={form.item}
             onChange={(value) => setForm({ ...form, item: value })}
             disabled={items.loading || Boolean(items.error)}
@@ -174,7 +174,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>등록된 품목 원장에서 선택합니다.</FieldHelp>
           <Input
-            label="요청 수량 (kg)"
+            label="요청 수량 * (kg)"
             value={form.requested_quantity_kg}
             onChange={(v) => setForm({ ...form, requested_quantity_kg: v })}
             type="number"
@@ -184,16 +184,16 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>판매를 검토할 수량입니다.</FieldHelp>
           <label className="flex flex-col gap-1 text-[11.5px]">
-            <span className="text-ink2">결제 방식</span>
+            <span className="text-ink2">결제 방식 (선택)</span>
             <select value={form.preferred_payment_terms_type} onChange={(event) => setForm({ ...form, preferred_payment_terms_type: event.target.value })} className="rounded-md border px-2 py-1 text-[12px]" style={{ borderColor: "var(--color-hair)" }}>
               <option value="">미지정</option><option value="SINGLE">일시 결제</option><option value="INSTALLMENT">분할 결제</option>
             </select>
           </label>
           <FieldHelp>미지정은 일시 결제로 간주하지 않습니다.</FieldHelp>
-          <Input label="요청 메모" value={form.user_request} onChange={(v) => setForm({ ...form, user_request: v })} />
+          <Input label="요청 메모 (선택)" value={form.user_request} onChange={(v) => setForm({ ...form, user_request: v })} placeholder="추가로 고려할 조건을 입력하세요" />
           <FieldHelp>수량·단가 대신 쓰는 입력이 아닙니다. 추가 상황 설명에 사용합니다.</FieldHelp>
           <Input
-            label="희망 단가 (원/kg)"
+            label="희망 단가 (선택, 원/kg)"
             value={form.preferred_unit_price_krw}
             onChange={(v) => setForm({ ...form, preferred_unit_price_krw: v })}
             type="number"
@@ -203,14 +203,14 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>미입력 시 현재 요청만으로 재무 검증을 완료하지 못할 수 있습니다.</FieldHelp>
           <Input
-            label="희망 납품일"
+            label="희망 납품일 (선택)"
             value={form.preferred_delivery_date}
             onChange={(v) => setForm({ ...form, preferred_delivery_date: v })}
             type="date"
           />
           <FieldHelp>판매를 희망하는 납품일입니다.</FieldHelp>
           <Input
-            label="결제일수"
+            label="결제일수 (선택)"
             value={form.preferred_payment_days}
             onChange={(v) => setForm({ ...form, preferred_payment_days: v })}
             placeholder="비우면 거래처 계약 결제일"

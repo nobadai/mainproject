@@ -99,3 +99,9 @@ body {
 .thin-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
+/* Finance write forms: controls must remain visibly interactive on panel backgrounds. */
+.finance-form label { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.875rem; font-weight: 600; }
+.finance-form input, .finance-form select { min-height: 2.5rem; border: 1px solid var(--color-hair); border-radius: 0.5rem; background: var(--color-surface); padding: 0.5rem 0.75rem; color: var(--color-ink); }
+.finance-form select { appearance: auto; cursor: pointer; }
+.finance-form input:hover, .finance-form select:hover { border-color: var(--color-brand); }
+.finance-form input:focus, .finance-form select:focus { outline: 2px solid var(--color-brand); outline-offset: 2px; }

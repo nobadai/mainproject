@@ -34,4 +34,6 @@ def test_console_items_reads_only_active_master_items_in_stored_order(monkeypatc
     assert "Identifier('haetdeul')" in captured["statement"]
     assert "SQL('.items" in captured["statement"]
     assert "WHERE mvp_active" in captured["statement"]
-    assert captured["params"] is None
+    # 판매 후보 입력은 공용 제안 품목 계약으로 한 번 더 좁힌다. 피마늘·건고추의
+    # 과거 재고/판매 이력은 이 조회와 무관하게 남는다.
+    assert captured["params"] == (["배추", "무", "양파"],)

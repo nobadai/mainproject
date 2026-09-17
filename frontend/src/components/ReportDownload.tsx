@@ -6,7 +6,7 @@ import { ApiError, runReport } from "@/lib/api";
 import { userErrorText } from "@/lib/procurementLabels";
 import { FinanceReport } from "@/components/reports/FinanceReport";
 import { SalesReport } from "@/components/reports/SalesReport";
-import { exportReportPdf } from "@/components/reports/reportExport";
+import { createReportPdfBlob, triggerBrowserDownload } from "@/components/reports/reportExport";
 import { filename, type ReportFacts } from "@/components/reports/reportFormat";
 
 /**
@@ -81,32 +81,53 @@ export function DomainReportPreview({
   const root = useRef<HTMLDivElement>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [preparedPdf, setPreparedPdf] = useState<{ blob: Blob; filename: string } | null>(null);
 
   async function downloadPdf() {
-    if (exporting || !root.current) return;
+    console.debug("[report-pdf] 01 click", { exporting, hasTarget: Boolean(root.current) });
+    if (exporting) return;
+    if (!root.current) {
+      console.error("[report-pdf] failed", { stage: "02 target found", error: "report ref is null" });
+      setError("보고서를 다운로드하지 못했습니다. 다시 시도해 주세요.");
+      return;
+    }
+    const reportRoot = root.current;
+    const reportFilename = filename(kind === "FINANCE" ? "finance" : "sales", facts);
+    console.debug("[report-pdf] 02 target found", { filename: reportFilename });
     setExporting(true);
     setError(null);
+    setPreparedPdf(null);
     try {
-      await exportReportPdf({
-        root: root.current,
-        filename: filename(kind === "FINANCE" ? "finance" : "sales", facts),
-      });
+      const blob = await createReportPdfBlob({ root: reportRoot });
+      setPreparedPdf({ blob, filename: reportFilename });
+      triggerBrowserDownload(blob, reportFilename);
     } catch {
-      setError("보고서를 PDF로 만들지 못했습니다.");
+      setError("보고서를 다운로드하지 못했습니다. 다시 시도해 주세요.");
     } finally {
       setExporting(false);
     }
   }
 
+  function savePreparedPdf() {
+    if (!preparedPdf) return;
+    try {
+      triggerBrowserDownload(preparedPdf.blob, preparedPdf.filename);
+      setError(null);
+    } catch {
+      setError("보고서를 다운로드하지 못했습니다. 다시 시도해 주세요.");
+    }
+  }
+
   return (
     <>
-      <div ref={root} className="domain-report-print overflow-auto rounded-xl bg-[#cdd6d1] p-4">
+      <div ref={root} data-report-root className="domain-report-print overflow-auto rounded-xl bg-[#cdd6d1] p-4">
         {kind === "FINANCE" ? <FinanceReport facts={facts} /> : <SalesReport facts={facts} />}
       </div>
       <div className="domain-report-controls mt-2 flex gap-2">
         <button type="button" onClick={downloadPdf} disabled={exporting} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink disabled:opacity-45">
           {exporting ? "PDF 만드는 중…" : "PDF 다운로드"}
         </button>
+        {preparedPdf && <button type="button" onClick={savePreparedPdf} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink">파일 저장</button>}
         <button type="button" onClick={() => window.print()} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink">
           인쇄
         </button>
