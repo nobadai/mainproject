@@ -7,8 +7,9 @@
 
 * **적용 범위 = timing 축을 받은 안에만** (확정 1). 그 판정은 축을 배정하는 ⑥이 한다 —
   여기서는 "그날 분할이 가능한가"까지만 정한다.
-* **궤적 판정은 ①의 ``is_sustained_rise()`` 재사용** (확정 2). 두 노드가 각자 정의하면
-  "축은 열렸는데 분할은 안 되는" 모순이 난다.
+* **궤적 판정은 ①의 ``judge_sustained_rise()`` 재사용** (확정 2). 두 노드가 각자 정의하면
+  "축은 열렸는데 분할은 안 되는" 모순이 난다. (2026-09-17 정의 교체 때 이름이
+  ``is_sustained_rise`` 에서 바뀌었다 — 판정 결과가 참/거짓 둘에서 넷으로 갈렸다.)
 * **rule_only 단계는 균등 비율** (확정 3). 앞당길지 미룰지는 §4-④ 트레이드오프
   ("상승장 분할 = 평균단가 손해 vs 로트 나이 분산 = 폐기리스크 감소")의 판단이라 LLM 몫이고,
   규칙이 한쪽으로 기울이면 그 판단을 미리 대신해버린다.
@@ -42,7 +43,7 @@ from app.purchase_agent.llm.split_schemas import (
 from app.purchase_agent.nodes._guards import pending_value
 from app.purchase_agent.nodes._split_outcome import AS_CHOSEN, settle_split
 from app.purchase_agent.nodes.classify_situation import (
-    is_sustained_rise,
+    judge_sustained_rise,
     split_entry_cap,
 )
 from app.purchase_agent.schemas import TIMING_AXIS
@@ -135,9 +136,9 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
       그 안은 **timing 라벨만 남고 회차가 하나**가 된다. 그 상태를 ⑥·⑦이
       ``effective_allowed_axes`` 로 걷는다 — 안 걷으면 «분할 안 한 분할안» 이 선다.
     """
-    day = constraints["situation"]["ci_judgment_day"]
     total_kg = largest_total_kg(state["base_plan"])
     cap = split_entry_cap(state, constraints)
+    trend = judge_sustained_rise(state["forecast"], constraints)
 
     facts: dict[str, Any] = {
         "timing_allowed": TIMING_AXIS in state["allowed_axes"],
@@ -155,7 +156,13 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
         #   ★ ``cap_kg`` 는 소수일 수 있는데 ``total_kg`` 는 정수라, 이 비교는 ⑦ 이
         #     ``int(cap)`` 으로 내림해 재는 것과 **모든 경우에 같은 답**을 낸다.
         "by_volume": cap.cap_kg is not None and total_kg > cap.cap_kg,
-        "by_trend": is_sustained_rise(state["forecast"], day),
+        "by_trend": trend.holds,
+        # 🔴 **판정 결과를 넷으로 싣는다** (2026-09-17). 참/거짓만 실으면 «판정 보류» 와
+        #   «실제 하락» 이 같은 거짓으로 읽힌다 — ⑥ 고지와 흔적이 이 칸으로 가른다.
+        "trend_verdict": trend.verdict,
+        "trend_withheld_reason": trend.withheld_reason,
+        "trend_model_points": len(trend.points),
+        "trend_first_decline": list(trend.first_decline) if trend.first_decline else None,
         "rounds": 1,
     }
     facts["entered"] = facts["timing_allowed"] and (facts["by_volume"] or facts["by_trend"])
@@ -263,9 +270,7 @@ def screen_allocation_candidates(
     if len(후보) == 1:
         return CandidateScreen(남긴다, {}, approved)
     if by_trend is None:
-        by_trend = is_sustained_rise(
-            state["forecast"], constraints["situation"]["ci_judgment_day"]
-        )
+        by_trend = judge_sustained_rise(state["forecast"], constraints).holds
     drafts = state["base_plan"]["drafts"]
     배정 = assign_axes(
         [draft["label"] for draft in drafts],

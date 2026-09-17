@@ -96,10 +96,136 @@ def compute_rise_rate_2w(forecast: dict, ci_judgment_day: int) -> float:
     return judgment_row(forecast, ci_judgment_day)["predicted"] / current - 1
 
 
-def is_sustained_rise(forecast: dict, ci_judgment_day: int) -> bool:
-    """지속 상승 궤적인가 — 판정일까지 ``predicted``가 단조 증가하는가."""
-    predicted = [row["predicted"] for row in forecast["daily"][:ci_judgment_day]]
-    return all(earlier < later for earlier, later in pairwise(predicted))
+#: 지속 상승 판정 결과 — ① 축 · ④ 진입 · 근거 문장이 **같은 이름**을 읽는다.
+TREND_RISING = "RISING"
+#: 앞 지점보다 낮은 지점이 하나라도 있다 — **실제 하락**
+TREND_DECLINED = "DECLINED"
+#: 하락은 없지만 마지막 유효 지점이 앵커를 넘지 않는다 — 보합
+TREND_NO_NET_RISE = "NO_NET_RISE"
+#: 판정하지 않았다 — 데이터가 모자라다. 🔴 **하락으로 세지 않는다**
+TREND_WITHHELD = "WITHHELD"
+
+#: 보류 사유 코드
+WITHHELD_MISSING_ANCHOR = "MISSING_ANCHOR"
+WITHHELD_SHORT_HORIZON = "SHORT_HORIZON"
+WITHHELD_MISSING_VALUE = "MISSING_VALUE"
+WITHHELD_INSUFFICIENT_POINTS = "INSUFFICIENT_POINTS"
+
+
+class SustainedRise(NamedTuple):
+    """지속 상승 판정 한 건. ``verdict`` 가 넷으로 갈리고 **보류와 하락을 섞지 않는다.**"""
+
+    verdict: str
+    #: ``TREND_WITHHELD`` 일 때만 채운다
+    withheld_reason: str | None
+    #: 출발점 — ``current_price`` (ML 앵커). 못 읽었으면 ``None``
+    anchor: float | None
+    #: 앵커 **외** 유효 모델 예측 지점 ``(날짜, 값)`` — 날짜 순
+    points: tuple[tuple[str | None, float], ...]
+    #: ``TREND_DECLINED`` 일 때 첫 하락 ``(앞 날짜, 앞 값, 뒤 날짜, 뒤 값)``
+    #: · 앞 날짜가 ``None`` 이면 앵커다
+    first_decline: tuple[str | None, float, str | None, float] | None
+
+    @property
+    def holds(self) -> bool:
+        return self.verdict == TREND_RISING
+
+
+def judge_sustained_rise(forecast: dict, constraints: dict) -> SustainedRise:
+    """지속 상승 궤적인가 — **①과 ④가 같이 부르는 판정 함수**다 (§4-① · §4-④ 확정 2).
+
+    🔴 **정의를 바꿨다** (2026-09-17 · 정책 결정 충환). 전에는 달력 D+1..D+14 **14행 전부**가
+    **엄격 증가**해야 했다. 그런데 그 14행에는 ML 이 그 날짜 예측이 없어 앞 장날 값을
+    **복사한 행**(``is_filled``)이 주마다 들어 있어, 복사 행과 앞 행이 같은 값이라
+    ``<`` 가 **구조적으로 거짓**이었다 (SIM-CHAIN-PURLLM-0917 매입 판단 507건 전부
+    복사 행 4~7개 · 옛 정의 통과 0건). 가격이 아니라 **달력이** 판정을 닫고 있었다.
+
+    지금 정의::
+
+        기간      daily[:D]  (D = ci_judgment_day = 14 → D+1..D+14)
+        출발점    current_price (ML 앵커 · 0.4×어제 + 0.6×최근 7거래일 평균)
+        지점      앵커 + (is_filled 아님 AND quality 게이트 아님) 행
+                  ★ lead_time 게이트 행은 **넣는다** — 기존 합의 (ML 회신 08-27 ·
+                    ``is_gate_excluded``). 그 값이 앵커와 같아 보합으로 읽힌다
+        판정      앵커 외 지점 < 최소 수          → 보류 (INSUFFICIENT_POINTS)
+                  뒤 지점 < 앞 지점 한 번이라도     → 실제 하락
+                  마지막 지점 <= 앵커              → 보합 (순상승 없음)
+                  그 밖                            → 지속 상승
+
+    ★ **보합을 허용한다.** 복사 행을 뺀 뒤에도 게이트 행(= 앵커)이나 같은 값의 모델 예측이
+      이어질 수 있고, 그것은 «오르다 멈췄다» 이지 «내렸다» 가 아니다.
+
+    🔴 **보류는 하락이 아니다** (규칙 3). 앵커를 못 읽었거나 · 창이 짧거나 · 판정에 쓸 행의
+      값이 비었거나 · 지점이 모자라면 판정하지 않은 것이고, 기록도 그렇게 남긴다.
+      ⚠️ 값이 빈 행을 **조용히 건너뛰지 않는다** — 건너뛰면 그 사이의 하락을 못 본 채
+        «하락 없음» 으로 통과한다.
+
+    ⚠️ **표식이 없는 행(``is_filled``/``gate_reason`` 칸 없음)은 일반 지점으로 쓴다** —
+      ``is_gate_excluded`` 의 «값이 없으면 제외하지 않는다» 와 같은 선례다. 운영 표는 두 칸이
+      ``NOT NULL`` 이라 mock 입력에서만 생긴다.
+
+    🔴 **이 함수가 정하는 것은 궤적 하나다.** stable 조건과 상승률 임계(10%)는 ①이 따로
+      보고, 이 판정이 통과해도 분할이 성립하거나 판단자가 불린다는 뜻이 아니다 — 회차 성립은
+      ⑥ ``settle_split``, 후보는 ④ ``screen_allocation_candidates`` 가 따로 잰다.
+      🔴 **경제성 · 분할의 우수성을 검증한 판정이 아니다.**
+    """
+    day = constraints["situation"]["ci_judgment_day"]
+    min_points = constraints["triggers"]["sustained_rise_min_model_points"]
+    anchor = forecast.get("current_price")
+    # ⚠️ ``bool`` 을 먼저 막는다 — ``True`` 가 1원 앵커로 통과한다 (``require_capacity_kg``)
+    if isinstance(anchor, bool) or not isinstance(anchor, int | float) or anchor <= 0:
+        return SustainedRise(TREND_WITHHELD, WITHHELD_MISSING_ANCHOR, None, (), None)
+    daily = forecast.get("daily") or []
+    if len(daily) < day:
+        return SustainedRise(TREND_WITHHELD, WITHHELD_SHORT_HORIZON, anchor, (), None)
+    rows = [row for row in daily[:day] if not row.get("is_filled") and not is_gate_excluded(row)]
+    if any(row.get("predicted") is None for row in rows):
+        return SustainedRise(TREND_WITHHELD, WITHHELD_MISSING_VALUE, anchor, (), None)
+    points = tuple((row.get("date"), row["predicted"]) for row in rows)
+    if len(points) < min_points:
+        return SustainedRise(TREND_WITHHELD, WITHHELD_INSUFFICIENT_POINTS, anchor, points, None)
+    for (before_date, before), (after_date, after) in pairwise(((None, anchor), *points)):
+        if after < before:
+            return SustainedRise(
+                TREND_DECLINED, None, anchor, points, (before_date, before, after_date, after)
+            )
+    if points[-1][1] <= anchor:
+        return SustainedRise(TREND_NO_NET_RISE, None, anchor, points, None)
+    return SustainedRise(TREND_RISING, None, anchor, points, None)
+
+
+#: 보류 사유 → 사람이 읽는 말. 🔴 코드 이름을 화면에 내지 않는다.
+_WITHHELD_WORDS = {
+    WITHHELD_MISSING_ANCHOR: "예측의 기준 가격이 없다",
+    WITHHELD_SHORT_HORIZON: "판정일까지의 예측이 모자라다",
+    WITHHELD_MISSING_VALUE: "판정에 쓸 날짜 중 예측값이 빈 날이 있다",
+    WITHHELD_INSUFFICIENT_POINTS: "판정에 쓸 수 있는 예측 날짜가 모자라다",
+}
+
+
+def sustained_rise_sentence(
+    verdict: str | None,
+    withheld_reason: str | None = None,
+    first_decline: list | tuple | None = None,
+) -> str:
+    """판정 결과 한 문장. ⑥ 고지와 어댑터 근거가 **같은 문장**을 쓴다.
+
+    🔴 **보류를 «아님» 으로 적지 않는다** — 판정하지 않은 것을 판정한 것으로 읽게 된다.
+    """
+    if verdict == TREND_RISING:
+        return "지속 상승 궤적 — 기준 가격에서 판정일까지 내려가는 날 없이 올랐다"
+    if verdict == TREND_WITHHELD:
+        return f"지속 상승 판정 보류 — {_WITHHELD_WORDS.get(withheld_reason, '데이터가 모자라다')}"
+    if verdict == TREND_NO_NET_RISE:
+        return "지속 상승 궤적 아님 — 내려가지는 않았지만 마지막 예측이 기준 가격보다 높지 않다"
+    if verdict == TREND_DECLINED and first_decline:
+        before_date, before, after_date, after = first_decline
+        앞 = f"{before_date} {before:,}원/kg" if before_date else f"기준 가격 {before:,}원/kg"
+        return (
+            f"지속 상승 궤적 아님 — 예측 가격이 내려가는 날이 있다 "
+            f"({앞} → {after_date} {after:,}원/kg)"
+        )
+    return "지속 상승 궤적 아님"
 
 
 def coverage_by_label(situation: str, constraints: dict) -> dict[str, int]:
@@ -283,10 +409,11 @@ def compute_allowed_axes(state: PurchaseAgentState, situation: str, constraints:
     arrival_cap = split_entry_cap(state, constraints)
     by_volume = volume_gate_holds(estimated_total_kg, arrival_cap)
     # 선매입 트리거는 상승률과 구간 폭을 함께 본다 (백로그 임계표) — 구간 폭 조건이 곧 stable이다.
+    # 🔴 궤적 판정은 ④ 와 **같은 함수**다 (``judge_sustained_rise``). 보류는 열지 않는다.
     by_trend = (
         situation == "stable"
         and compute_rise_rate_2w(forecast, day) >= constraints["triggers"]["pre_purchase_rise_rate"]
-        and is_sustained_rise(forecast, day)
+        and judge_sustained_rise(forecast, constraints).holds
     )
     if by_volume or by_trend:
         axes.append("timing")

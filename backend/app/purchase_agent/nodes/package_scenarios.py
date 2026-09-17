@@ -63,6 +63,7 @@ from app.purchase_agent.nodes.classify_situation import (
     compute_rise_rate_2w,
     is_gate_excluded,
     judgment_row,
+    sustained_rise_sentence,
 )
 from app.purchase_agent.nodes.draft_plan import (
     ADJUSTMENT_CAP_NAME,
@@ -1429,7 +1430,14 @@ def _entry_miss_reason(decision: dict) -> str:
                 f"{decision.get('arrival_date')} 도착 여유 {decision.get('cap_kg') or 0:,.0f}kg"
             )
     if not decision.get("by_trend"):
-        misses.append("지속 상승 궤적 아님")
+        # 🔴 **보류와 하락을 가른다** (2026-09-17). ①·④ 와 같은 판정의 결과 칸을 읽는다.
+        misses.append(
+            sustained_rise_sentence(
+                decision.get("trend_verdict"),
+                decision.get("trend_withheld_reason"),
+                decision.get("trend_first_decline"),
+            )
+        )
     return " · ".join(misses)
 
 

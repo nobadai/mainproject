@@ -127,6 +127,9 @@ def _state(name: str) -> dict:
         고정 = 예측["daily"][0]["predicted"]
         for row in 예측["daily"]:
             row["predicted"] = 고정
+        # 🔴 기준 가격도 맞춘다 (2026-09-17) — 궤적이 앵커에서 출발하고 보합을 허용하므로,
+        #   예측만 평평하면 «앵커보다 높은 값에서 보합» 이라 여전히 지속 상승이다.
+        예측["current_price"] = 고정
         state["forecast"] = 예측
     state.update(classify_situation(state))
     state.update(draft_plan(state))
