@@ -1,9 +1,15 @@
-"""공용 Read-only Tool 8개 — **조사하는 쪽이 무엇을 묻든 같은 구현을 지난다.**
+"""공용 Read-only 물류 조회 Tool 7개 — **누가 무엇을 묻든 같은 구현을 지난다.**
 
 ```text
-STATUS / Interactive Query   "지금 상태가 무엇인가"          → 같은 8개
-Exception Investigate        "왜 생겼고 무엇을 할 수 있나"    → 같은 8개
+get_open_exceptions · get_lot · get_item_lots · get_sales_commitments
+get_policy · get_capacity_context · get_inbound_schedule
 ```
+
+★ 질문형 STATUS_QUERY(`query/status_query.py`)가 이 7개를 LLM 에 tool schema 로 열고,
+  wrapper 가 `item_name → item_id` 를 확정해 여기 함수를 **시그니처 그대로** 부른다.
+
+⚠️ `estimate_action_impact` 는 여기 없다 — 폐기한 Investigation/Proposal 흐름 전용이라
+   그 코드와 함께 제거했다(«현재 상태» 가 아니라 «이 행동을 하면» 을 답하던 Tool 이다).
 
 🔴 **새 계산기가 아니라 기존 함수의 wrapper 다.** 잔량은 원장
    (`historical_repository`), 신선도·회전은 `turnover`, 용량은 `tools`, 예약·할당은
@@ -28,18 +34,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 
 from app.logistics import tools as calc
-from app.logistics.agent.exceptions import live_exceptions_at
-from app.logistics.agent.observe import _status_observed_as_of
-from app.logistics.agent.schemas import (
-    COMMITMENT_OBSERVED_AS_OF,
-    POLICY_OBSERVED_AS_OF,
-    ExceptionEvidence,
-    ExceptionRow,
-    derive_observed_as_of,
-)
 from app.logistics.historical_repository import (
     CAPACITY_BASIS_CURRENT_ACTIVE_POLICY,
     AdjustMoveNotSupported,
@@ -55,6 +52,15 @@ from app.logistics.inbound_schedules import (
     load_schedule_views,
     schedule_fact_dates_at,
 )
+from app.logistics.monitoring.exceptions import live_exceptions_at
+from app.logistics.monitoring.observe import _status_observed_as_of
+from app.logistics.monitoring.schemas import (
+    COMMITMENT_OBSERVED_AS_OF,
+    POLICY_OBSERVED_AS_OF,
+    ExceptionEvidence,
+    ExceptionRow,
+    derive_observed_as_of,
+)
 from app.logistics.outbound_schedules import confirmed_outbound_at
 from app.logistics.repository import (
     LogisticsRead,
@@ -65,12 +71,9 @@ from app.logistics.schemas import InventoryLogisticsSnapshot, InventoryLotSnapsh
 from app.logistics.turnover import ItemPolicy, fefo_sort_key, load_item_policy
 
 __all__ = [
-    "ACTION_UNSUPPORTED",
-    "ARRIVAL_DATE_OUTSIDE_WINDOW",
     "CAPACITY_WINDOW_UNRESOLVED",
     "DETECT_WRITTEN_DETAILS",
     "EXCEPTION_DETAIL_UNRESOLVED",
-    "IMPACT_INPUT_MISSING",
     "ITEM_NOT_FOUND",
     "LEDGER_ADJUST_UNSUPPORTED",
     "LOT_NOT_FOUND",
@@ -78,11 +81,8 @@ __all__ = [
     "POLICY_NOT_HISTORICAL",
     "RESOLVE_WRITTEN_DETAILS",
     "SNAPSHOT_AS_OF_MISMATCH",
-    "SUPPORTED_ACTIONS",
-    "ActionImpact",
     "CapacityContext",
     "ExceptionFact",
-    "Feasibility",
     "InboundPlan",
     "InboundScheduleFact",
     "ItemLots",
@@ -93,7 +93,6 @@ __all__ = [
     "ReservationFact",
     "SalesCommitments",
     "ToolAnswer",
-    "estimate_action_impact",
     "get_capacity_context",
     "get_inbound_schedule",
     "get_item_lots",
@@ -123,12 +122,6 @@ CAPACITY_WINDOW_UNRESOLVED = "CAPACITY_WINDOW_UNRESOLVED"
 #: 정책이었나"* 를 알 수 없다 (`historical_repository.CAPACITY_BASIS_CURRENT_ACTIVE_POLICY`
 #: 가 같은 한계를 이미 응답에 적는다). 지금 활성 정책을 쓰되 **그 사실을 적는다.**
 POLICY_NOT_HISTORICAL = "POLICY_NOT_HISTORICAL"
-#: 카탈로그에 없는 행동이다 (§10.1).
-ACTION_UNSUPPORTED = "ACTION_UNSUPPORTED"
-#: 그 행동의 영향을 셈할 입력이 모자란다.
-IMPACT_INPUT_MISSING = "IMPACT_INPUT_MISSING"
-#: 준 도착일이 `cap_by_date` 창 밖이다 — 그날 여유를 안 셈했으므로 판정하지 않는다.
-ARRIVAL_DATE_OUTSIDE_WINDOW = "ARRIVAL_DATE_OUTSIDE_WINDOW"
 #: 🔴 **그날 값을 못 되살린 detail 이 있다.** 표가 과거 값을 안 들고 있어서다 —
 #: `touch_exception` 이 `severity`·근거를, `resolve_exception` 이 `note` 를 덮는다.
 #: 지금 값을 과거 답에 실으면 look-ahead 다. 어느 칸인지는 `unresolved_details` 가 말한다.
@@ -166,18 +159,6 @@ RESOLVE_WRITTEN_DETAILS: tuple[str, ...] = ("note",)
 MUTABLE_EXCEPTION_DETAILS: tuple[str, ...] = (
     *DETECT_WRITTEN_DETAILS,
     *RESOLVE_WRITTEN_DETAILS,
-)
-
-
-Feasibility = Literal["FEASIBLE", "INFEASIBLE", "UNRESOLVED", "UNSUPPORTED"]
-
-#: 영향을 셈할 수 있는 행동. **§10.1 행동 카탈로그와 같은 어휘다.**
-#: 🔴 Proposal 을 여기서 만들지 않는다 — 카탈로그 이름만 공유한다 (Commit 5).
-SUPPORTED_ACTIONS: tuple[str, ...] = (
-    "SALES_PRIORITY_REQUEST",
-    "PURCHASE_ADJUST_REQUEST",
-    "ACCEPT_RISK",
-    "DISPOSAL_REQUEST",
 )
 
 
@@ -449,38 +430,6 @@ class InboundPlan(ToolAnswer):
 
     days: int
     schedules: tuple[InboundScheduleFact, ...]
-
-
-@dataclass(frozen=True, kw_only=True)
-class ActionImpact(ToolAnswer):
-    """`estimate_action_impact` — 🔴 **실행하지 않는다. 숫자를 지어내지도 않는다.**
-
-    ```text
-    FEASIBLE     기존 결정론 계산기가 «가능» 이라고 답했다
-    INFEASIBLE   〃              «불가» 라고 답했다
-    UNRESOLVED   입력이 모자라 못 쟀다      ← 0 으로 메우지 않는다
-    UNSUPPORTED  카탈로그에 없는 행동이다
-    ```
-
-    ⚠️ `None` 인 칸은 **0 이 아니다.** 판매가·매입가처럼 물류 장부에 없는 값은
-       물류가 셈할 수 없고, 그 사실을 `assumptions` 에 적는다.
-    """
-
-    action: str
-    feasibility: Feasibility
-    #: 이 행동이 **실제로 움직이는** 양. 🔴 수량 계약이 없으면 `None` 이다 —
-    #: 상한 후보량을 여기에 적으면 «다 나간다» 는 실행계획이 된다 (v0.8 보정).
-    affected_kg: Decimal | None
-    #: 창고 여유의 변화 (양수 = 자리가 는다). `affected_kg` 와 같은 규율이다.
-    capacity_delta_kg: Decimal | None
-    #: 🔴 **영향량이 아니다.** 그 행동이 건드릴 수 있는 **상한 후보량**이다 —
-    #: 판매 우선 요청이면 그 Lot 의 미확정 물량, 폐기 요청이면 그 Lot 의 잔량.
-    #: 실제로 얼마가 움직일지는 그 행동의 주인(Sales · Purchase · 사람)이 정한다.
-    candidate_kg: Decimal | None
-    #: 🔴 물류 장부의 **취득단가**로만 셈한다 (`inventory_lots.unit_cost_krw_per_kg`).
-    estimated_loss_krw: Decimal | None
-    freshness_days_left: int | None
-    assumptions: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -1144,354 +1093,4 @@ def _schedule_fact(view: InboundScheduleView) -> InboundScheduleFact:
         created_as_of=view.created_as_of,
         has_receipt=view.has_receipt,
         stock_applied=view.stock_applied,
-    )
-
-
-# ---------------------------------------------------------------------------
-# ⑧ estimate_action_impact
-# ---------------------------------------------------------------------------
-
-
-def estimate_action_impact(
-    conn: Any,
-    *,
-    sim_run_id: str,
-    as_of: date,
-    action: str,
-    parameters: Mapping[str, Any],
-    read_fn: Callable[..., LogisticsRead] = get_current_logistics_read,
-) -> ActionImpact:
-    """가정한 행동의 영향만 **읽는다**. 🔴 **아무것도 실행하지 않는다.**
-
-    ```text
-    SALES_PRIORITY_REQUEST   «이 Lot 을 우선 검토해 달라» 는 **요청**이다
-                             🔴 판매량은 Sales 소유 — qty_kg 를 안 주면 UNRESOLVED
-    DISPOSAL_REQUEST         그 Lot 의 일부가 버려진다        ← 손실은 취득단가로만
-    PURCHASE_ADJUST_REQUEST  예정 입고가 늘거나 준다
-                             🔴 도착일은 Purchase 소유 — arrival_date 를 안 주면 UNRESOLVED
-    ACCEPT_RISK              **아무것도 안 움직인다** (기록형)
-    ```
-
-    🔴 **카탈로그 밖 행동의 영향을 지어내지 않는다** — `UNSUPPORTED` 로 답한다.
-       모르는 행동에 그럴듯한 숫자를 붙이면 그 숫자가 제안의 근거가 된다.
-
-    🔴 **남의 부서가 정할 값을 물류가 정하지 않는다 (v0.8 보정).** *"얼마를 팔까"* 는
-       Sales, *"언제 받을까"* 는 Purchase 다. 그 값을 안 받았으면 **상한 후보량**
-       (`candidate_kg`)만 보이고 실제 영향량은 `None` · `UNRESOLVED` 다 —
-       후보량을 영향량 칸에 적는 순간 조사가 남의 실행계획을 대신 쓴 것이 된다.
-
-    🔴 **판매가·매입가를 셈하지 않는다.** 물류 장부에 없는 값이라 `None` 이고,
-       왜 `None` 인지를 `assumptions` 에 적는다 (0 은 «손실 없음» 이라는 주장이다).
-    """
-    if action not in SUPPORTED_ACTIONS:
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action=action,
-            feasibility="UNSUPPORTED",
-            uncertainties=(f"{ACTION_UNSUPPORTED}:{action}",),
-            assumptions=(f"카탈로그에 없는 행동이다 — 지원: {', '.join(SUPPORTED_ACTIONS)}",),
-        )
-    if action == "PURCHASE_ADJUST_REQUEST":
-        return _purchase_adjust_impact(
-            conn, sim_run_id=sim_run_id, as_of=as_of, parameters=parameters, read_fn=read_fn
-        )
-    return _lot_action_impact(
-        conn, sim_run_id=sim_run_id, as_of=as_of, action=action, parameters=parameters
-    )
-
-
-def _lot_action_impact(
-    conn: Any, *, sim_run_id: str, as_of: date, action: str, parameters: Mapping[str, Any]
-) -> ActionImpact:
-    """Lot 하나를 대상으로 하는 세 행동. **대상이 없으면 셈하지 않는다.**"""
-    lot_id = parameters.get("lot_id")
-    if not isinstance(lot_id, str) or not lot_id:
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action=action,
-            feasibility="UNRESOLVED",
-            uncertainties=(f"{IMPACT_INPUT_MISSING}:lot_id",),
-        )
-    view = get_lot(conn, sim_run_id=sim_run_id, as_of=as_of, lot_id=lot_id)
-    lot = view.lot
-    if lot is None:
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action=action,
-            feasibility="UNRESOLVED",
-            uncertainties=view.uncertainties,
-        )
-
-    if action == "ACCEPT_RISK":
-        # 🔴 **상태를 바꾸지 않는 기록형이다** (§10.1). 0 은 여기서 추측이 아니라 사실이다.
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action=action,
-            feasibility="FEASIBLE",
-            # 싣는 사실은 «이 Lot 이 있고 신선도가 이렇다» 둘이다 — 정책 축이 섞인다.
-            observed_as_of=derive_observed_as_of(
-                [lot.remaining_qty_observed_as_of, lot.freshness_observed_as_of]
-            ),
-            affected_kg=Decimal(0),
-            capacity_delta_kg=Decimal(0),
-            candidate_kg=Decimal(0),
-            estimated_loss_krw=Decimal(0),
-            freshness_days_left=lot.remaining_freshness_days,
-            assumptions=("위험을 안고 간다는 기록만 남는다 — 재고도 자리도 안 움직인다",),
-            uncertainties=view.uncertainties,
-        )
-
-    if action == "DISPOSAL_REQUEST":
-        requested_kg = _quantity(parameters.get("qty_kg"))
-        if requested_kg is None:
-            return _impact(
-                sim_run_id=sim_run_id,
-                as_of=as_of,
-                action=action,
-                feasibility="UNRESOLVED",
-                uncertainties=(*view.uncertainties, f"{IMPACT_INPUT_MISSING}:qty_kg"),
-            )
-        affected_kg = min(requested_kg, lot.remaining_qty_kg)
-        unit_cost = lot.unit_cost_krw_per_kg
-        assumptions = [
-            "폐기 손실은 장부 취득단가 × 수량이다 — 판매 기회손실은 물류 장부에 없다"
-        ]
-        if unit_cost is None:
-            assumptions.append("취득단가를 못 읽어 손실을 셈하지 않았다")
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action=action,
-            feasibility="FEASIBLE" if requested_kg <= lot.remaining_qty_kg else "INFEASIBLE",
-            # 잔량(원장) · 취득단가(입고일) · 신선도(정책) 셋을 다 싣는다.
-            observed_as_of=derive_observed_as_of(
-                [
-                    lot.remaining_qty_observed_as_of,
-                    lot.received_at,
-                    lot.freshness_observed_as_of,
-                ]
-            ),
-            affected_kg=affected_kg,
-            capacity_delta_kg=affected_kg,
-            # 🔴 폐기는 **수량이 요청에 들어 있는** 유일한 행동이라 영향량이 선다.
-            candidate_kg=lot.remaining_qty_kg,
-            estimated_loss_krw=None if unit_cost is None else affected_kg * unit_cost,
-            freshness_days_left=lot.remaining_freshness_days,
-            assumptions=tuple(assumptions),
-            uncertainties=view.uncertainties,
-        )
-
-    return _sales_priority_impact(
-        lot, view=view, sim_run_id=sim_run_id, as_of=as_of, parameters=parameters
-    )
-
-
-def _sales_priority_impact(
-    lot: LotFact,
-    *,
-    view: LotView,
-    sim_run_id: str,
-    as_of: date,
-    parameters: Mapping[str, Any],
-) -> ActionImpact:
-    """«이 Lot 을 우선 검토해 달라» 는 **요청**의 영향. 🔴 판매 실행계획이 아니다.
-
-    ```text
-    qty_kg 없음   UNRESOLVED   실제 판매량은 Sales 소유다 — 전량으로 지어내지 않는다
-    qty_kg 있음   그 수량이 이 Lot 에 미확정으로 남아 있나만 답한다 (물류 사실이다)
-    ```
-
-    🔴 **미확정 물량을 영향량으로 쓰지 않는다 (v0.8 보정).** 종전 구현은
-       `affected_kg = uncommitted_kg` 로 «전량이 나간다» 고 적었다 — 그것은 물류가 남의
-       부서 실행계획을 대신 쓴 것이다. 상한은 `candidate_kg` 로만 보인다.
-
-    ⚠️ **팔 수 있나** 는 여기서 답하지 않는다. 물류가 아는 것은 *"창고가 그만큼 댈 수
-       있나"* 까지고, 가격·수요·계약은 Sales 가 본다.
-    """
-    uncommitted_kg = lot.uncommitted_kg
-    # 예약 축이 섞이므로 관측일은 그 축까지 접는다 (지금은 `None`).
-    observed_as_of = derive_observed_as_of(
-        [lot.uncommitted_observed_as_of, lot.freshness_observed_as_of]
-    )
-    if uncommitted_kg is None:
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action="SALES_PRIORITY_REQUEST",
-            feasibility="UNRESOLVED",
-            uncertainties=(*view.uncertainties, f"{IMPACT_INPUT_MISSING}:uncommitted_kg"),
-            assumptions=("판매 가용이 아닌 Lot 이라 «아직 안 잡힌 몫» 이 성립하지 않는다",),
-        )
-
-    requested_kg = _quantity(parameters.get("qty_kg"))
-    if requested_kg is None:
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action="SALES_PRIORITY_REQUEST",
-            feasibility="UNRESOLVED",
-            observed_as_of=observed_as_of,
-            candidate_kg=uncommitted_kg,
-            freshness_days_left=lot.remaining_freshness_days,
-            assumptions=(
-                "실제 판매량은 Sales 가 정한다 — 수량 없이 영향량을 셈하지 않는다",
-                f"이 Lot 이 댈 수 있는 상한은 {uncommitted_kg}kg 이다 (영향량이 아니다)",
-                "판매가는 물류 장부에 없다 — 매출·이익 영향은 Sales 가 셈한다",
-            ),
-            uncertainties=(*view.uncertainties, f"{IMPACT_INPUT_MISSING}:qty_kg"),
-        )
-
-    affected_kg = min(requested_kg, uncommitted_kg)
-    return _impact(
-        sim_run_id=sim_run_id,
-        as_of=as_of,
-        action="SALES_PRIORITY_REQUEST",
-        feasibility="FEASIBLE" if requested_kg <= uncommitted_kg else "INFEASIBLE",
-        observed_as_of=observed_as_of,
-        affected_kg=affected_kg,
-        capacity_delta_kg=affected_kg,
-        candidate_kg=uncommitted_kg,
-        estimated_loss_krw=None,
-        freshness_days_left=lot.remaining_freshness_days,
-        assumptions=(
-            "물류가 답한 것은 «창고가 그 수량을 댈 수 있나» 까지다 — 팔릴지는 Sales 가 본다",
-            "판매가는 물류 장부에 없다 — 매출·이익 영향은 Sales 가 셈한다",
-        ),
-        uncertainties=view.uncertainties,
-    )
-
-
-def _purchase_adjust_impact(
-    conn: Any,
-    *,
-    sim_run_id: str,
-    as_of: date,
-    parameters: Mapping[str, Any],
-    read_fn: Callable[..., LogisticsRead],
-) -> ActionImpact:
-    """예정 입고를 늘리거나 줄인다. **도착일 하루의 `cap_by_date` 가 답한다.**
-
-    ```text
-    arrival_date 없음   UNRESOLVED   도착일은 Purchase 소유다 — 창에서 하루를 골라 주지 않는다
-    arrival_date 있음   cap_by_date[그날] 과만 견준다
-    ```
-
-    🔴 **창에서 «가장 빡빡한 날» 을 골라 판정하지 않는다 (v0.8 보정).** 종전 구현이
-       `min(cap_by_date.values())` 와 견줬는데, 그 고르기 자체가 **분할 회차와 도착일을
-       정하는 일**이라 매입의 몫이다. 물류의 역할은 *"그날 이만큼 들어올 자리가 있나"* 를
-       답하는 데까지다 (`scenario_engine.validate_purchase_scenarios` 도 매입이 준
-       도착일마다 따로 견준다).
-
-    🔴 **새 용량 판정을 만들지 않는다.** 그 함수가 쓰는 `calculate_cap_by_date` 를
-       그대로 본다 — 매입 시나리오 판정과 조사가 서로 다른 여유를 말하면 안 된다.
-
-    ⚠️ **매입 단가를 모른다.** 금액 영향은 `None` 이고 그 사실을 가정에 적는다.
-    """
-    delta_kg = _quantity(parameters.get("qty_delta_kg"), allow_negative=True)
-    if delta_kg is None:
-        return _impact(
-            sim_run_id=sim_run_id,
-            as_of=as_of,
-            action="PURCHASE_ADJUST_REQUEST",
-            feasibility="UNRESOLVED",
-            uncertainties=(f"{IMPACT_INPUT_MISSING}:qty_delta_kg",),
-        )
-    capacity = get_capacity_context(conn, sim_run_id=sim_run_id, as_of=as_of, read_fn=read_fn)
-    arrival_date = parameters.get("arrival_date")
-    base = {
-        "sim_run_id": sim_run_id,
-        "as_of": as_of,
-        "action": "PURCHASE_ADJUST_REQUEST",
-        "observed_as_of": capacity.observed_as_of,
-        "affected_kg": abs(delta_kg),
-        # 자리의 변화는 요청량의 산술 결과라 도착일 없이도 선다 (양수 = 자리가 는다).
-        "capacity_delta_kg": -delta_kg,
-        "estimated_loss_krw": None,
-    }
-    if not isinstance(arrival_date, date):
-        return _impact(
-            **base,
-            feasibility="UNRESOLVED",
-            uncertainties=(*capacity.uncertainties, f"{IMPACT_INPUT_MISSING}:arrival_date"),
-            assumptions=(
-                "도착일 없이 가능 여부를 판정하지 않는다 — 분할 회차와 도착일은 Purchase 가 정한다",
-                "매입 단가는 물류 장부에 없다 — 금액 영향은 Purchase 가 셈한다",
-            ),
-        )
-    if arrival_date not in capacity.cap_by_date:
-        return _impact(
-            **base,
-            feasibility="UNRESOLVED",
-            uncertainties=(
-                *capacity.uncertainties,
-                f"{ARRIVAL_DATE_OUTSIDE_WINDOW}:{arrival_date}",
-            ),
-            assumptions=(
-                f"{arrival_date} 는 지금 셈한 창 밖이라 그날 여유를 모른다",
-                "매입 단가는 물류 장부에 없다 — 금액 영향은 Purchase 가 셈한다",
-            ),
-        )
-    room_kg = capacity.cap_by_date[arrival_date]
-    return _impact(
-        **base,
-        feasibility="FEASIBLE" if delta_kg <= 0 or delta_kg <= room_kg else "INFEASIBLE",
-        assumptions=(
-            f"{arrival_date} 하루의 여유 {room_kg}kg 와만 견줬다 — 다른 날은 보지 않았다",
-            "매입 단가는 물류 장부에 없다 — 금액 영향은 Purchase 가 셈한다",
-        ),
-        uncertainties=capacity.uncertainties,
-    )
-
-
-def _quantity(value: Any, *, allow_negative: bool = False) -> Decimal | None:
-    """수량 인자 하나. 🔴 **문자열을 float 으로 지나게 하지 않는다.**"""
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, Decimal):
-        quantity = value
-    elif isinstance(value, int | str):
-        try:
-            quantity = Decimal(value)
-        except (ArithmeticError, ValueError):
-            return None
-    else:
-        return None
-    if not allow_negative and quantity <= 0:
-        return None
-    return quantity
-
-
-def _impact(
-    *,
-    sim_run_id: str,
-    as_of: date,
-    action: str,
-    feasibility: Feasibility,
-    observed_as_of: date | None = None,
-    affected_kg: Decimal | None = None,
-    capacity_delta_kg: Decimal | None = None,
-    candidate_kg: Decimal | None = None,
-    estimated_loss_krw: Decimal | None = None,
-    freshness_days_left: int | None = None,
-    assumptions: tuple[str, ...] = (),
-    uncertainties: tuple[str, ...] = (),
-) -> ActionImpact:
-    return ActionImpact(
-        sim_run_id=sim_run_id,
-        as_of=as_of,
-        observed_as_of=observed_as_of,
-        uncertainties=uncertainties,
-        source_refs=(*_LOT_SOURCES, "agent_policy_config"),
-        action=action,
-        feasibility=feasibility,
-        affected_kg=affected_kg,
-        capacity_delta_kg=capacity_delta_kg,
-        candidate_kg=candidate_kg,
-        estimated_loss_krw=estimated_loss_krw,
-        freshness_days_left=freshness_days_left,
-        assumptions=assumptions,
     )

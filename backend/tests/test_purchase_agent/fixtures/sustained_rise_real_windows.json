@@ -1,0 +1,714 @@
+{
+ "_provenance": {
+  "source": "haetdeul.v_ml_price_forecast · target_kind=AUC · as_of 당일 배치 (app.master.inputs.load_forecast)",
+  "extracted_at": "2026-09-17",
+  "read_only": true,
+  "note": "값은 손대지 않았다. 판정 기대값은 이 파일이 아니라 검사 파일에 적는다."
+ },
+ "windows": [
+  {
+   "_why": "SIM-CHAIN-PURLLM-0917 매입 판단 507건 중 하나 · 기록 situation=stable",
+   "as_of": "2026-03-27",
+   "target_kind": "AUC",
+   "generated_at": "2026-03-27T06:00:00+09:00",
+   "item": "무",
+   "unit": "원/kg",
+   "current_price": 442,
+   "horizon_days": 18,
+   "model_version": "ops_auc",
+   "use_recommended": true,
+   "daily": [
+    {
+     "date": "2026-03-28",
+     "lower": 359,
+     "upper": 541,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 442,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-03-29",
+     "lower": 359,
+     "upper": 541,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 442,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-03-30",
+     "lower": 359,
+     "upper": 541,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 442,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-03-31",
+     "lower": 349,
+     "upper": 553,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 442,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-04-01",
+     "lower": 335,
+     "upper": 589,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 455,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-02",
+     "lower": 334,
+     "upper": 590,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 455,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-03",
+     "lower": 332,
+     "upper": 594,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 455,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-04",
+     "lower": 332,
+     "upper": 594,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 455,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-05",
+     "lower": 332,
+     "upper": 594,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 455,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-06",
+     "lower": 335,
+     "upper": 597,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 455,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-07",
+     "lower": 334,
+     "upper": 603,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 455,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-08",
+     "lower": 332,
+     "upper": 606,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 456,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-09",
+     "lower": 331,
+     "upper": 606,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 456,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-10",
+     "lower": 330,
+     "upper": 610,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 456,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-11",
+     "lower": 330,
+     "upper": 610,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 456,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-12",
+     "lower": 330,
+     "upper": 610,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 456,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-13",
+     "lower": 331,
+     "upper": 615,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 456,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-04-14",
+     "lower": 329,
+     "upper": 616,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 455,
+     "gate_reason": null
+    }
+   ]
+  },
+  {
+   "_why": "SIM-CHAIN-PURLLM-0917 매입 판단 507건 중 하나 · 기록 situation=stable",
+   "as_of": "2026-08-21",
+   "target_kind": "AUC",
+   "generated_at": "2026-08-21T06:00:00+09:00",
+   "item": "무",
+   "unit": "원/kg",
+   "current_price": 575,
+   "horizon_days": 18,
+   "model_version": "ops_auc",
+   "use_recommended": true,
+   "daily": [
+    {
+     "date": "2026-08-22",
+     "lower": 462,
+     "upper": 726,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 575,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-08-23",
+     "lower": 462,
+     "upper": 726,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 575,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-08-24",
+     "lower": 462,
+     "upper": 726,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 575,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-08-25",
+     "lower": 447,
+     "upper": 745,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 575,
+     "gate_reason": "lead_time"
+    },
+    {
+     "date": "2026-08-26",
+     "lower": 515,
+     "upper": 886,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 663,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-08-27",
+     "lower": 516,
+     "upper": 884,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 661,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-08-28",
+     "lower": 511,
+     "upper": 885,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 662,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-08-29",
+     "lower": 511,
+     "upper": 885,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 662,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-08-30",
+     "lower": 511,
+     "upper": 885,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 662,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-08-31",
+     "lower": 501,
+     "upper": 902,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 654,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-01",
+     "lower": 507,
+     "upper": 927,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 655,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-02",
+     "lower": 504,
+     "upper": 929,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 653,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-03",
+     "lower": 507,
+     "upper": 938,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 654,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-04",
+     "lower": 509,
+     "upper": 929,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 653,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-05",
+     "lower": 509,
+     "upper": 929,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 653,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-06",
+     "lower": 509,
+     "upper": 929,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 653,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-07",
+     "lower": 512,
+     "upper": 957,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 660,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-08",
+     "lower": 502,
+     "upper": 958,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 660,
+     "gate_reason": null
+    }
+   ]
+  },
+  {
+   "_why": "SIM-CHAIN-PURLLM-0917 매입 판단 507건 중 하나 · 게이트 제거(09-09) 뒤 금요일 배치",
+   "as_of": "2026-09-11",
+   "target_kind": "AUC",
+   "generated_at": "2026-09-11T06:00:00+09:00",
+   "item": "배추",
+   "unit": "원/kg",
+   "current_price": 762,
+   "horizon_days": 18,
+   "model_version": "ops_auc",
+   "use_recommended": true,
+   "daily": [
+    {
+     "date": "2026-09-12",
+     "lower": 535,
+     "upper": 1047,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 709,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-13",
+     "lower": 535,
+     "upper": 1047,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 709,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-14",
+     "lower": 531,
+     "upper": 1059,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 713,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-15",
+     "lower": 538,
+     "upper": 1080,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 728,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-16",
+     "lower": 533,
+     "upper": 1089,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 731,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-17",
+     "lower": 522,
+     "upper": 1104,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 726,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-18",
+     "lower": 519,
+     "upper": 1110,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 726,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-19",
+     "lower": 519,
+     "upper": 1110,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 726,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-20",
+     "lower": 519,
+     "upper": 1110,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 726,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-21",
+     "lower": 514,
+     "upper": 1098,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 706,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-22",
+     "lower": 510,
+     "upper": 1088,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 704,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-23",
+     "lower": 507,
+     "upper": 1088,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 704,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-24",
+     "lower": 507,
+     "upper": 1088,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 704,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-25",
+     "lower": 507,
+     "upper": 1088,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 704,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-26",
+     "lower": 507,
+     "upper": 1088,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 704,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-27",
+     "lower": 507,
+     "upper": 1088,
+     "is_gated": false,
+     "is_filled": true,
+     "predicted": 704,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-28",
+     "lower": 466,
+     "upper": 1111,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 681,
+     "gate_reason": null
+    },
+    {
+     "date": "2026-09-29",
+     "lower": 456,
+     "upper": 1119,
+     "is_gated": false,
+     "is_filled": false,
+     "predicted": 671,
+     "gate_reason": null
+    }
+   ]
+  },
+  {
+   "_why": "예측 배치 전수 탐색에서 찾음 · 507건 밖 (그날 걷기 판단 기록에 없다)",
+   "as_of": "2026-08-21",
+   "target_kind": "AUC",
+   "generated_at": "2026-08-21T06:00:00+09:00",
+   "item": "양파",
+   "unit": "원/kg",
+   "current_price": 1074,
+   "horizon_days": 18,
+   "model_version": "ops_auc",
+   "use_recommended": true,
+   "daily": [
+    {
+     "date": "2026-08-22",
+     "lower": 983,
+     "upper": 1170,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 1074,
+     "gate_reason": "lead_time+quality"
+    },
+    {
+     "date": "2026-08-23",
+     "lower": 983,
+     "upper": 1170,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 1074,
+     "gate_reason": "lead_time+quality"
+    },
+    {
+     "date": "2026-08-24",
+     "lower": 983,
+     "upper": 1170,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "lead_time+quality"
+    },
+    {
+     "date": "2026-08-25",
+     "lower": 958,
+     "upper": 1202,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "lead_time+quality"
+    },
+    {
+     "date": "2026-08-26",
+     "lower": 970,
+     "upper": 1285,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-08-27",
+     "lower": 975,
+     "upper": 1295,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-08-28",
+     "lower": 963,
+     "upper": 1301,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-08-29",
+     "lower": 963,
+     "upper": 1301,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-08-30",
+     "lower": 963,
+     "upper": 1301,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-08-31",
+     "lower": 966,
+     "upper": 1301,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-01",
+     "lower": 961,
+     "upper": 1306,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-02",
+     "lower": 959,
+     "upper": 1307,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-03",
+     "lower": 962,
+     "upper": 1331,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-04",
+     "lower": 961,
+     "upper": 1336,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-05",
+     "lower": 961,
+     "upper": 1336,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-06",
+     "lower": 961,
+     "upper": 1336,
+     "is_gated": true,
+     "is_filled": true,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-07",
+     "lower": 955,
+     "upper": 1343,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    },
+    {
+     "date": "2026-09-08",
+     "lower": 945,
+     "upper": 1362,
+     "is_gated": true,
+     "is_filled": false,
+     "predicted": 1074,
+     "gate_reason": "quality"
+    }
+   ]
+  }
+ ]
+}

@@ -18,7 +18,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-from _injection import drop_holdings, inject_arrival_cap
+from _injection import drop_holdings, inject_arrival_cap, inject_arrival_window
 
 from app.purchase_agent import mocks
 from app.purchase_agent.allocation import equal_ratios
@@ -84,9 +84,14 @@ def _staged(item: str = ITEM, as_of: date = RISING) -> dict:
 
 
 def _flatten_trend(state: dict) -> None:
-    """지속 상승 궤적을 깬다 — 궤적 가지를 끄고 수량 가지만 남길 때 쓴다."""
+    """지속 상승 궤적을 깬다 — 궤적 가지를 끄고 수량 가지만 남길 때 쓴다.
+
+    🔴 **보합이 아니라 실제 하락을 넣는다** (2026-09-17 정의 교체). 전에는 D+2 를 D+1 과
+      **같게** 만들어 엄격 증가를 깼는데, 지금 정의는 보합을 허용해 그 입력이 여전히
+      지속 상승이다. 1 만 낮춰도 «실제 하락» 이 선다.
+    """
     daily = deepcopy(state["forecast"]["daily"])
-    daily[1]["predicted"] = daily[0]["predicted"]  # 단조 증가가 아니게 된다
+    daily[1]["predicted"] = daily[0]["predicted"] - 1  # D+1 → D+2 실제 하락
     state["forecast"] = {**state["forecast"], "daily": daily}
 
 
@@ -160,7 +165,10 @@ def test_volume_trigger_enters_on_its_own_without_any_trend() -> None:
     cap = 9_000
     inject_arrival_cap(state, cap)
 
-    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap + 1
+    # 🔴 ④ 가 보는 칸은 ``raw_qty_kg`` (차감 뒤 · 클립 전)다 — 2026-09-16 · E3-9 앞단.
+    #   클립 후 총량으로 물으면 창고 상한이 곧 도착일 여유라 등호가 되고, ``>`` 가
+    #   구조적으로 거짓이 된다. 경계를 재려면 **묻는 그 칸**을 흔들어야 한다.
+    state["base_plan"]["drafts"][-1]["raw_qty_kg"] = cap + 1
     decision = evaluate_split_entry(state, constraints)
     assert decision["by_trend"] is False
     assert decision["by_volume"] is True
@@ -168,12 +176,12 @@ def test_volume_trigger_enters_on_its_own_without_any_trend() -> None:
     assert decision["entered"] is True
 
     # 🔴 **딱 맞는 날은 안 나눈다** — ⑦ 이 ``occupied > cap`` 으로 재므로 통과한다.
-    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap
+    state["base_plan"]["drafts"][-1]["raw_qty_kg"] = cap
     exact = evaluate_split_entry(state, constraints)
     assert exact["by_volume"] is False
     assert exact["entered"] is False
 
-    state["base_plan"]["drafts"][-1]["total_qty_kg"] = cap - 1  # 경계 바로 아래
+    state["base_plan"]["drafts"][-1]["raw_qty_kg"] = cap - 1  # 경계 바로 아래
     blocked = evaluate_split_entry(state, constraints)
     assert blocked["by_volume"] is False
     assert blocked["entered"] is False
@@ -498,7 +506,12 @@ def test_round_level_arrival_check_is_disclosed_as_deferred(proposals: dict) -> 
 
 
 def _forced_state(
-    as_of: date, orders_kg: int, warehouse_kg: int, cash: int, cap_kg: float | None = None
+    as_of: date,
+    orders_kg: int,
+    warehouse_kg: int,
+    cash: int,
+    cap_kg: float | None = None,
+    window: tuple[float, float] | None = None,
 ) -> dict:
     """하드 제약을 직접 흔들어 ⑥까지 돌린 **상태 전체**.
 
@@ -515,7 +528,10 @@ def _forced_state(
         "rental_cap_kg": 0,
     }
     state["projected_cash_min"] = cash
-    if cap_kg is not None:
+    if window is not None:
+        # 🔴 여유가 **뒤로 회복되는** 창 — 분할이 실제로 이득인 날을 잰다 (E3-9 앞단).
+        inject_arrival_window(state, window[0], window[1])
+    elif cap_kg is not None:
         inject_arrival_cap(state, cap_kg)
     state.update(classify_situation(state))
     state.update(draft_plan(state))
@@ -526,10 +542,15 @@ def _forced_state(
 
 
 def _forced(
-    as_of: date, orders_kg: int, warehouse_kg: int, cash: int, cap_kg: float | None = None
+    as_of: date,
+    orders_kg: int,
+    warehouse_kg: int,
+    cash: int,
+    cap_kg: float | None = None,
+    window: tuple[float, float] | None = None,
 ) -> dict:
     """위 상태에서 공격안 하나를 꺼낸다."""
-    state = _forced_state(as_of, orders_kg, warehouse_kg, cash, cap_kg)
+    state = _forced_state(as_of, orders_kg, warehouse_kg, cash, cap_kg, window)
     return next(s for s in state["scenarios_final"] if s["label"] == "공격")
 
 
@@ -543,7 +564,7 @@ def test_split_plan_is_never_none_so_the_decision_always_travels() -> None:
 
 
 def test_a_timing_axis_that_never_splits_is_withdrawn_not_labelled() -> None:
-    """①이 **클립 전** 추정으로 축을 열고 ④가 **클립 후** 총량으로 닫는 경우.
+    """①이 **추정**으로 축을 열고 ④가 **실제 수요**로 닫는 경우.
 
     §4-④ E3-3 확정 2가 "정상"이라 한 상황이다. 🔴 **처방이 바뀌었다** (`#308`).
 
@@ -554,17 +575,25 @@ def test_a_timing_axis_that_never_splits_is_withdrawn_not_labelled() -> None:
 
     ⚠️ **고지는 그대로 남는다.** 출력 ``allowed_axes`` 에는 여전히 분할 축이 들어 있어서,
       아무 안도 그 축을 안 쓴 이유가 없으면 되물을 자리가 사라진다.
+
+    🔴 **두 수를 가르는 것이 바뀌었다** (2026-09-16 · E3-9 앞단). 전에는 «클립 전 추정 vs
+      클립 후 총량» 이었는데, 클립 후 총량으로 물으면 창고 상한이 곧 도착일 여유라
+      **등호가 되어 ``>`` 가 구조적으로 거짓**이었다. 지금 ④ 는 ``raw_qty_kg`` (차감 뒤 ·
+      클립 전)를 본다. 그래서 갈리는 자리는 **보유 차감**이다::
+
+          ① 추정   일평균 2,142.9 × D=12        = 25,714kg
+          ④ 실제   demand 25,714 − 차감 3,000   = 22,714kg
     """
-    # 확정주문 30,000kg → ①의 추정 총량 25,714kg이 도착일 여유 10,000kg을 넘어 timing이
-    # 열린다. 창고 5,000kg이 안별 총량을 깎아 ④의 판정에서는 여유 미만이 된다.
+    # 확정주문 30,000kg → ①의 추정 총량 25,714kg이 도착일 여유 24,000kg을 넘어 timing이
+    # 열린다. 보유 3,000kg을 뺀 실제 수요 22,714kg은 그 여유 미만이라 ④는 안 나눈다.
     # 예측은 하락이라 궤적 가지도 서지 않는다.
     aggressive = _forced(
-        FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12, cap_kg=10_000
+        FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12, cap_kg=24_000
     )
     assert aggressive["strategy_type"] != TIMING_AXIS  # ← 걷혔다
     assert len(aggressive["split_plan"]) == 1
     note = next(risk for risk in aggressive["risks"] if "분할 축이 열렸지만" in risk)
-    assert "도착 여유 10,000kg" in note
+    assert "도착 여유 24,000kg" in note
     assert "지속 상승 궤적 아님" in note
 
 
@@ -624,7 +653,9 @@ def test_the_withdrawn_axis_does_not_make_self_check_reject_the_whole_day() -> N
       먹여, 안 걷은 쪽은 반려 문장이 나오고 걷은 쪽은 ``None`` 인 것을 나란히 본다 —
       «⑦이 실효 축을 안 보면 죽는다» 를 값으로 보인다.
     """
-    state = _forced_state(FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12, cap_kg=10_000)
+    # 🔴 여유 24,000 은 ① 추정 25,714 과 ④ 실제 수요 22,714(차감 3,000 뒤) 사이다 —
+    #   ① 은 열고 ④ 는 닫는 그 자리다 (2026-09-16 · E3-9 앞단).
+    state = _forced_state(FALLING, orders_kg=30_000, warehouse_kg=5_000, cash=10**12, cap_kg=24_000)
     assert TIMING_AXIS in state["allowed_axes"], "전제 — ①이 총량으로 축을 열었다"
     assert not split_decision(state["split_plan"])["entered"], "전제 — ④는 안 나눴다"
 
@@ -657,8 +688,15 @@ def test_volume_only_entry_cites_the_arrival_cap_not_the_forecast() -> None:
     등급은 **낮은 쪽**이다: 여유는 물류 정본이지만 비교 대상인 총량이 수요 파생값이라
     ``ASSUMED`` (IO명세 §5 "수요에서 파생된 것은 SIM_FIXED 자격을 잃는다").
     """
+    # 🔴 **창이 한 값이면 분할 실익이 구조적으로 없다** (2026-09-16 · E3-9 앞단) —
+    #   ③ 이 깎은 총량이 늘 첫 도착일 여유와 같아져 나눠도 더 못 산다. 그래서 여유가
+    #   뒤로 회복되는 창을 준다. 근거가 가리키는 수는 그대로 **첫 도착일 여유**다.
     aggressive = _forced(
-        FALLING, orders_kg=60_000, warehouse_kg=10**9, cash=10**12, cap_kg=20_000
+        FALLING,
+        orders_kg=60_000,
+        warehouse_kg=10**9,
+        cash=10**12,
+        window=(20_000.0, 200_000.0),
     )
     assert len(aggressive["split_plan"]) > 1
     items = [r for r in aggressive["rationale"] if "분할" in r["claim"]]

@@ -21,11 +21,19 @@ import {
   SourceTag,
   StatRow,
 } from "@/components/console/Blocks";
+import { Table as PagedTable, type Column as PagedColumn } from "@/components/console/ConsoleData";
 import { useTab } from "@/components/console/useTab";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
 //     `useTab` 의 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
-import { purchase, type Plan, type PurchaseTab, type Tone } from "@/lib/screen";
+import {
+  purchase,
+  type Cell,
+  type Plan,
+  type PurchaseTab,
+  type Table as ScreenTable,
+  type Tone,
+} from "@/lib/screen";
 
 /**
  * 상태 낱말 → 색. **낱말은 서버가 정한다** (`app/api/plan_state.py` 의 넷).
@@ -36,8 +44,56 @@ import { purchase, type Plan, type PurchaseTab, type Tone } from "@/lib/screen";
  * 🔴 **모르는 낱말은 감추지 않고 그대로 보인다** (`neutral`). 서버가 어휘를 늘리는 날
  *    화면이 조용히 빈 배지를 내면, 사람은 상태가 없는 줄로 읽는다.
  */
+/*
+ * ══ 안 그리는 것 — 화면에서만 · API 는 그대로 (2026-09-17) ══════════════════════════
+ *
+ * 화면을 줄이려고 다섯을 뺐다. 🔴 **API 칸은 하나도 안 지웠다** — `GET /api/purchase`
+ * 응답에 그대로 있고, 되짚을 때는 거기서 읽는다.
+ *
+ *   ① 재고 근거의 로트 ID 괄호     「가용 29.0kg (로트 LOT-RCPT-SIM-CHAIN-…-1-1)」 에서
+ *                                  괄호만 걷는다 · 「가용 29.0kg」 은 남긴다
+ *      왜   로트 ID 가 50~80자 내부 식별자라 근거 한 줄을 세 줄로 민다
+ *      어디 `plans[].reasons[].text` 원문 (근거 꼬리표 `reasons[].ref` 도 로트를 든다)
+ *      ⚠️ 실측 — 세 실행에서 그 괄호는 **재고 근거에만** 있다 (REH 655 · FINAL 693 ·
+ *         V13 220줄 · 다른 근거 0). 그래서 `source === "재고"` 일 때만 걷는다
+ *
+ *   ② 「걸리는 것」 섹션 통째로      `plan.risks`
+ *      왜   안마다 5~8줄이라 카드가 길고, 에이전트 문장 안에 로트 ID · 내부 설명이 있다
+ *      어디 `plans[].risks` (세 실행 합계 REH 3,456 · FINAL 3,136 · V13 1,027줄)
+ *
+ *   ③ 안 목록 안내 블록              `plans_note`
+ *      왜   실행 수 · 뺀 건수 · 보는 걷기 같은 조회 설명이라 업무가 안 읽는다
+ *      어디 `plans_note.text`
+ *      🔴 **안이 0개인 날에는 그 글이 「왜 안이 없나」를 말하는 유일한 자리였다** —
+ *         REH-0914 23일 · V13 8일 · FINAL 0일. 예) 02-27 「가용재고 72kg 이 커버 2일
+ *         수요 29kg 을 이미 덮어 이날은 매입이 필요 없다」. 그날 화면은 빈 칸이고
+ *         「오늘 제안 0 안」 통계만 남는다
+ *
+ *   ④ 확정 매입 안내 블록            `committed_note`
+ *      왜   원장 줄 수 · 뺀 줄 수 같은 조회 설명이라 표 아래 소음이다
+ *      어디 `committed_note.text`
+ *      ⚠️ 도착일 「—」의 이유(「못 맞춘 줄 N개는 공란」)도 여기 있었다 — 세 실행 실데이터
+ *         에는 그런 줄이 0 이다
+ *
+ *   ⑤ 「승인은 아래 서랍에서 합니다」  확정 매입 판 꼬리말
+ *      왜   화면에만 있던 안내문이다 — 서랍은 모든 탭 아래에 늘 보인다
+ *      어디 **API 에는 원래 없었다** (이 파일의 글자였다)
+ */
+
+/**
+ * 근거 한 줄의 화면 글자. ① 재고 근거에서 **로트 ID 괄호만** 걷는다.
+ *
+ * ★ 괄호 모양이 정확히 맞을 때만 걷는다 — 「(로트 LOT-…)」. 다른 괄호 · 다른 근거는
+ *   원문 그대로다. 에이전트 문장을 화면에서 고쳐 쓰는 자리는 이 한 곳뿐이다.
+ */
+function reasonText(r: { source: string; text: string }): string {
+  return r.source === "재고" ? r.text.replace(/\s*\(로트 LOT-[^)]*\)/g, "") : r.text;
+}
+
 const STATE_TONE: Record<string, Tone> = {
-  //  기다리는 것 — 사람이 아직 할 일이 남았다
+  //  결정이 안 난 안. 🔴 ~~기다리는 것 — 사람이 아직 할 일이 남았다~~ 낡았다 (2026-09-17).
+  //  같은 요청에서 다른 안이 결정되면 「후보」여도 **기다리지 않는다** — 기다리는지는
+  //  `plan.pending` 이 말하고(요청 틀의 초록 테두리 · `RequestFrame`), 이 색은 낱말만 따른다.
   후보: "warn",
   //  결정이 났다
   승인됨: "good",
@@ -46,6 +102,48 @@ const STATE_TONE: Record<string, Tone> = {
   //  안 사기로 한 것
   반려: "bad",
 };
+
+/**
+ * 칸 값 → 화면 글자. 🔴 **`null` 은 「—」다 — 0 도 빈칸도 아니다** (규칙 3).
+ *
+ * ★ 공용 `DataTable`(Blocks)의 `cellText` 와 **같은 규칙**이다. 확정 매입 표를 검색 · 쪽
+ *   나누기 부품(`ConsoleData.Table`)으로 바꾸면서 그 규칙을 여기로 옮겼다 — 부품을 바꾸다
+ *   `String(null)` 이 「null」로 찍히거나 빈칸이 되면 «못 맞췄다» 가 화면에서 사라진다.
+ */
+function cellText(v: Cell | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return typeof v === "number" ? v.toLocaleString("ko-KR") : String(v);
+}
+
+/**
+ * 확정 매입 표. **검색 · 10줄씩** (2026-09-17).
+ *
+ * ★ 부품은 운영 콘솔 공용 `ConsoleData.Table` 을 **고치지 않고** 쓴다 — 재무 · 판매 표와
+ *   조작법이 같아진다. 공용 `DataTable`(Blocks)은 대시보드 · 물류가 쓰므로 안 건드린다.
+ * 🔴 줄 수는 API 가 준 그대로다 — 화면은 **쪽만** 나눈다. 이번 주 매입액 · 입고 예정은
+ *    API 가 전체 줄로 셌다 (FINAL-0918 09-14 · 495줄 · 111KB 를 한 번에 받는다).
+ * ⚠️ 줄이 0 이면 공용 부품 대신 `DataTable` 로 그린다 — `ConsoleData.Table` 은 빈 표를
+ *    「검색 조건에 맞는 항목이 없습니다」로 적는데, 그건 API 가 준 빈 표 안내와 다른 말이다.
+ */
+function CommittedTable({ table }: { table: ScreenTable }) {
+  //  🔴 매입 번호 칸(`approval`)은 **화면에서만** 가린다 · 근거는 아래 Panel 주석
+  const shown = table.columns.filter((c) => c.key !== "approval");
+  if (table.rows.length === 0) return <DataTable table={{ ...table, columns: shown }} />;
+  const columns: PagedColumn<Record<string, Cell>>[] = shown.map((c) => ({
+    key: c.key,
+    label: c.label,
+    //  ★ 공용 부품은 left · right 만 안다. 확정 매입 칸에 center 는 없다
+    align: c.align === "right" ? "right" : "left",
+    mono: c.mono,
+    render: (row) => cellText(row[c.key]),
+  }));
+  return (
+    <>
+      <PagedTable columns={columns} rows={table.rows} pageSize={10} />
+      <Note note={table.note} />
+    </>
+  );
+}
 
 /**
  * 이 안이 지금 어느 상태인가.
@@ -62,29 +160,176 @@ function PlanState({ plan }: { plan: Plan }) {
   return <Pill text={plan.state} tone={STATE_TONE[plan.state] ?? "neutral"} />;
 }
 
+/**
+ * 요청(품목·날) 하나 — 틀 하나에 담을 안 1~3개.
+ *
+ * `item` 은 안 이름 앞자리다. 🔴 매입 `Plan` 에 품목 칸이 없다 — API 가 `key` 를
+ * 「품목 · 안 이름」으로 만들고(`query._plan`), 대시보드 서버(`plan_state.plan_item`)와
+ * 말로 한 승인(`MasterConsole.planItem`)도 같은 자리를 쪼개 읽는다.
+ */
+type RequestGroup = { key: string; item: string; pending: boolean; plans: Plan[] };
+
+const PLAN_KEY_SEP = " · ";
+
+/**
+ * 「배추 · 보수」 → `{ item: "배추", label: "보수" }`. **화면 글자를 가를 때만** 쓴다.
+ *
+ * 🔴 `plan.key` 자체는 그대로 둔다 — React 열쇠이고, 말로 한 승인(`MasterConsole`)이 그
+ *    모양 그대로 읽는다. 걷는 것은 카드 제목의 **글자**뿐이다.
+ * ★ 첫 「 · 」 에서 가른다 — `MasterConsole.planItem` · `planLabel` 과 같은 규칙이다.
+ *   🟢 품목 · 안 이름에 「 · 」 가 든 경우가 없다 (2026-09-17 18:03 KST · DB 읽기 전용 · 안
+ *   전수 REH-0914 684 · FINAL-0918 707 · V13 231 — 품목은 배추 · 무 · 양파, 안 이름은
+ *   보수 · 기본 · 공격뿐). 계약 품목(`contracts/core.py ITEMS`)도 그 셋이다.
+ * ⚠️ 가를 자리가 없으면 둘 다 열쇠 전체다 — 품목을 지어내지 않는다.
+ */
+function splitPlanKey(key: string): { item: string; label: string } {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0
+    ? { item: key, label: key }
+    : { item: key.slice(0, at), label: key.slice(at + PLAN_KEY_SEP.length) };
+}
+
+/**
+ * 안 목록을 **요청마다** 묶는다 (2026-09-17). 순서는 API 가 준 순서 — 요청이 처음 나온 자리.
+ *
+ * ★ 열쇠는 `request_id` 다. 비어 있으면(데모 · 못 읽은 실행) **품목**으로 묶는다 — API 가
+ *   품목마다 실행을 **하나만** 고르므로(`query._pick` 「품목별 최신 하나」) 이 화면에서
+ *   한 품목의 안은 언제나 한 실행 · 한 요청의 것이다. 두 열쇠가 같은 묶음을 만든다.
+ * 🔴 틀의 `pending` 은 안들 중 **하나라도** 기다리면 참이다. API 가 `pending` 을 요청
+ *    단위로 싣으므로(`query._plan`) 한 틀 안에서 값이 갈리는 일은 없다 — 갈리는 날이 와도
+ *    기다리는 것을 틀에서 숨기지 않으려는 쪽으로 둔다.
+ */
+function groupByRequest(plans: Plan[]): RequestGroup[] {
+  const groups = new Map<string, RequestGroup>();
+  for (const plan of plans) {
+    const { item } = splitPlanKey(plan.key);
+    const key = plan.request_id ?? `품목:${item}`;
+    const group = groups.get(key) ?? { key, item, pending: false, plans: [] };
+    group.plans.push(plan);
+    group.pending ||= plan.pending;
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * 요청 틀. **테두리는 여기 한 번** — 요청에 결정이 없을 때만 초록이다 (2026-09-17).
+ *
+ * 🔴 전에는 안 카드마다 `plan.pending` 으로 테두리를 켰다. 요청 단위 `pending` 이 선 뒤로는
+ *    같은 요청의 카드 1~3장이 **같이** 켜지고 꺼져, 「기다리는 것이 몇 개인가」가 카드
+ *    수로 읽혔다 — 09-11 은 기다리는 요청이 둘(양파 · 무)인데 초록 카드가 다섯이다.
+ *
+ * 머리 낱말은 둘이다 — 「승인 대기」 · 「승인 완료」. 🔴 **새 낱말이 아니다** — 대시보드
+ * 배지(`api/dashboard/query.py` 「승인 대기 N건」 · 「오늘 승인 완료」)와 같은 말 · 같은 색이다.
+ * ★ 「대기 아님」이 곧 「승인」인 근거: 매입 API 는 **안 이름이 붙은 결정**만 결정으로
+ *   세고(`query.build` `decided`), DB CHECK `master_decisions_scenario_required` 가 안 이름을
+ *   `APPROVE` 에만 허락한다. 되돌린 승인(`REQUEST_CHANGE`)은 안 이름이 없어 다시 「승인 대기」다.
+ * ⚠️ 카드의 낱말(「후보」 · 「승인됨」 · 「매입 기록됨」)은 **그대로** 둔다 — 안마다 다르다
+ *    (한 요청에 승인된 안 하나와 후보 둘). 틀 머리는 요청의 말, 카드 배지는 안의 말이다.
+ * ⚠️ 통계 「승인 대기 N건」은 **안 단위 그대로**다 — 대시보드 배지가 마스터 파일에서 같은
+ *    수를 따로 센다. 여기서 요청 수로 바꾸면 두 화면의 수가 갈린다.
+ */
+function RequestFrame({ group }: { group: RequestGroup }) {
+  return (
+    <section
+      className="flex min-w-0 flex-col gap-3 rounded-2xl border p-3"
+      style={{
+        borderColor: group.pending ? "var(--color-t-good)" : "var(--color-hair)",
+        boxShadow: group.pending ? "0 0 0 1px var(--color-t-good)" : undefined,
+      }}
+    >
+      <header className="flex flex-wrap items-center gap-2 px-1">
+        {/*
+          ★ 틀 머리는 카드 제목(18px)보다 **한 단 크다** — 19px. 글자 +4px 판(`#815`)이 모든
+            크기를 **같은 폭(+4px)** 으로 올렸고, 이 줄은 그 판 뒤에 합쳐져 못 올라갔었다
+            (15px → 19px). 카드 제목과의 차이(+1px)도 그 판 전과 같다.
+        */}
+        <h2 className="m-0 text-[19px] font-semibold">{group.item}</h2>
+        <Pill
+          text={group.pending ? "승인 대기" : "승인 완료"}
+          tone={group.pending ? "warn" : "good"}
+        />
+      </header>
+      {/*
+        ★ `auto-fill` 이다 — `auto-fit` 이면 안이 하나뿐인 요청의 카드가 틀 너비 전체로
+          늘어나, 틀마다 카드 폭이 달라진다. 칸 폭을 틀끼리 맞춘다.
+        🔴 카드 최소 폭 **440px** (2026-09-17 · 전 340px) — 회차 · 지급 표가 한 줄로 서는 폭이다.
+           근거와 잰 값은 `SMALL_TABLE_WIDTH` 주석. 340px 이면 1400px 창에서 카드가 350px 로
+           한 줄에 셋 서는데, 그 폭에서는 칸 너비를 어떻게 나눠도 날짜가 꺾인다.
+        ⚠️ `min(100%, …)` — 틀이 440px 보다 좁은 화면에서 카드가 틀 밖으로 안 넘친다.
+      */}
+      <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(min(100%,440px),1fr))]">
+        {group.plans.map((p) => (
+          <PlanCard key={p.key} plan={p} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * 카드 안 작은 표(회차 · 지급)의 칸 너비. **화면에서만** 정한다 (2026-09-17).
+ *
+ * 🔴 **왜 꺾였나** — 공용 표(`Blocks.DataTable`)가 칸을 **균등**하게 나누고(`#819` · `#817` 재적용) 글자가
+ *    16px 고정폭이 됐다(`#815`). 1400px 창에서 카드 350px · 표 316px · 칸 79px 인데 날짜
+ *    「2026-09-11」은 **116px**(여백 20px 포함)가 있어야 한 줄로 선다.
+ *
+ * 잰 값 (헤드리스 · 계산된 폭 · 숫자 고정폭 `tabular-nums` 포함)
+ *
+ *   날짜 116 · 회차 머리 「회차」 49 · 수량 「1,638 kg」 97 · 지급 금액 「700,000 원」 111
+ *   ★ 세 실행 회차 줄 전수 — 날짜는 늘 10글자 · 수량은 최대 8글자 · 회차는 늘 「1」
+ *
+ * ★ 칸 너비만으로는 못 푼다 — 표 316px 에 날짜 둘(232)과 회차 머리(49)를 세우면 수량에
+ *   35px 가 남는다. 그래서 **카드 최소 폭을 같이** 올렸다(`RequestFrame` 340 → 440px).
+ *
+ *   회차 표   회차 52 + 사는 날 120 + 수량 110 + 도착 116  = 398  → 카드 ≥ 432
+ *   지급 표   회차 52 + 사는 날 120 + 내는 날 120 + 금액 111 = 403  → 카드 ≥ 437   ⇒ 440px
+ *   (카드 = 표 + 34px · 카드 안쪽 여백)
+ *
+ *   날짜 칸에 120px(4px 여유)를 준다. **마지막 칸(도착 · 금액)은 비워 남는 폭을 받는다** —
+ *   가운데 칸이 받으면 값 사이가 벌어진다(1400px 에서 수량 칸이 207px 가 됐다).
+ *
+ * 🔴 공용 `Blocks.tsx` 는 안 건드린다 — 대시보드 · 물류가 쓴다. `#819` 가 연 칸 `width`
+ *    자리를 이 화면이 채울 뿐이다. ★ API 가 너비를 실어 오면 **그쪽이 이긴다**(`c.width ??`).
+ */
+const DATE_COL_WIDTH = "120px";
+const SMALL_TABLE_WIDTH: Record<string, string> = {
+  leg: "52px",
+  buy: DATE_COL_WIDTH,
+  qty: "110px",
+  pay: DATE_COL_WIDTH,
+  //  `arrive` · `amount` 는 비운다 — 마지막 칸이 남는 폭을 받는다
+};
+
+function withWidths(table: ScreenTable): ScreenTable {
+  return {
+    ...table,
+    columns: table.columns.map((c) => ({ ...c, width: c.width ?? SMALL_TABLE_WIDTH[c.key] ?? null })),
+  };
+}
+
 function PlanCard({ plan }: { plan: Plan }) {
   return (
+    //  🔴 카드에는 테두리 색을 안 켠다 — 기다리는지는 요청 틀(`RequestFrame`)이 한 번만 말한다
     <article
       className="flex min-w-0 flex-col overflow-hidden rounded-xl border bg-panel"
-      style={{
-        borderColor: plan.pending ? "var(--color-t-good)" : "var(--color-hair)",
-        boxShadow: plan.pending ? "0 0 0 1px var(--color-t-good)" : undefined,
-      }}
+      style={{ borderColor: "var(--color-hair)" }}
     >
       <header
         className="flex flex-wrap items-center gap-2 border-b px-4 py-3"
         style={{ borderColor: "var(--color-hair-soft)" }}
       >
-        <strong className="text-[14px] font-semibold">{plan.key}</strong>
+        {/* 🔴 품목은 요청 틀 머리에 있다 — 카드 제목은 안 이름만 (`plan.key` 는 안 바꾼다) */}
+        <strong className="text-[18px] font-semibold">{splitPlanKey(plan.key).label}</strong>
         <Pill text={plan.knob} tone="info" />
         <PlanState plan={plan} />
-        <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+        <span className="ml-auto text-[15.5px]" style={{ color: "var(--color-mut)" }}>
           {plan.coverage}
         </span>
       </header>
 
       <div className="flex flex-col gap-3.5 p-4">
-        <dl className="m-0 flex flex-col gap-1.5 text-[12.5px]">
+        <dl className="m-0 flex flex-col gap-1.5 text-[16.5px]">
           {[
             ["사는 양", `${plan.qty_kg.toLocaleString("ko-KR")} kg`, true],
             ["예상 금액", `${plan.amount_krw.toLocaleString("ko-KR")} 원`, false],
@@ -94,7 +339,7 @@ function PlanCard({ plan }: { plan: Plan }) {
               <dt className="m-0" style={{ color: "var(--color-mut)" }}>
                 {k}
               </dt>
-              <dd className={`tabular m-0 font-mono ${hero ? "text-[19px]" : "text-[13px]"}`}>{v}</dd>
+              <dd className={`tabular m-0 font-mono ${hero ? "text-[23px]" : "text-[17px]"}`}>{v}</dd>
             </div>
           ))}
           {/*
@@ -111,7 +356,7 @@ function PlanCard({ plan }: { plan: Plan }) {
             style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
           >
             <dt className="m-0 font-semibold">이보다 비싸면 안 산다</dt>
-            <dd className="tabular m-0 font-mono text-[14px] font-semibold">
+            <dd className="tabular m-0 font-mono text-[18px] font-semibold">
               {plan.cut_unit_price === null
                 ? "이 실행에는 기준이 없습니다"
                 : `${plan.cut_unit_price.toLocaleString("ko-KR")} 원/kg`}
@@ -120,59 +365,60 @@ function PlanCard({ plan }: { plan: Plan }) {
         </dl>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             회차
           </h3>
-          <DataTable table={plan.legs} />
+          <DataTable table={withWidths(plan.legs)} />
         </section>
 
-        <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
-            지급
-          </h3>
-          <DataTable table={plan.payments} />
-        </section>
+        {/*
+          🔴 **지급 섹션은 나눠 사는 안(회차 2+)에서만 그린다** (2026-09-17 · 화면에서만).
+             한 번에 사는 안은 지급이 한 건이고 사는 날 · 금액이 위 회차 표에 이미 있다 —
+             그 자리에 빈 표와 「따로 만들지 않습니다」를 안마다 세우면 소음이다. 대신
+             **아무 줄도 안 남긴다** — 회차 표가 사실을 담는다.
+          ⚠️ 나눠 사는데 계획이 없는 경우는 **그대로 빈 표로** 그린다 — API 가 「나눠 사는
+             안인데 지급 계획이 실리지 않았습니다」로 적는 그 자리는 진짜 물을 자리다.
+          ★ API 의 `payments` 칸은 그대로다. 회차 수는 `plan.legs` 줄 수로 본다 — API 가
+            빈 표 문구를 가르는 기준(`split_plan` 길이)과 같은 목록이다.
+          🟡 실측 — REH-0914 · FINAL-0918 · V13 세 실행의 안이 **전부 1회차**다 (684 · 707 ·
+             231안). 이 섹션은 세 실행 화면에서 **아예 안 보인다.**
+        */}
+        {plan.legs.rows.length >= 2 && (
+          <section className="flex flex-col gap-2">
+            <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+              지급
+            </h3>
+            <DataTable table={withWidths(plan.payments)} />
+          </section>
+        )}
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             근거
           </h3>
-          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[15.5px] leading-relaxed">
             {plan.reasons.map((r, i) => (
               <li key={i} className="flex flex-wrap items-baseline gap-1.5">
                 <span
-                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[14px] font-semibold"
                   style={{ background: "var(--color-sunk)", color: "var(--color-ink2)" }}
                 >
                   {r.source}
                 </span>
                 {r.carried && <Pill text="어제 기억" tone="sim" />}
-                <span className="min-w-0 flex-1">{r.text}</span>
-                {r.ref && (
-                  <span className="font-mono text-[10px]" style={{ color: "var(--color-mut2)" }}>
-                    {r.ref}
-                  </span>
-                )}
+                {/*
+                  🔴 근거 꼬리표(`r.ref`)를 **화면에서만** 가린다 (2026-09-17).
+                     `FC-…` · `INV-LOT-RCPT-SIM-CHAIN-…` 같은 내부 식별자라 업무가 안 읽는다.
+                  ⚠️ API 에서는 빼지 않는다 — 모든 근거에 `ref_id` 가 있어야 한다 (규칙 4).
+                     되짚을 때는 API 응답에서 읽는다.
+                */}
+                <span className="min-w-0 flex-1">{reasonText(r)}</span>
               </li>
             ))}
           </ul>
         </section>
 
-        {plan.risks.length > 0 && (
-          <section className="flex flex-col gap-2">
-            <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-t-warn)" }}>
-              걸리는 것
-            </h3>
-            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
-              {plan.risks.map((r) => (
-                <li key={r} className="flex gap-2">
-                  <i aria-hidden style={{ color: "var(--color-t-warn)" }}>·</i>
-                  <span>{r}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        {/* ② 「걸리는 것」(`plan.risks`)은 그리지 않는다 — 머리 주석 「안 그리는 것」 참조 */}
       </div>
     </article>
   );
@@ -190,12 +436,12 @@ export default function PurchasePage() {
       <SourceTag sources={[data.source]} />
       <StatRow items={data.stats} />
 
-      <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))]">
-        {data.plans.map((p) => (
-          <PlanCard key={p.key} plan={p} />
+      <div className="flex flex-col gap-4">
+        {groupByRequest(data.plans).map((g) => (
+          <RequestFrame key={g.key} group={g} />
         ))}
       </div>
-      <Note note={data.plans_note} />
+      {/* ③ 안 목록 안내(`plans_note`)는 그리지 않는다 — 머리 주석 「안 그리는 것」 참조 */}
 
       {/*
         🔴 subtitle 에 «사람이» 라고 쓰지 않는다 (2026-09-10 · 마스터 통보 「백필 승인은
@@ -207,9 +453,18 @@ export default function PurchasePage() {
         🟡 «누가 승인했나» 를 표에 칸으로 더하는 것은 다음 판이다. 원장에 그 값이 없고,
         마스터가 purchases.decision_id(FK)를 세운 뒤 조인해 읽기로 했다.
       */}
-      <Panel title="확정된 매입" subtitle="승인을 거친 뒤에 생깁니다" footer="승인은 아래 서랍에서 합니다.">
-        <DataTable table={data.committed} />
-        <Note note={data.committed_note} />
+      {/* ⑤ 「승인은 아래 서랍에서 합니다」 꼬리말은 걷었다 — 머리 주석 「안 그리는 것」 참조 */}
+      <Panel title="확정된 매입" subtitle="승인을 거친 뒤에 생깁니다">
+        {/*
+          🔴 매입 번호 칸(`approval`)을 **화면에서만** 가린다 (2026-09-17). 값은 API 에 남는다.
+             잰 것 — REH-0914 08-31 · FINAL-0918 09-14 · V13 01-26 세 실행에서
+             ① 줄이 (품목 · 사는 날)만으로 **겹침 0** (291 · 495 · 21줄) — 번호 없이도 줄이 갈린다
+             ② 번호 44~52자 · 끝이 전부 `D1-S1` — 다른 칸에 없는 정보가 없다
+             ③ 재무 API 도 `purchase_id` 를 싣지만 **재무 화면은 안 그린다** — 맞대 볼 화면이 없다
+          ⚠️ 이름을 고치는 쪽(「매입 번호」)은 API 가 했다 — 칸이 원래 「승인」으로 틀려 있었다.
+        */}
+        <CommittedTable table={data.committed} />
+        {/* ④ 확정 매입 안내(`committed_note`)는 그리지 않는다 — 머리 주석 「안 그리는 것」 참조 */}
       </Panel>
     </>
   );

@@ -47,7 +47,7 @@ function StatusTag({ status }: { status: ExpenseStatus }) {
       : status === "CANCELLED" ? "var(--color-mut2)"
         : "var(--color-t-warn)";
   return (
-    <span className="rounded-full px-2 py-0.5 text-[11px] font-semibold text-white" style={{ background: tone }}>
+    <span className="rounded-full px-2 py-0.5 text-[15px] font-semibold text-white" style={{ background: tone }}>
       {expenseStatusText(status)}
     </span>
   );
@@ -93,39 +93,39 @@ export function ExpenseCreateForm({ simRun, asOf, onSaved }: { simRun: string; a
 
   return (
     <Panel title="비용 등록" subtitle="등록한 비용은 «지급 예정» 으로 기록됩니다 — 현금은 지급할 때 빠집니다">
-      <form className="grid gap-3 sm:grid-cols-2" onSubmit={submit}>
-        <label>비용 분류
+      <form className="finance-form grid gap-3 sm:grid-cols-2" onSubmit={submit}>
+        <label>비용 분류 *
           <select required value={category} onChange={(e) => setCategory(e.target.value)}>
             {categories.map((name) => <option key={name} value={name}>{categoryLabel(name)}</option>)}
           </select>
         </label>
-        <label>금액 (원)
+        <label>금액 * (원)
           <input required min="0.000001" step="any" inputMode="decimal" type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="예: 1500000" />
         </label>
-        <label>발생일
+        <label>발생일 *
           <input required type="date" value={arose} onChange={(e) => setArose(e.target.value)} />
-          <small className="mt-1 block text-[11px] text-ink2">비용이 생긴 날입니다.</small>
+          <small className="mt-1 block text-[15px] text-ink2">비용이 생긴 날입니다.</small>
         </label>
-        <label>지급 예정일
+        <label>지급 예정일 *
           <input required type="date" value={due} min={arose} onChange={(e) => setDue(e.target.value)} />
-          <small className="mt-1 block text-[11px] text-ink2">이 날짜로 앞으로 나갈 돈에 잡힙니다.</small>
+          <small className="mt-1 block text-[15px] text-ink2">이 날짜로 앞으로 나갈 돈에 잡힙니다.</small>
         </label>
-        <label className="sm:col-span-2">확인 자료
+        <label className="sm:col-span-2">확인 자료 *
           <input required maxLength={240} value={evidence} onChange={(e) => setEvidence(e.target.value)} placeholder="예: 세금계산서-2026-0916-001" />
-          <small className="mt-1 block text-[11px] text-ink2">계산서 번호·계약서·청구서처럼 나중에 확인할 수 있는 자료를 적어 주세요.</small>
+          <small className="mt-1 block text-[15px] text-ink2">계산서 번호·계약서·청구서처럼 나중에 확인할 수 있는 자료를 적어 주세요.</small>
         </label>
         <label>관련 납품 (선택)
           <input maxLength={120} value={delivery} onChange={(e) => setDelivery(e.target.value)} placeholder="예: DELIVERY-2026-0916-01" />
-          <small className="mt-1 block text-[11px] text-ink2">납품에 붙은 비용이면 물류비로 집계됩니다.</small>
+          <small className="mt-1 block text-[15px] text-ink2">납품에 붙은 비용이면 물류비로 집계됩니다.</small>
         </label>
         <label>메모 (선택)
-          <input maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} />
+          <input maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder="선택 입력" />
         </label>
-        <button disabled={saving || !category} className="w-fit rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>
+        <button disabled={saving || !category} className="w-fit rounded-lg px-4 py-2 text-[18px] font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>
           {saving ? "등록 중" : "비용 등록"}
         </button>
       </form>
-      {message && <p className="mb-0 mt-3 text-[13px]">{message}</p>}
+      {message && <p className="mb-0 mt-3 text-[17px]">{message}</p>}
     </Panel>
   );
 }
@@ -160,7 +160,7 @@ export function ExpenseActions({ simRun, asOf, rows, states, onChanged }: {
   if (accrued.length === 0) {
     return (
       <Panel title="지급 대기 비용">
-        <p className="m-0 text-[12px] text-ink2">기준일까지 지급을 기다리는 비용이 없습니다.</p>
+        <p className="m-0 text-[16px] text-ink2">기준일까지 지급을 기다리는 비용이 없습니다.</p>
       </Panel>
     );
   }
@@ -177,21 +177,21 @@ export function ExpenseActions({ simRun, asOf, rows, states, onChanged }: {
       <ul className="m-0 grid list-none gap-2 p-0">
         {accrued.map((row) => (
           <li key={row.expense_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2" style={{ borderColor: "var(--color-hair)" }}>
-            <span className="text-[13px]">
+            <span className="text-[17px]">
               <b>{row.display_category}</b> · {moneyWon(row.amount_krw)}
               <span className="ml-2 text-ink2">지급 예정 {row.due_date ?? "미지정"}</span>
             </span>
             <span className="flex gap-2">
-              <button type="button" disabled={busy || !mode} onClick={() => setPending(row)} className="rounded-lg px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>지급</button>
-              <button type="button" disabled={busy} onClick={() => run("cancel", row)} className="rounded-lg border px-3 py-1.5 text-[13px] disabled:opacity-50">취소</button>
+              <button type="button" disabled={busy || !mode} onClick={() => setPending(row)} className="rounded-lg px-3 py-1.5 text-[17px] font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>지급</button>
+              <button type="button" disabled={busy} onClick={() => run("cancel", row)} className="rounded-lg border px-3 py-1.5 text-[17px] disabled:opacity-50">취소</button>
             </span>
           </li>
         ))}
       </ul>
       {pending && (
         <section className="mt-4 rounded-xl border p-4" style={{ borderColor: "var(--color-hair)" }}>
-          <h3 className="m-0 text-sm font-semibold">이 비용을 지급 처리할까요?</h3>
-          <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[13px]">
+          <h3 className="m-0 text-[18px] font-semibold">이 비용을 지급 처리할까요?</h3>
+          <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-[17px]">
             <dt className="text-ink2">비용</dt><dd className="m-0 break-all">{pending.expense_id}</dd>
             <dt className="text-ink2">분류</dt><dd className="m-0">{pending.display_category}</dd>
             <dt className="text-ink2">금액</dt><dd className="m-0">{moneyWon(pending.amount_krw)}</dd>
@@ -199,12 +199,12 @@ export function ExpenseActions({ simRun, asOf, rows, states, onChanged }: {
             <dt className="text-ink2">현재 상태</dt><dd className="m-0"><StatusTag status={pending.status} /></dd>
           </dl>
           <div className="mt-4 flex gap-2">
-            <button type="button" onClick={() => setPending(null)} disabled={busy} className="rounded-lg border px-3 py-2 text-sm">그만두기</button>
-            <button type="button" onClick={() => run("settle", pending)} disabled={busy} className="rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>{busy ? "처리 중" : "이 내용으로 지급"}</button>
+            <button type="button" onClick={() => setPending(null)} disabled={busy} className="rounded-lg border px-3 py-2 text-[18px]">그만두기</button>
+            <button type="button" onClick={() => run("settle", pending)} disabled={busy} className="rounded-lg px-3 py-2 text-[18px] font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>{busy ? "처리 중" : "이 내용으로 지급"}</button>
           </div>
         </section>
       )}
-      {message && <p className="mb-0 mt-3 text-[13px]">{message}</p>}
+      {message && <p className="mb-0 mt-3 text-[17px]">{message}</p>}
     </Panel>
   );
 }

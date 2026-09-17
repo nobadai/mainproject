@@ -8,13 +8,18 @@
 이 검사가 통과한다고 그 비율이 «검증된 후보» 가 되는 것이 아니다.
 """
 
+import copy
+
 import pytest
 
 from app.purchase_agent import allocation as al
+from app.purchase_agent.config import load_constraints
 
 #: 합성 선언 — 🔴 **승인된 값이 아니다.** 배선을 재려고 세운 것이다.
 합성선언 = {
-    "status": "FIXTURE_ONLY",
+    # 🔴 **검사 안에서만 ``APPROVED`` 다** (2026-09-17). 게이트가 정확히 이 값일 때만 열려
+    #   흉내 문자열(``FIXTURE_ONLY``)로는 이 아래가 안 돈다. 선언 파일은 ``PROVISIONAL`` 그대로다.
+    "status": "APPROVED",
     "two_rounds": {"FRONT_LOADED": [0.60], "BACK_LOADED": [0.40]},
     "three_rounds": {"FRONT_LOADED": [0.50, 0.30], "BACK_LOADED": [0.20, 0.30]},
 }
@@ -27,6 +32,65 @@ def test_승인_전_선언으로는_후보를_안_세운다() -> None:
     """
     선언 = dict(합성선언, status=al.PROVISIONAL)
     assert list(al.allocation_candidates(선언, 3)) == ["BASE_EQUAL"]
+
+
+#: 🔴 **정확히 ``APPROVED`` 가 아니면 전부 닫힌다** (2026-09-17). 전 게이트는 ``PROVISIONAL``
+#: 하나만 막아 아래 값들로 **열렸다** — 실험에서 ``EXPERIMENT_ONLY_IN_MEMORY`` 로 실제로 열렸다.
+닫혀야_하는_상태 = [
+    pytest.param(al.PROVISIONAL, id="PROVISIONAL"),
+    pytest.param(None, id="None"),
+    pytest.param("", id="빈_문자열"),
+    pytest.param("APROVED", id="오타"),
+    pytest.param("approved", id="소문자"),
+    pytest.param(" APPROVED", id="앞_공백"),
+    pytest.param("APPROVED ", id="뒤_공백"),
+    pytest.param("EXPERIMENT_ONLY_IN_MEMORY", id="모르는_값"),
+    pytest.param("FIXTURE_ONLY", id="예전_흉내"),
+    pytest.param(True, id="불리언"),
+]
+
+
+@pytest.mark.parametrize("rounds", [2, 3])
+@pytest.mark.parametrize("status", 닫혀야_하는_상태)
+def test_승인_상태가_정확히_APPROVED_가_아니면_균등_하나뿐이다(status, rounds: int) -> None:
+    """🔴 **닫힌 쪽으로 실패한다.** 모르는 상태를 「승인됨」으로 읽지 않는다."""
+    선언 = dict(합성선언, status=status)
+    assert list(al.allocation_candidates(선언, rounds)) == ["BASE_EQUAL"]
+
+
+@pytest.mark.parametrize("rounds", [2, 3])
+def test_승인_상태_칸이_없으면_균등_하나뿐이다(rounds: int) -> None:
+    """칸 누락은 «안 적었다» 다 — 승인이 아니다."""
+    선언 = {key: value for key, value in 합성선언.items() if key != "status"}
+    assert list(al.allocation_candidates(선언, rounds)) == ["BASE_EQUAL"]
+
+
+@pytest.mark.parametrize("rounds", [2, 3])
+def test_정확히_APPROVED_일_때만_가중_후보가_선다(rounds: int) -> None:
+    """반대 방향 — 닫기만 하고 영영 안 여는 변이도 잡는다."""
+    선언 = dict(합성선언, status="APPROVED")
+    assert sorted(al.allocation_candidates(선언, rounds)) == [
+        "BACK_LOADED",
+        "BASE_EQUAL",
+        "FRONT_LOADED",
+    ]
+
+
+def test_선언_파일의_상태를_실제로_읽는다() -> None:
+    """🔴 **규칙 8** — 값 비교가 아니라 **선언을 바꾸면 판정이 따라 바뀌는지** 본다.
+
+    ⚠️ 첫 단언은 **지금 선언이 승인돼 있다**는 사실이다 (2026-09-17 · 승인자 충환 · 판 0.1 을
+      허용 후보로). 전에는 «닫혀 있다» 였고 승인하는 판이 이 줄을 같이 고쳤다. 승인을 거두는
+      판도 이 줄을 같이 고친다.
+    """
+    선언 = copy.deepcopy(load_constraints()["split"]["allocation_weights"])
+    assert sorted(al.allocation_candidates(선언, 2)) == [
+        "BACK_LOADED",
+        "BASE_EQUAL",
+        "FRONT_LOADED",
+    ]
+    선언["status"] = al.PROVISIONAL
+    assert list(al.allocation_candidates(선언, 2)) == ["BASE_EQUAL"]
 
 
 def test_기본안이_늘_후보_안에_있다() -> None:

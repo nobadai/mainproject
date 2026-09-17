@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
@@ -36,6 +37,7 @@ from app.finance.application.harness import (
     FinanceToolDenied,
     FinanceToolRegistry,
     build_planner_tool_adapter,
+    validate_planner_tool_arguments,
 )
 from app.finance.application.orchestration import FinanceAgentController
 from app.finance.capabilities.procurement import (
@@ -44,10 +46,46 @@ from app.finance.capabilities.procurement import (
     calculate_purchase_finance_cap,
 )
 from app.finance.db import FinanceDataNotReady
-from app.finance.llm.planner import LangChainFinancePlanner, ToolAction, finance_chat_model
+from app.finance.llm.planner import (
+    FinancePlannerContractViolation,
+    LangChainFinancePlanner,
+    ToolAction,
+    finance_chat_model,
+)
 from app.finance.schemas import FinancePolicy
 from app.finance.state import FinanceAgentState
+from app.finance.user_messages import explanation_keys
 from app.master.envelope import AgentRequest, ExecutionContext
+
+
+@contextmanager
+def two_explanation_candidates():
+    """설명 후보가 **둘인 상황**을 만든다.
+
+    ★ 지금 계약에서는 모든 (mode · business_status · 조정여부) 조합의 설명 후보가
+      하나뿐이라 Finalizer 가 불리지 않는다. 그래서 Finalizer 실패·숫자 주입·호출 시점
+      처럼 **모델이 실제로 불릴 때만 의미가 있는** 계약은 이 자리를 빌려 시험한다.
+      계약 자체는 예전 그대로다 — 바뀐 것은 «언제 부르는가» 뿐이다.
+    """
+    real_keys = explanation_keys
+
+    def two_keys(mode, business_status, *, has_verified_adjustment=False):
+        first = real_keys(
+            mode, business_status, has_verified_adjustment=has_verified_adjustment
+        )
+        #  실제로 존재하는 키를 준다 — 없는 키를 주면 문장 조회가 먼저 터진다.
+        second = (
+            "SCENARIO_NOT_CONCLUDED"
+            if first[0] != "SCENARIO_NOT_CONCLUDED"
+            else "PRE_BOUNDARY"
+        )
+        return [first[0], second]
+
+    with patch(
+        "app.finance.application.orchestration.explanation_keys", side_effect=two_keys
+    ):
+        yield
+
 
 PRE_ORDER = (
     "assess_finance_position",
@@ -174,8 +212,24 @@ def scenario_payload(amount: int = 1000) -> dict:
     }
 
 
+#: Planner 가 **실제로 불리는 단계**의 답만 담은 대본.
+#:
+#: 🔴 예전에는 네 Tool + 종료를 전부 적었다. 이제 Harness 는 고를 것이 하나뿐인
+#:    단계와 종료 단계에서 Planner 를 부르지 않는다. 그 단계의 답까지 대본에 남겨
+#:    두면 **이미 실행한 Tool 을 다시 요청**하게 되어 중복 반려로 예산만 깎인다.
+#:
+#: 남는 자리는 둘이다.
+#:
+#:     ① 시작    {assess_finance_position, project_cashflow}
+#:     ② 현금흐름 뒤 {calculate_purchase_finance_cap, analyze_payment_pressure}
+#:
+#: 사이의 `project_cashflow` 와 마지막 `analyze_payment_pressure` 는 그때 유일한
+#: 합법 Tool 이라 Harness 가 결정론으로 집는다. 그래서 실행 순서는 `PRE_ORDER` 그대로다.
 def pre_purchase_plan():
-    return [*(ToolAction(name) for name in PRE_ORDER), ToolAction(finalize=True)]
+    return [
+        ToolAction("assess_finance_position"),
+        ToolAction("calculate_purchase_finance_cap"),
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -443,14 +497,13 @@ def test_premature_finalize_is_rejected_and_replanned():
 
 
 def test_pre_purchase_requires_all_four_capabilities_before_finalizing():
+    #  Planner 가 불리는 자리는 둘뿐이다 — 시작과 현금흐름 뒤. 이른 종료 요청은
+    #  **남은 capability 가 있는 채로 물어보는 자리**에 놓아야 시험이 된다.
     planner = ScriptedPlanner(
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
+            ToolAction(finalize=True),  # finance_cap · payment_pressure 가 남았다
             ToolAction("calculate_purchase_finance_cap"),
-            ToolAction(finalize=True),  # payment_pressure 가 남았다
-            ToolAction("analyze_payment_pressure"),
-            ToolAction(finalize=True),
         ]
     )
     reply, metadata = FinanceAgentController(Port(), planner, Finalizer()).run(request())
@@ -464,7 +517,8 @@ def test_pre_purchase_requires_all_four_capabilities_before_finalizing():
         if step["denied_reason"] == "FINALIZE_BEFORE_REQUIRED_CAPABILITIES"
     ]
     assert len(rejected) == 1
-    assert rejected[0]["missing_capabilities"] == ["payment_pressure"]
+    #  묻는 자리가 앞으로 당겨졌으니 그때 남아 있던 capability 도 둘이다.
+    assert rejected[0]["missing_capabilities"] == ["finance_cap", "payment_pressure"]
 
 
 # ---------------------------------------------------------------------------
@@ -486,8 +540,13 @@ def test_scenario_evaluation_runs_first_and_adjustment_only_after_it():
 
     assert reply.runtime_status == "READY"
     assert metadata.used_tools[0] == "evaluate_purchase_scenario"
-    # 첫 단계에서는 금액 검증이 노출조차 되지 않았다.
-    assert planner.seen_tool_names[0] == ("evaluate_purchase_scenario",)
+    #  🔴 **Planner 에게 묻지 않는 흐름이다.** SCENARIO_VALIDATION 은 단계마다 합법
+    #     Tool 이 하나뿐이라 Harness 가 결정론으로 집는다. 그래서 "무엇이 노출됐나" 는
+    #     Planner 대역이 아니라 **Trace 에 적힌 실행 가능 집합**에서 읽는다.
+    assert planner.attempts == 0
+    steps = _trace(metadata)["steps"]
+    assert steps[0]["executable_tools"] == ["evaluate_purchase_scenario"]
+    assert "validate_amount_adjustment" not in steps[0]["executable_tools"]
 
 
 def test_adjustment_validation_receives_only_source_owned_values():
@@ -520,14 +579,21 @@ def test_adjustment_validation_receives_only_source_owned_values():
     ],
 )
 def test_malformed_adjustment_arguments_replan_without_execution(malformed):
-    planner = ScriptedPlanner(
-        [
-            ToolAction("evaluate_purchase_scenario"),
-            ToolAction("validate_amount_adjustment", malformed),
-            ToolAction("validate_amount_adjustment", {"axis": "amount"}),
-            ToolAction(finalize=True),
-        ]
-    )
+    #  🔴 **계약을 그 경계에서 직접 시험한다.** 예전에는 Planner 대역이 망가진 인자를
+    #     들고 오게 해서 루프째로 돌렸다. 이제 이 흐름에서는 Planner 를 부르지 않으므로
+    #     그 길로는 망가진 인자가 들어올 수 없다 — 검사가 **아무것도 안 하는 검사**가 된다.
+    #     지켜야 하는 것은 그대로다: 계약을 어긴 인자는 **실행에 닿기 전에** 걸린다.
+    with pytest.raises(FinancePlannerContractViolation):
+        validate_planner_tool_arguments(
+            ToolAction("validate_amount_adjustment", malformed)
+        )
+
+    #  잘 만든 인자는 그대로 통과하고, 실행은 원천에서 값을 다시 고른다.
+    assert validate_planner_tool_arguments(
+        ToolAction("validate_amount_adjustment", {"axis": "amount"})
+    ) == {"axis": "amount"}
+
+    planner = ScriptedPlanner([])
     reply, metadata = FinanceAgentController(Port(), planner, Finalizer()).run(
         request("SCENARIO_VALIDATION", scenario_payload())
     )
@@ -535,15 +601,12 @@ def test_malformed_adjustment_arguments_replan_without_execution(malformed):
     trace = _trace(metadata)
     assert reply.runtime_status == "READY"
     assert reply.business_status == "reject"
-    assert metadata.replans == 1
+    assert planner.attempts == 0
+    assert metadata.replans == 0
     assert metadata.used_tools == ("evaluate_purchase_scenario", "validate_amount_adjustment")
     assert trace["failure_kind"] != "INVALID_REQUEST"
-    rejected = [
-        step for step in trace["steps"]
-        if step["denied_reason"] == "PLANNER_CONTRACT_VIOLATION"
-    ]
-    assert len(rejected) == 1
-    assert rejected[0]["executed_tool"] is None
+    #  묻지 않았으니 반려도 없다. 계약 위반은 위에서 경계째로 확인했다.
+    assert [step for step in trace["steps"] if step["denied_reason"]] == []
 
 
 # ---------------------------------------------------------------------------
@@ -582,9 +645,12 @@ def test_langchain_planner_drives_the_finance_tools_end_to_end(monkeypatch):
 
     assert reply.runtime_status == "READY"
     assert metadata.used_tools == PRE_ORDER
-    assert metadata.llm_model == "scripted-finalizer"
+    #  Finalizer 는 안 불렸다(설명 후보 1개). 이번 실행에서 답한 모델은 Planner 다.
+    assert metadata.llm_model == "gemini-test"
     assert planner.model == "gemini-test"
-    assert planner.attempts == 5
+    #  5 → 3. 줄어든 둘은 **고를 것이 하나뿐이던 단계와 종료 단계**다.
+    #  실행 순서(`PRE_ORDER`)는 그대로다 — Harness 가 같은 Tool 을 집기 때문이다.
+    assert planner.attempts == 3
 
 
 def test_langchain_planner_only_sees_currently_executable_tools(monkeypatch):
@@ -598,8 +664,12 @@ def test_langchain_planner_only_sees_currently_executable_tools(monkeypatch):
 
     declared = [step["declared"] for step in transport.seen]
     assert declared[0] == ["assess_finance_position", "project_cashflow"]
-    assert declared[-1] == [FINALIZE_TOOL_NAME]
     assert "calculate_purchase_finance_cap" not in declared[0]
+    #  🔴 **종료 Tool 은 이제 모델에게 가지 않는다.** 남은 capability 가 없으면 고를 것이
+    #     종료뿐이라 Harness 가 결정론으로 끝낸다 — 물어볼 것이 없는 자리다.
+    assert all(FINALIZE_TOOL_NAME not in step for step in declared)
+    #  묻는 자리에는 늘 둘 이상이 놓인다. 하나뿐이면 애초에 묻지 않는다.
+    assert all(len(step) >= 2 for step in declared)
 
 
 def test_tool_observations_reach_the_next_langchain_planner_step(monkeypatch):
@@ -611,8 +681,11 @@ def test_tool_observations_reach_the_next_langchain_planner_step(monkeypatch):
 
     FinanceAgentController(Port(), planner, Finalizer()).run(request())
 
-    # 첫 호출은 관측이 없고, 이후에는 직전 Tool 결과가 그대로 들어간다.
-    assert [step["observations"] for step in transport.seen] == [0, 1, 2, 3, 4]
+    # 첫 호출은 관측이 없고, 이후에는 그때까지의 Tool 결과가 그대로 들어간다.
+    #
+    # ★ 묻지 않고 지나간 단계의 결과도 빠짐없이 실린다. 2 는 결정론으로 돈
+    #   `project_cashflow` 까지 누적됐다는 뜻이다 — **묻지 않았다고 관측이 비지 않는다.**
+    assert [step["observations"] for step in transport.seen] == [0, 2, 3]
 
 
 def test_langchain_planner_over_ollama_uses_the_same_tool_set(monkeypatch):
@@ -672,9 +745,9 @@ def test_langchain_tool_call_outside_the_exposed_set_never_executes(monkeypatch)
     """
     transport = _tool_call_transport(
         [
+            ("calculate_purchase_finance_cap", {}),  # 아직 노출되지 않은 Tool
+            ("assess_finance_position", {}),
             ("calculate_purchase_finance_cap", {}),
-            *[(name, {}) for name in PRE_ORDER],
-            (FINALIZE_TOOL_NAME, {}),
         ]
     )
     monkeypatch.setattr("app.finance.llm.planner._gemini_tool_call", transport)
@@ -684,6 +757,8 @@ def test_langchain_tool_call_outside_the_exposed_set_never_executes(monkeypatch)
 
     assert reply.runtime_status == "READY"
     assert metadata.replans == 1
+    #  사이의 `project_cashflow` 와 마지막 `analyze_payment_pressure` 는 Harness 가
+    #  결정론으로 집는다. 그래서 실행 순서는 여전히 `PRE_ORDER` 다.
     assert metadata.used_tools == PRE_ORDER
     rejected = [
         step
@@ -726,7 +801,9 @@ def test_trace_reports_budget_consumption_and_capability_completion():
 
     trace = _trace(metadata)
     assert trace["tool_calls"] == 4
-    assert trace["llm_calls"] == 5
+    #  Tool 은 넷 그대로인데 provider 왕복은 둘이다. 빠진 셋은 **물어볼 것이 없던
+    #  자리** — 합법 Tool 이 하나뿐인 두 단계와 종료 단계다.
+    assert trace["llm_calls"] == 2
     assert trace["replans"] == 0
     assert trace["max_tool_calls"] == 8
     assert trace["max_replans"] == 2
@@ -772,25 +849,34 @@ def test_out_of_order_adjustment_is_a_harness_denial_not_runtime_not_ready():
     `RUNTIME_NOT_READY` 가 나간다 — 마스터는 그것을 *"데이터가 없다"* 로 읽는다.
     실제로는 Harness 가 막고 되물었어야 할 호출이다.
     """
-    planner = ScriptedPlanner(
-        [
-            ToolAction("validate_amount_adjustment", {"axis": "amount"}),
-            ToolAction("evaluate_purchase_scenario"),
-            ToolAction("validate_amount_adjustment", {"axis": "amount"}),
-            ToolAction(finalize=True),
-        ]
+    #  🔴 **Harness 에 직접 묻는다.** 이 흐름에서는 Planner 를 부르지 않으므로 순서를
+    #     어긴 요청이 루프로 들어올 길이 없다. 그래도 지켜야 하는 계약은 그대로다 —
+    #     아직 부를 수 없는 Tool 은 **선행 조건 반려**이지 «재무 사실 없음» 이 아니다.
+    harness = _new_harness()
+    state = FinanceAgentState(
+        request("SCENARIO_VALIDATION", scenario_payload()), branch_id="S-1"
     )
+    with pytest.raises(FinanceToolDenied) as raised:
+        harness.authorize(
+            "validate_amount_adjustment",
+            {"axis": "amount"},
+            state,
+            harness.capability_state(state),
+        )
+    assert raised.value.reason == DEPENDENCY_NOT_SATISFIED
+
+    planner = ScriptedPlanner([])
     reply, metadata = FinanceAgentController(Port(), planner, Finalizer()).run(
         request("SCENARIO_VALIDATION", scenario_payload())
     )
 
+    #  그리고 실제 실행은 순서를 어길 기회 없이 끝난다 — 단계마다 합법 Tool 이
+    #  하나뿐이라 Harness 가 그것을 집기 때문이다. 반려도 되묻기도 없다.
     assert reply.runtime_status == "READY"
     assert reply.missing_data == ()
-    assert metadata.replans == 1
+    assert metadata.replans == 0
     assert metadata.used_tools == ("evaluate_purchase_scenario", "validate_amount_adjustment")
-    denials = _trace(metadata)["denials"]
-    assert denials[0]["denied_reason"] == DEPENDENCY_NOT_SATISFIED
-    assert denials[0]["denied_tool"] == "validate_amount_adjustment"
+    assert _trace(metadata)["denials"] == []
 
 
 def test_tool_budget_stops_the_run_instead_of_answering_short():
@@ -853,8 +939,11 @@ def test_duplicate_terminal_call_stops_without_second_execution_and_is_traced():
 
     trace = _trace(metadata)
     assert reply.runtime_status == "ERROR"
-    assert metadata.used_tools == ("assess_finance_position",)
-    assert trace["tool_calls"] == 1
+    #  둘째 요청은 «묻는 자리» 인 세 번째 단계에서 온다. 그 사이의 `project_cashflow`
+    #  는 그때 유일한 합법 Tool 이라 Harness 가 결정론으로 돌렸다 — **중복 요청 자체는
+    #  한 번도 실행되지 않는다.**
+    assert metadata.used_tools == ("assess_finance_position", "project_cashflow")
+    assert trace["tool_calls"] == 2
     assert trace["replans"] == 0
     assert trace["denials"][-1]["denied_reason"] == DUPLICATE_UNRESOLVED_TOOL_CALL
     assert trace["steps"][-1]["executed_tool"] is None
@@ -952,7 +1041,11 @@ def test_finalizer_explains_a_result_that_already_exists():
             )
 
     planner = ScriptedPlanner(pre_purchase_plan())
-    reply, _metadata = FinanceAgentController(Port(), planner, _Recording()).run(request())
+    #  Finalizer 가 **불릴 때** 무엇을 이미 들고 있는가를 보는 검사다.
+    with two_explanation_candidates():
+        reply, _metadata = FinanceAgentController(Port(), planner, _Recording()).run(
+            request()
+        )
 
     assert reply.runtime_status == "READY"
     assert {"finance_cap_amount_krw", "base_projected_cash_min", "available_cash"} <= set(seen)

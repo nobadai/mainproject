@@ -620,6 +620,10 @@ class FinanceHarness:
         self.tool_calls = 0
         self.replans = 0
         self.llm_calls = 0
+        #: **이번 단계에서** Tool 을 누가 골랐는가. 다음 Trace 항목이 이것을 싣고
+        #: 실으면서 비운다 — 한 단계에 한 번만 뜻을 갖는 값이다.
+        #: 성능 관측용이라 업무 판단에 쓰지 않는다.
+        self.selection_source: str | None = None
         self.denials: list[dict[str, Any]] = []
         self._seen: set[str] = set()
         self._pending: tuple[FinanceAgentState, CapabilityState] | None = None
@@ -783,6 +787,15 @@ class FinanceHarness:
     def count_llm_call(self) -> None:
         self.llm_calls += 1
 
+    def note_selection(self, source: str) -> None:
+        """이번 단계의 선택 출처를 적어 둔다. **다음 Trace 항목이 이것을 싣고 비운다.**
+
+        🔴 고르는 자리를 지나지 않고 접히는 단계가 있다 — 예산이 다해 `_decide` 앞에서
+           멈추는 자리가 그렇다. 남겨 두면 그 단계에 **앞 단계의 선택**이 실려서, 부르지도
+           않은 선택이 일어난 것처럼 읽힌다. 업무 결과는 그대로라 더 늦게 들킨다.
+        """
+        self.selection_source = source
+
     def note_denied(self, state: FinanceAgentState, tool: str | None, reason: str) -> None:
         self.denials.append(
             {"branch_id": state.branch_id, "denied_tool": tool, "denied_reason": reason}
@@ -806,6 +819,9 @@ class FinanceHarness:
         셋을 한 항목에 같이 적는다. 따로 적으면 어느 것이 어느 것인지 나중에 붙일 수
         없고, 그때 사라지는 것이 이 계층의 존재 이유다.
         """
+        #  실으면서 비운다. 다음 단계가 스스로 고르지 않았다면 그 자리는 비어야 한다.
+        selection_source = self.selection_source
+        self.selection_source = None
         state.trace.append(
             {
                 "step": len(state.trace) + 1,
@@ -826,6 +842,12 @@ class FinanceHarness:
                 "tool_calls": self.tool_calls,
                 "llm_calls": self.llm_calls,
                 "replans": self.replans,
+                # LLM / DETERMINISTIC_SINGLE / DETERMINISTIC_FINALIZE / None.
+                #
+                # 어느 단계에서 provider 왕복이 실제로 일어났는지 읽는 자리다.
+                # `None` 은 **이 단계에서 아무도 Tool 을 고르지 않았다**는 뜻이다 —
+                # 선택 앞에서 접힌 자리(예산 소진 · terminal guard)가 그렇다.
+                "selection_source": selection_source,
             }
         )
 

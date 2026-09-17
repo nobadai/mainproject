@@ -113,14 +113,14 @@ export function RerunButton({
         type="button"
         onClick={() => void go()}
         disabled={disabled}
-        className="rounded-lg px-3 py-1.5 text-[12px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-45"
+        className="rounded-lg px-3 py-1.5 text-[16px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-45"
         style={{ background: "var(--color-nav)", color: "#f4f3ee" }}
       >
         {running && job?.what === what ? "도는 중…" : label}
       </button>
 
       {running && (
-        <span className="text-right text-[11px]" style={{ color: "var(--color-mut2)" }}>
+        <span className="text-right text-[15px]" style={{ color: "var(--color-mut2)" }}>
           {other ? (
             <>{job?.label} 이(가) 먼저 돌고 있습니다 — 끝나면 누를 수 있습니다</>
           ) : (
@@ -134,12 +134,12 @@ export function RerunButton({
       {/*  ★ 끝난 뒤 «어떻게 끝났나» 를 말합니다. 조용히 사라지면 눌렀는지
              안 눌렀는지 알 수 없습니다. */}
       {!running && job?.what === what && job.state === "done" && (
-        <span className="text-right text-[11px]" style={{ color: "var(--color-t-good)" }}>
+        <span className="text-right text-[15px]" style={{ color: "var(--color-t-good)" }}>
           {job.ended} 에 잘 끝났습니다
         </span>
       )}
       {!running && job?.what === what && job.state === "failed" && (
-        <span className="max-w-[380px] text-right text-[11px]" style={{ color: "var(--color-t-bad)" }}>
+        <span className="max-w-[380px] text-right text-[15px]" style={{ color: "var(--color-t-bad)" }}>
           또 실패했습니다 (종료코드 {job.code}) — 아래 기록을 보세요
           {job.log.length > 0 && (
             <>
@@ -151,7 +151,7 @@ export function RerunButton({
       )}
 
       {err && (
-        <span className="max-w-[380px] text-right text-[11px]" style={{ color: "var(--color-t-bad)" }}>
+        <span className="max-w-[380px] text-right text-[15px]" style={{ color: "var(--color-t-bad)" }}>
           {err}
         </span>
       )}

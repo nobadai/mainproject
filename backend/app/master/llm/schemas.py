@@ -69,6 +69,7 @@ DomainAction = Literal[
     "SALES_PROPOSALS_TODAY",
     "SALES_CONFIRMED_TODAY",
     "SALES_REPORT_GENERATE",
+    "LOGISTICS_REPORT_GENERATE",
     "PARTNER_LIST",
     "PARTNER_CREATE",
     "PARTNER_DETAIL_GET",
@@ -137,7 +138,10 @@ class DomainSlots(BaseModel):
 
     start_date: str | None = None
     end_date: str | None = None
-    period: Literal["TODAY", "YESTERDAY", "THIS_WEEK", "LAST_WEEK", "THIS_MONTH"] | None = None
+    period: Literal[
+        "TODAY", "YESTERDAY", "THIS_WEEK", "LAST_WEEK", "THIS_MONTH",
+        "LAST_7_DAYS", "LAST_30_DAYS", "LAST_3_MONTHS", "LAST_YEAR",
+    ] | None = None
     note: str | None = None
 
 

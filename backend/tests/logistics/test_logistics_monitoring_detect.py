@@ -22,7 +22,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.logistics.agent.detect import (
+from app.logistics.historical_repository import LedgerLotState
+from app.logistics.monitoring.detect import (
     CAPACITY_HIGH_RATIO,
     COMMITTED,
     ESCALATED_FRESHNESS_EXPIRED,
@@ -32,14 +33,14 @@ from app.logistics.agent.detect import (
     detect_capacity_pressure,
     detect_freshness_pressure,
 )
-from app.logistics.agent.observe import (
+from app.logistics.monitoring.observe import (
     CAPACITY_WINDOW_USAGE_UNRESOLVED,
     LEDGER_MOVE_UNRESOLVED,
     OBSERVATION_INCONSISTENT,
     _quantity_observed_as_of,
     _status_observed_as_of,
 )
-from app.logistics.agent.schemas import (
+from app.logistics.monitoring.schemas import (
     CAPACITY_PRESSURE,
     COMMITMENT_OBSERVED_AS_OF,
     FRESHNESS_PRESSURE,
@@ -54,7 +55,6 @@ from app.logistics.agent.schemas import (
     derive_observed_as_of,
     snapshot_observed_as_of,
 )
-from app.logistics.historical_repository import LedgerLotState
 from app.logistics.rules import (
     CAPACITY_TIGHT_POLICY_UNRESOLVED,
     FRESHNESS_PRESSURE_POLICY_UNRESOLVED,
@@ -572,10 +572,10 @@ def test_관측일에_as_of_도_오늘도_안_들어간다():
 #: ★ `adapter.py` 가 들어 있는 것이 중요하다 — 마스터에게 나가는
 #:   `AgentReply.observed_at` 이 서는 자리가 거기 넷이다.
 _관측일_모듈 = (
-    "agent/schemas.py",
-    "agent/observe.py",
-    "agent/detect.py",
-    "agent/exceptions.py",
+    "monitoring/schemas.py",
+    "monitoring/observe.py",
+    "monitoring/detect.py",
+    "monitoring/exceptions.py",
     "adapter.py",
 )
 

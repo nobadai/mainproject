@@ -34,31 +34,31 @@ from typing import Any, NamedTuple
 import psycopg
 import pytest
 
-from app.api.logistics.query import _SEVERITY, _severity_at
+from app.api.logistics.query import _SEVERITY, _SEVERITY_UNKNOWN, _severity_at
 from app.logistics import historical_repository, turnover
-from app.logistics.agent import exceptions as exception_repo
-from app.logistics.agent.detect import (
+from app.logistics.db import get_connection
+from app.logistics.monitoring import exceptions as exception_repo
+from app.logistics.monitoring.detect import (
     COMMITTED,
     ESCALATED_FRESHNESS_EXPIRED,
     REDETECT,
     detect_logistics_exceptions,
 )
-from app.logistics.agent.exceptions import (
+from app.logistics.monitoring.exceptions import (
     EmptyEvidence,
     live_exceptions,
     open_exception,
     resolve_exception,
     touch_exception,
 )
-from app.logistics.agent.observe import observe
-from app.logistics.agent.schemas import (
+from app.logistics.monitoring.observe import observe
+from app.logistics.monitoring.schemas import (
     CAPACITY_PRESSURE,
     FRESHNESS_PRESSURE,
     WAREHOUSE_SUBJECT_ID,
     ExceptionEvidence,
     ExceptionRow,
 )
-from app.logistics.db import get_connection
 from app.logistics.schemas import InventoryLogisticsSnapshot
 
 pytestmark = pytest.mark.db
@@ -906,7 +906,10 @@ def test_이력_없는_옛_행은_기존_fallback_을_유지한다() -> None:
     # last_detected(D2) <= 기준일(D3) → 지금 값이 그날 값이다.
     assert _severity_at(row, D3) == (_SEVERITY["HIGH"], None)
     # last_detected(D2) > 기준일(D1) → 증명 불가.
-    assert _severity_at(row, D1) == ("—", "기준일 당시 우선도 확인 불가")
+    #  ★ 표 칸이 적는 말은 결과뿐이다 (#812). *왜* 못 적는지는 카드 footer 가 한 번
+    #    말하므로, 여기서 기대하는 것도 `_SEVERITY_UNKNOWN` 한 마디다 — 판정 규칙
+    #    (「last_detected > 기준일이면 증명 불가」)은 그대로고 **문구만** 짧아졌다.
+    assert _severity_at(row, D1) == ("—", _SEVERITY_UNKNOWN)
 
 
 def test_현재_severity_는_최신_감지_이력과_같다(conn: psycopg.Connection) -> None:

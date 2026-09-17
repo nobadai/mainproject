@@ -27,7 +27,7 @@ export function AgingBars({ slices, empty }: { slices: AgingSlice[]; empty: stri
 
   if (known.length === 0 || total <= 0) {
     return (
-      <p className="mb-0 mt-1 text-[12px] text-ink2">
+      <p className="mb-0 mt-1 text-[16px] text-ink2">
         {total === 0 && known.length > 0 ? empty : "구간 금액이 저장되지 않았습니다."}
       </p>
     );
@@ -53,7 +53,7 @@ export function AgingBars({ slices, empty }: { slices: AgingSlice[]; empty: stri
       </div>
       <ul className="m-0 mt-3 grid list-none gap-x-4 gap-y-2 p-0 sm:grid-cols-2">
         {known.map((slice) => (
-          <li key={slice.label} className="flex items-center justify-between gap-3 text-[12px]">
+          <li key={slice.label} className="flex items-center justify-between gap-3 text-[16px]">
             <span className="inline-flex items-center gap-2 text-ink2">
               <span
                 aria-hidden
@@ -72,7 +72,7 @@ export function AgingBars({ slices, empty }: { slices: AgingSlice[]; empty: stri
         ))}
       </ul>
       {missing > 0 && (
-        <p className="mb-0 mt-2 text-[11.5px] text-ink2">
+        <p className="mb-0 mt-2 text-[15.5px] text-ink2">
           {missing}개 구간은 금액이 저장되지 않아 막대에서 뺐습니다.
         </p>
       )}

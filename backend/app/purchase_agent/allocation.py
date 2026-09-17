@@ -188,8 +188,8 @@ def weighted_ratios(weights: list[float], rounds: int) -> list[float]:
     각자 적은 수를 더하면 부동소수점 합이 1에서 밀려 ⑥의 합계 검사(1e-9)에 걸린다.
 
     🔴 **값을 여기 안 박는다.** 가중치는 선언(``constraints.yaml`` ``split.allocation_weights``)
-    이 소유한다 (규칙 7). 그리고 그 값은 지금 **``PROVISIONAL``** 이다 — 정책 승인 전이라
-    운영 기능은 꺼 둔다.
+    이 소유한다 (규칙 7). 그 값은 **허용 후보로 승인됐다** (2026-09-17 · 충환) — 최적성이나
+    사업 효과를 검증한 것이 아니고, 승인이 곧 켬도 아니다 (기능 플래그 기본 꺼짐).
     """
     if len(weights) != rounds - 1:
         raise ValueError(
@@ -237,31 +237,42 @@ def occupancy_fits(
 #:   ``risks`` 문장도 그 이름으로 쓴다. 선언은 «얼마나» 를 정하고 «무엇이 있나» 는 여기다.
 WEIGHTED_CANDIDATES = ("FRONT_LOADED", "BACK_LOADED")
 
-#: 🔴 승인 전 상태. 이 값이면 **후보를 안 세운다** — 근거 없는 비율로 안을 만들면
-#: 나중에 그 배분이 「검증된 것」으로 보인다.
+#: 승인 전 상태. 판 0.1 이 2026-09-14 ~ 09-17 이 값이었다.
 PROVISIONAL = "PROVISIONAL"
+
+#: 🔴 **비균등 후보를 여는 유일한 값.** 정확히 이 문자열일 때만 연다 (2026-09-17).
+#:
+#: ⚠️ 전에는 ``PROVISIONAL`` 하나만 막았다 — **열린 쪽으로 실패하는 게이트**였다. 칸이
+#:   없거나 · ``APROVED`` 같은 오타거나 · ``approved`` 처럼 대소문자가 다르거나 ·
+#:   모르는 값이면 전부 열렸고, 실험에서 ``EXPERIMENT_ONLY_IN_MEMORY`` 로 실제로 열렸다.
+#:   근거 없는 비율로 안을 만들면 나중에 그 배분이 「검증된 것」으로 보인다.
+#:
+#: ★ ⑤ ``grade.mix_precedence`` 가 이미 ``!= "APPROVED"`` 로 닫는다 — 같은 규율로 맞춘다.
+APPROVED = "APPROVED"
 
 
 def allocation_candidates(
     declaration: Mapping[str, Any],
     rounds: int,
-    *,
-    approved_only: bool = True,
 ) -> dict[str, list[float]]:
     """규칙이 만드는 **배분 후보 집합**. LLM 은 이 중 하나를 고르기만 한다.
 
     돌려주는 것은 ``{candidate_id: 비율 목록}`` 이고 ``BASE_EQUAL`` 이 늘 들어 있다 —
     **fallback 대상이 후보 안에 있어야** 실패했을 때 고를 것이 남는다.
 
-    🔴 **승인 전 값으로는 후보를 안 세운다.** 선언이 ``PROVISIONAL`` 이면 균등 하나만
-    돌려준다. 근거 없는 비율로 안을 만들면 나중에 그 배분이 **「검증된 것」으로 보인다** —
+    🔴 **승인된 값으로만 후보를 세운다.** ``status`` 가 **정확히** ``APPROVED`` 가 아니면
+    균등 하나만 돌려준다 — ``PROVISIONAL`` · 칸 없음 · 오타 · 대소문자 · 모르는 값 전부다.
+    근거 없는 비율로 안을 만들면 나중에 그 배분이 **「검증된 것」으로 보인다** —
     `#390` 에서 무른 것과 같은 모양이다.
+
+    ⚠️ ``approved_only`` 인자를 **걷었다** (2026-09-17). 부르는 곳이 한 곳도 거짓을 안
+      넘겼고, 남겨 두면 승인 없이 여는 샛문이 된다.
 
     ⚠️ 후보가 하나면 부르는 쪽이 LLM 을 **안 부른다** (⑤ ``needs_llm`` 과 같은 게이트).
     고를 것이 없는데 부르면 비용만 들고 상태만 흐려진다.
     """
     후보 = {"BASE_EQUAL": equal_ratios(rounds)}
-    if approved_only and declaration.get("status") == PROVISIONAL:
+    if declaration.get("status") != APPROVED:
         return 후보
     판 = {2: "two_rounds", 3: "three_rounds"}.get(rounds)
     if 판 is None:
@@ -278,3 +289,51 @@ def allocation_candidates(
         if 가중치:
             후보[이름] = weighted_ratios(list(가중치), rounds)
     return 후보
+
+
+def assign_axes(labels: list[str], allowed_axes: list[str], aggressive_axis: str) -> dict[str, str]:
+    """안별 ``strategy_type``을 허용 축 안에서 고른다 (정의서 §3.5.1-2).
+
+    축이 하나뿐인 날은 전 안이 같은 축을 쓴다 — 그게 정상이고, ⑦의 중복 검사도 그날은
+    면제한다. 축이 여럿이면 겹치지 않게 배분해 "3안인데 사실 한 안"을 피한다.
+    """
+    if not labels:
+        # 안이 하나도 없는 날 — ③이 시세를 못 받아 초안을 만들지 않았다. 배정할 축이 없다.
+        # 이 줄이 없으면 아래 ``labels[-1]``이 IndexError로 죽고, 그러면 "왜 안이 없는가"라는
+        # 사유가 오케스트레이터에 도달하지 못한다.
+        return {}
+    if len(allowed_axes) == 1:
+        return dict.fromkeys(labels, allowed_axes[0])
+    axes = dict.fromkeys(labels, "quantity")
+    if aggressive_axis in allowed_axes and "공격" in labels:
+        axes["공격"] = aggressive_axis
+    else:
+        axes[labels[-1]] = next(axis for axis in allowed_axes if axis != "quantity")
+    return axes
+
+
+def cumulative_overflow(
+    quantities: list[int], arrivals: list[str], cap_by_date: Mapping[str, Any]
+) -> tuple[int, int, int] | None:
+    """도착일 순 **누적**이 그날 여유를 넘는 첫 자리. 안 넘으면 ``None``.
+
+    돌려주는 것은 ``(회차 index, 그때까지의 누적 kg, 그날 여유 kg)`` 다.
+
+    🔴 **⑦ ``arrival_capacity`` 와 ⑥ 의 되돌림 판정이 같은 셈을 쓰게 하려고 여기 둔다**
+      (2026-09-16). 두 곳이 각자 더하면 ⑥ 이 «선다» 고 판단한 분할을 ⑦ 이 컷하는 날이
+      생기고, 그날 안은 **왜 죽었는지 설명할 수 없다.**
+
+    ★ **누적으로 본다.** ``cap_by_date[d]`` 는 그날의 *여유 공간*이고 물류는 기존 일정만
+      재생해 그 값을 낸다 — 우리가 새로 넣을 회차는 거기 없다. 날짜마다 독립으로 비교하면
+      1회차가 아직 창고에 있는데도 2회차가 그날 상한을 통째로 쓰는 계획이 통과한다.
+
+    ⚠️ **중간 출고를 해제하지 않는다** — 더하기만 하고 빼지 않는다. 물류 ``_available_capacity``
+      도 같은 방식이고 **방향은 안전하다 (덜 사게 틀린다)**. 이 판에서 안 바꾼다.
+    """
+    occupied = 0
+    for index, (qty, day) in enumerate(zip(quantities, arrivals, strict=True)):
+        occupied += qty
+        cap = int(cap_by_date[day])
+        if occupied > cap:
+            return index, occupied, cap
+    return None

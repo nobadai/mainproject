@@ -7,6 +7,7 @@
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+from app.purchase_agent.allocation import arrival_dates, assign_axes
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.information_requests import (
     MissingInfo,
@@ -26,7 +27,7 @@ from app.purchase_agent.nodes.classify_situation import (
     split_entry_cap,
 )
 from app.purchase_agent.quotes import quote_block_reason
-from app.purchase_agent.schemas import FIXED_MARKET
+from app.purchase_agent.schemas import FIXED_MARKET, TIMING_AXIS
 from app.purchase_agent.state import PurchaseAgentState
 
 
@@ -107,6 +108,129 @@ def warehouse_cap_kg(inventory: dict) -> int:
         require_capacity_kg(inventory["warehouse_free_kg"], "warehouse_free_kg")
         + require_capacity_kg(inventory["rental_cap_kg"], "rental_cap_kg")
     )
+
+
+#: 창고 상한이 클립했을 때 ``clipped_by`` 에 남는 이름. **화면이 그대로 읽는다** —
+#: ``ADJUSTMENT_CAP_NAME`` 과 같은 이유로 상수다. 🔴 **뜻이 바뀐 것이 아니라 기준일이
+#: 정확해진 것**이라 이름은 그대로 둔다 (2026-09-16).
+WAREHOUSE_CAP_NAME = "창고"
+
+
+class WarehouseCap(NamedTuple):
+    """안 하나의 창고 상한. **두 수를 나눠 담는다** (E3-9 앞단 · 2026-09-16).
+
+    ``cap_kg``            이 안에 실제로 거는 상한
+    ``single_round_kg``   **일괄(1회차) 전제** 상한 — ⑥ 이 되돌릴 때 쓴다.
+                          🔴 ``None`` 이면 날짜 축을 못 본 것이고, 그때는 ③ 이 넓히지도
+                          않았으므로 되돌릴 기준도 없다 (규칙 3 — 0 으로 안 채운다).
+    """
+
+    cap_kg: int
+    single_round_kg: int | None
+
+
+def _reachable_caps(
+    state: PurchaseAgentState, constraints: dict, coverage_days: int
+) -> dict[int, int]:
+    """회차 수마다 **마지막 도착일의 여유**. 못 보는 회차 수는 빠진다.
+
+    🔴 **왜 「마지막 도착일」인가.** ⑦ ``arrival_capacity`` 가 도착일 순 **누적**을 그날
+      여유와 견준다. 누적은 마지막 회차에서 최대이므로 총량의 천장은 ``cap[마지막 도착일]``
+      이다. 창 전체의 ``max`` 를 그냥 취하면 ⑦ 이 컷할 수를 ③ 이 만든다.
+
+    🔴 **날짜 누락을 무시하지 않는다.** 한 회차라도 ``cap_by_date`` 에 칸이 없으면 그
+      회차 수를 **통째로 버린다** — 아는 날짜만 보고 최대를 취하면 「모르는 곳에 쌓는」
+      상한이 된다 (``cap_constrained_quantities`` 가 같은 이유로 조정을 포기한다).
+
+    ★ **날짜는 ⑥·⑦ 이 쓰는 그 함수가 만든다** (``allocation.arrival_dates``). 운영 달력 ·
+      입고 소요일 · 커버 범위가 전부 같은 기준을 지난다 — 여기서 새로 만들면 ③ 이 잡은
+      상한과 ⑥ 이 실제로 놓는 날짜가 갈린다.
+    """
+    lead_days = pending_value(state, constraints, "inbound_lead_days")
+    cap_by_date = (state.get("inventory") or {}).get("cap_by_date")
+    if lead_days is None or cap_by_date is None:
+        return {}
+    calendar = state.get("execution_calendar")
+    도달: dict[int, int] = {}
+    for rounds in sorted(constraints["split"]["types"]):
+        arrivals = arrival_dates(state["date"], coverage_days, rounds, lead_days, calendar)
+        if arrivals is None:
+            continue
+        if any(cap_by_date.get(day) is None for day in arrivals):
+            continue
+        도달[rounds] = int(cap_by_date[arrivals[-1]])
+    return 도달
+
+
+def warehouse_cap_for(
+    state: PurchaseAgentState, constraints: dict, coverage_days: int, *, splitting: bool
+) -> WarehouseCap:
+    """안 하나의 창고 상한. **③ 과 ⑦ 이 같이 부른다** (2026-09-16).
+
+    🔴 **한 곳에서만 고치면 ③ 이 통과시킨 안을 ⑦ 이 컷한다.** 원래 ``warehouse_cap_kg``
+      docstring 이 *"상한 식 자체는 ③과 공유한다 — 두 곳에 복제하면 한쪽만 바뀐다"* 로
+      적어 둔 그 규율이고, 날짜 축으로 옮기면서도 그대로 지킨다.
+
+    ``splitting`` 은 **그 안이 실제로 분할하는가**다 — ③ 은 ``assign_axes`` 의 배정으로,
+    ⑦ 은 안에 실린 ``strategy_type`` 으로 답한다. 🔴 ⑥ 이 되돌린 안은 ⑦ 에서 ``False`` 가
+    되고, 그래서 두 자리가 **같은 수**를 본다.
+    """
+    도달 = _reachable_caps(state, constraints, coverage_days)
+    일괄 = 도달.get(1)
+    if 일괄 is None:
+        # 날짜 축을 못 봤다 — 넓히지 않고 예전 기준으로 간다 (규칙 3).
+        return WarehouseCap(cap_kg=warehouse_cap_kg(state["inventory"]), single_round_kg=None)
+    return WarehouseCap(
+        cap_kg=max(도달.values()) if splitting else 일괄, single_round_kg=일괄
+    )
+
+
+def warehouse_cap_by_label(
+    state: PurchaseAgentState, constraints: dict, labels: list[str], coverage: dict
+) -> dict[str, WarehouseCap]:
+    """안별 창고 상한 — **날짜 축 위에서** 잡는다 (E3-9 앞단 · 2026-09-16).
+
+    🔴 **전에는 ``warehouse_free_kg + rental_cap_kg`` 하나였다.** 그것은 «오늘 시점»의
+      여유이고 도착일은 ``as_of + N4`` 다. ④ 는 ``cap_by_date[첫 도착일]`` 로 진입을 보고
+      ⑦ 은 회차별 누적을 본다 — **세 자리가 세 칸을 보고 있었다.**
+
+    ⚠️ 그 어긋남이 두 방향으로 틀린다::
+
+        도착일에 여유가 늘면   ③ 이 필요 이상으로 깎는다 — 그리고 깎인 수량이
+                              ④ 의 진입 조건을 **같이 없앤다**
+        도착일에 여유가 줄면   ③ 이 덜 깎고 ⑦ 이 나중에 컷한다 — ``check_cash_ceiling``
+                              docstring 이 경계한 *"③이 통과시킨 안을 ⑦이 컷"* 이다
+
+    ★ **분할이 설 수 있는 안만 넓힌다.** ``assign_axes`` 가 ``timing`` 을 **한 안에만**
+      준다 (공격 우선 · 없으면 마지막 라벨). 배정을 못 받을 안까지 넓히면 그 안은
+      1회차로 나가 ⑦ 에 컷된다 — 「허용」과 「배정」은 다른 사실이다.
+
+    🔴 **이 상한은 「확정 구매 가능 총량」이 아니다.** 그만큼 사려면 회차 수·배분 비율·
+      실제 도착일을 적용하고 ⑦ 누적을 통과해야 한다. **보증이 아니라 후보 상한**이고,
+      성립하지 않으면 ⑥ 이 ``single_round_kg`` 로 되돌린다.
+
+    ⚠️ **폴백은 둔다.** 날짜 축을 못 보면 예전 값(오늘 여유 + 임차)으로 간다. 상한을 아예
+      안 거는 선택은 안 한다 — 창고를 못 보는 날 **무제한 매입**이 서기 때문이다.
+      못 본 사실은 ③ 이 ``_deferred_checks`` 로 이미 고지한다.
+    """
+    # 🔴 **축을 모르면 안 넓힌다** (규칙 3). ① 이 아직 안 돈 경로(③ 단독 호출)에서는
+    #   「어느 안이 timing 을 받을지」를 알 수 없고, 모르는 것을 «받는다» 로 읽으면
+    #   ⑥ 이 되돌릴 안을 ③ 이 만들어 낸다. 일괄 기준이 그때의 안전한 값이다.
+    허용 = state.get("allowed_axes") or []
+    배정 = (
+        assign_axes(list(labels), list(허용), constraints["allocation"]["aggressive_axis"])
+        if TIMING_AXIS in 허용
+        else {}
+    )
+    return {
+        label: warehouse_cap_for(
+            state,
+            constraints,
+            coverage["by_label"][label],
+            splitting=배정.get(label) == TIMING_AXIS,
+        )
+        for label in labels
+    }
 
 
 def purchase_budget_krw(state: PurchaseAgentState, constraints: dict) -> float:
@@ -508,7 +632,9 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
     reference_grade = constraints["allocation"]["reference_grade"]
     unit_price = reference_unit_price(state["market_quotes"], reference_grade)
 
-    warehouse_cap = warehouse_cap_kg(state["inventory"])
+    # 🔴 **창고 상한은 안마다 다르다** (2026-09-16 · E3-9 앞단). 커버 창이 안마다 달라
+    #   회차 도착일이 달라지고, 그러면 잡을 수 있는 여유도 달라진다.
+    warehouse_caps = warehouse_cap_by_label(state, constraints, labels, coverage)
     cash_cap = cash_cap_kg(purchase_budget_krw(state, constraints), unit_price)
     freshness_cap = _freshness_cap_kg(state, daily_demand, constraints)
     # 🔴 **조정안 상한은 안마다 다르다** (2026-09-09 · E3-6). 위 셋은 그날 하나인데
@@ -526,11 +652,18 @@ def draft_plan(state: PurchaseAgentState) -> dict[str, Any]:
             days=coverage["by_label"][label],
             daily_demand=daily_demand,
             caps={
-                "창고": warehouse_cap,
+                # 🔴 **리터럴로 둔다.** 마스터가 이 dict 의 키를 AST 로 세어 부서 소유를
+                #   잠근다 (``tests/master/test_binding_constraint_ownership.py``) —
+                #   상수로 바꾸면 그 검사가 키를 못 찾는다. 값의 정본은
+                #   ``WAREHOUSE_CAP_NAME`` 이고 둘은 같은 문자열이다.
+                "창고": warehouse_caps[label].cap_kg,
                 "현금": cash_cap,
                 "신선도": freshness_cap,
                 ADJUSTMENT_CAP_NAME: adjustment_cap_kg(usable, label, unit_price),
             },
+            # 🔴 ⑥ 이 **되돌릴 때** 쓰는 기준이다 (E3-9 앞단). ``None`` 이면 날짜 축을
+            #   못 본 것이고, 그때는 ③ 이 넓히지도 않았으므로 되돌릴 것도 없다.
+            single_round_cap_kg=warehouse_caps[label].single_round_kg,
             coverage=coverage,
             # 🔴 **품목이 걸러진 로트다.** ``absorb_inventory`` 가 다른 품목을 이미 뺐다 —
             #   안 거르면 배추 보유로 무 수요를 깎는다.
@@ -623,6 +756,7 @@ def _draft_one(
     daily_demand: float,
     caps: dict,
     coverage: dict,
+    single_round_cap_kg: int | None = None,
     lots: list[dict] | None = None,
     free_stock: FreeStock | None = None,
 ) -> dict[str, Any]:
@@ -665,6 +799,10 @@ def _draft_one(
         "free_stock_kg": None if free.kg is None else round(free.kg),
         "raw_qty_kg": raw_qty,
         "total_qty_kg": total_qty,
+        # 🔴 **일괄(1회차) 전제 상한** — ⑥ 이 분할이 안 설 때 여기로 되돌린다 (E3-9 앞단).
+        #   ``None`` 은 「날짜 축을 못 봤다」이고, 그때는 ③ 이 넓히지도 않았으므로 되돌릴
+        #   것도 없다. **0 이나 무제한으로 바꾸지 않는다** (규칙 3).
+        "single_round_cap_kg": single_round_cap_kg,
         "clipped_by": [
             {"constraint": name, "cap_kg": cap, "raw_qty_kg": raw_qty} for name, cap in binding
         ],

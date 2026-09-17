@@ -18,7 +18,9 @@
 """
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -84,16 +86,80 @@ def get_connection() -> psycopg.Connection[dict[str, Any]]:
     )
 
 
+#: 읽기 한 판이 빌려 쓰는 커넥션 자리. **범위 밖에서는 `None`** 이고, 그때는
+#: `fetch_one`/`fetch_all` 이 종전 그대로 호출마다 새로 연다.
+_READ_SCOPE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "finance_read_connection_scope", default=None
+)
+
+
+@contextmanager
+def read_connection_scope() -> Iterator[None]:
+    """이 블록 안의 **SELECT 들이 커넥션 하나를 나눠 쓴다** (2026-09-17).
+
+    ```text
+    종전   fetch_all 한 번 = psycopg.connect 한 번   화면 한 판에 21개 (원격 · 개당 14~22ms)
+    지금   범위 안에서 처음 한 번만 연다             나머지는 그 커넥션의 커서
+    ```
+
+    🔴 **읽기에만 건다.** `execute_*` 계열(쓰기)은 이 범위를 안 본다 — 쓰기가 남의
+       트랜잭션에 얹히면 커밋 시점이 조용히 바뀐다.
+
+    🔴 **질의 하나가 터지면 그 커넥션을 버린다.** PostgreSQL 은 실패한 트랜잭션 안에서
+       다음 질의를 전부 거절하므로, 안 버리면 **첫 실패가 뒤의 모든 조회를 같이
+       죽인다** — 호출마다 새로 열던 종전에는 없던 일이다. 버리면 다음 조회가 새로
+       연다.
+
+    ⚠️ **스레드마다 따로다** (`ContextVar`). 커넥션은 스레드 안전하지 않으므로 이게
+       맞다 — 범위를 연 스레드에서 연 커넥션을 다른 스레드가 집지 못한다.
+
+    ★ 범위를 안 열면 아무것도 안 바뀐다. 여는 것만으로는 커넥션이 안 열린다(지연).
+    """
+    holder: dict[str, Any] = {}
+    token = _READ_SCOPE.set(holder)
+    try:
+        yield
+    finally:
+        _READ_SCOPE.reset(token)
+        borrowed = holder.pop("conn", None)
+        if borrowed is not None:
+            borrowed.close()
+
+
+@contextmanager
+def _read_cursor() -> Iterator[Any]:
+    """읽기 커서 하나. 범위가 열려 있으면 그 커넥션을 빌린다."""
+    holder = _READ_SCOPE.get()
+    if holder is None:
+        with get_connection() as connection, connection.cursor() as cursor:
+            yield cursor
+        return
+    connection = holder.get("conn")
+    if connection is None:
+        connection = get_connection()
+        holder["conn"] = connection
+    try:
+        with connection.cursor() as cursor:
+            yield cursor
+    except Exception:
+        holder.pop("conn", None)
+        try:
+            connection.close()
+        except Exception:  # noqa: BLE001,S110  이미 끊긴 커넥션은 조용히 버린다 —
+            pass  #  닫다가 난 오류를 올리면 **진짜 오류(아래 raise)를 덮는다**
+        raise
+
+
 def fetch_one(query: Query, params: Params = None) -> dict[str, Any] | None:
     """Parameter binding을 사용해 단건 SELECT 결과를 반환한다."""
-    with get_connection() as connection, connection.cursor() as cursor:
+    with _read_cursor() as cursor:
         cursor.execute(query, params)
         return cursor.fetchone()
 
 
 def fetch_all(query: Query, params: Params = None) -> list[dict[str, Any]]:
     """Parameter binding을 사용해 다건 SELECT 결과를 반환한다."""
-    with get_connection() as connection, connection.cursor() as cursor:
+    with _read_cursor() as cursor:
         cursor.execute(query, params)
         return cursor.fetchall()
 

@@ -7,8 +7,9 @@
 
 * **적용 범위 = timing 축을 받은 안에만** (확정 1). 그 판정은 축을 배정하는 ⑥이 한다 —
   여기서는 "그날 분할이 가능한가"까지만 정한다.
-* **궤적 판정은 ①의 ``is_sustained_rise()`` 재사용** (확정 2). 두 노드가 각자 정의하면
-  "축은 열렸는데 분할은 안 되는" 모순이 난다.
+* **궤적 판정은 ①의 ``judge_sustained_rise()`` 재사용** (확정 2). 두 노드가 각자 정의하면
+  "축은 열렸는데 분할은 안 되는" 모순이 난다. (2026-09-17 정의 교체 때 이름이
+  ``is_sustained_rise`` 에서 바뀌었다 — 판정 결과가 참/거짓 둘에서 넷으로 갈렸다.)
 * **rule_only 단계는 균등 비율** (확정 3). 앞당길지 미룰지는 §4-④ 트레이드오프
   ("상승장 분할 = 평균단가 손해 vs 로트 나이 분산 = 폐기리스크 감소")의 판단이라 LLM 몫이고,
   규칙이 한쪽으로 기울이면 그 판단을 미리 대신해버린다.
@@ -17,13 +18,14 @@
 """
 
 from math import ceil
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.purchase_agent.allocation import (
+    APPROVED,
     allocation_candidates,
     arrival_dates,
+    assign_axes,
     occupancy_fits,
-    split_infeasible_reason,
     split_quantities,
 )
 from app.purchase_agent.config import load_constraints
@@ -39,8 +41,9 @@ from app.purchase_agent.llm.split_schemas import (
     SplitCandidate,
 )
 from app.purchase_agent.nodes._guards import pending_value
+from app.purchase_agent.nodes._split_outcome import AS_CHOSEN, settle_split
 from app.purchase_agent.nodes.classify_situation import (
-    is_sustained_rise,
+    judge_sustained_rise,
     split_entry_cap,
 )
 from app.purchase_agent.schemas import TIMING_AXIS
@@ -48,13 +51,28 @@ from app.purchase_agent.state import PurchaseAgentState
 
 
 def largest_total_kg(base_plan: dict) -> int:
-    """가장 큰 안의 총량. 수량 트리거의 비교 대상이다.
+    """가장 큰 안의 **클립 전** 수량. 수량 트리거의 비교 대상이다.
 
     ①도 같은 트리거를 보지만 그때는 수량이 없어 **추정 총량**(일평균 × 최대 D)을 썼다.
-    ④는 ③ 뒤라 실제 안별 총량을 본다 — 추정으로 열린 축이 실제 수량에서 닫히는 것도
-    정상이다 (§4-④ E3-3 확정 2).
+    ④는 ③ 뒤라 실제 안별 수요를 본다.
+
+    🔴 **``total_qty_kg`` 가 아니라 ``raw_qty_kg`` 다** (2026-09-16 · E3-9 앞단).
+      전에는 클립 **뒤** 총량을 봤는데, 창고 상한이 곧 ``cap_by_date`` 이므로 클립이
+      걸린 날은 **총량 == 그 상한**이 되고 ``총량 > 상한`` 이 **구조적으로 거짓**이었다.
+      실측에서 그 등호가 REH-0914 163일 중 161일에 성립했다 — 분할이 필요한 날일수록
+      진입 판정이 막히는 모양이다.
+
+    ★ **묻는 질문이 「한 번에 다 들어가는가」다.** 그 답은 **깎기 전 수요**가 알고 있다.
+      깎은 뒤 수를 물으면 «깎았으니 들어간다» 라는 동어반복이 된다.
+
+    ⚠️ ``raw_qty_kg`` 는 **차감 뒤 · 클립 전**이다 (③ ``_draft_one``). 보유 차감은 필요가
+      줄어든 것이지 천장이 아니라서 빼는 것이 맞고, 창고·현금·신선도·조정안 클립만
+      되돌린 값이다.
+
+    🔴 ``volume_gate_holds`` 의 불변식은 그대로 선다 — ``raw_qty ≤ demand_qty =
+      round(일평균 × D) ≤ ceil(추정)`` 이라 ① 이 여전히 ④ 보다 먼저 열린다.
     """
-    return max((draft["total_qty_kg"] for draft in base_plan["drafts"]), default=0)
+    return max((draft["raw_qty_kg"] for draft in base_plan["drafts"]), default=0)
 
 
 def choose_rounds(total_kg: int, cap_kg: float | None, constraints: dict) -> int:
@@ -118,9 +136,9 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
       그 안은 **timing 라벨만 남고 회차가 하나**가 된다. 그 상태를 ⑥·⑦이
       ``effective_allowed_axes`` 로 걷는다 — 안 걷으면 «분할 안 한 분할안» 이 선다.
     """
-    day = constraints["situation"]["ci_judgment_day"]
     total_kg = largest_total_kg(state["base_plan"])
     cap = split_entry_cap(state, constraints)
+    trend = judge_sustained_rise(state["forecast"], constraints)
 
     facts: dict[str, Any] = {
         "timing_allowed": TIMING_AXIS in state["allowed_axes"],
@@ -138,12 +156,33 @@ def evaluate_split_entry(state: PurchaseAgentState, constraints: dict) -> dict[s
         #   ★ ``cap_kg`` 는 소수일 수 있는데 ``total_kg`` 는 정수라, 이 비교는 ⑦ 이
         #     ``int(cap)`` 으로 내림해 재는 것과 **모든 경우에 같은 답**을 낸다.
         "by_volume": cap.cap_kg is not None and total_kg > cap.cap_kg,
-        "by_trend": is_sustained_rise(state["forecast"], day),
+        "by_trend": trend.holds,
+        # 🔴 **판정 결과를 넷으로 싣는다** (2026-09-17). 참/거짓만 실으면 «판정 보류» 와
+        #   «실제 하락» 이 같은 거짓으로 읽힌다 — ⑥ 고지와 흔적이 이 칸으로 가른다.
+        "trend_verdict": trend.verdict,
+        "trend_withheld_reason": trend.withheld_reason,
+        # 비교 지점(lead_time 게이트 행 포함)과 최소 개수 산정 지점(확인된 모델 예측)을 가른다
+        "trend_compared_points": len(trend.points),
+        "trend_model_points": trend.model_points,
+        "trend_flags_reported": trend.flags_reported,
+        "trend_first_decline": list(trend.first_decline) if trend.first_decline else None,
         "rounds": 1,
     }
     facts["entered"] = facts["timing_allowed"] and (facts["by_volume"] or facts["by_trend"])
     if facts["entered"]:
-        facts["rounds"] = choose_rounds(total_kg, cap.cap_kg, constraints)
+        # 🔴 **회차 수는 «실제로 살 양» 으로 정한다** (2026-09-16). 진입 여부를 묻는 수와
+        #   몇 번에 나눌지를 정하는 수가 **다르다** —
+        #
+        #       진입   한 번에 다 들어가는가        ← 깎기 전 수요 (largest_total_kg)
+        #       회차   몇 번에 나눠야 들어가는가    ← 깎은 뒤 총량 (아래 clipped)
+        #
+        #   깎기 전 수요로 회차를 정하면 현금·신선도·조정안이 이미 줄여 놓은 양을
+        #   **필요보다 여러 번에** 나눈다 (실측: raw 12,429 · 실제 2,000 인데 3회차).
+        clipped = max(
+            (draft["total_qty_kg"] for draft in state["base_plan"]["drafts"]), default=0
+        )
+        facts["largest_clipped_kg"] = clipped
+        facts["rounds"] = choose_rounds(clipped, cap.cap_kg, constraints)
     return facts
 
 
@@ -177,82 +216,135 @@ def effective_allowed_axes(allowed_axes: list[str], chosen: list[dict] | None) -
     return [axis for axis in allowed_axes if axis != TIMING_AXIS]
 
 
-def safe_allocation_candidates(
-    state: PurchaseAgentState, constraints: dict, rounds: int
-) -> dict[str, list[float]]:
-    """규칙이 만든 후보 중 **모든 안에서 설 수 있는 것만** 남긴다 (E3-9).
+#: 후보를 **목록에서 뺀** 사유 코드 — 실행 흔적과 검사가 읽는다. 사람 문장이 아니다.
+#: ⑥ 이 적용하지 않을 갈래는 ``_split_outcome`` 의 이름(``ROUNDS_CHANGED`` ·
+#: ``ROLLED_BACK``)을 그대로 쓴다 — 같은 판정이 이름 둘을 갖지 않게.
+EXCLUDED_NO_SPLIT_PLAN = "NO_SPLIT_PLAN"
+EXCLUDED_OVER_CAPACITY = "OVER_CAPACITY"
 
-    🔴 **선택 전에 거른다.** LLM 이 고른 뒤에 ⑦이 컷하면 그날 안이 통째로 사라지고,
-      사람은 *"판단자가 이상한 걸 골랐다"* 로 읽는다. 실제로는 **규칙이 못 서는 후보를
-      목록에 올린 것**이다. 그래서 목록에 올리기 전에 판정한다.
 
-    ★ **모든 라벨을 본다.** 보수·기본·공격은 총량이 다르고 커버 D 도 다르다. 한 라벨에서
-      서는 배분이 다른 라벨에서 안 설 수 있는데, 후보는 안마다 따로 고르는 것이 아니라
-      **그날 하나**다 (④는 유형을 정하고 ⑥이 안별로 편다).
+class CandidateScreen(NamedTuple):
+    """선택 전에 거른 결과. 🔴 **남긴 것 · 뺀 것 · 승인 여부**를 같이 들고 다닌다."""
 
-    ⚠️ **못 보면 안 올린다** (규칙 3). 도착일이나 날짜별 여유를 모르면 ``occupancy_fits``
-      가 거짓을 돌려주고, 그 후보는 빠진다 — 모르는 것을 「든다」로 읽지 않는다.
-      그 결과 균등 하나만 남고 LLM 은 안 불린다.
+    kept: dict[str, list[float]]
+    #: 뺀 후보 id → 사유 코드
+    excluded: dict[str, str]
+    #: 선언 ``status`` 가 정확히 ``APPROVED`` 였나
+    approved: bool
 
-    ⚠️ ``BASE_EQUAL`` 은 **안 거른다.** 그건 후보가 아니라 **되돌아갈 자리**다. 그것까지
-      걸러 목록이 비면 분할 자체를 못 만든다.
 
-    🔴 **③·⑥ 이 쓰는 칸 이름을 그대로 읽는다** — 총량은 ``total_qty_kg``, 커버는 안이
-      들고 있는 ``coverage_days``, 달력은 **State 최상위** ``execution_calendar`` 다.
-      처음에는 ``qty_kg`` 와 ``inventory.execution_calendar`` 로 적었는데 **둘 다 없는
-      칸**이었고, 선언이 ``PROVISIONAL`` 이라 이 아래가 안 돌아 검사에도 안 걸렸다 —
-      승인되는 날 처음 터질 자리였다.
+def screen_allocation_candidates(
+    state: PurchaseAgentState,
+    constraints: dict,
+    rounds: int,
+    *,
+    by_trend: bool | None = None,
+) -> CandidateScreen:
+    """규칙이 만든 후보 중 **결과에 그대로 적용될 것만** 남긴다 (E3-9).
+
+    🔴 **선택 전에 거른다.** LLM 이 고른 뒤에 ⑥ 이 버리거나 ⑦ 이 컷하면, 사람은 *"판단자가
+      이상한 걸 골랐다"* 로 읽는다. 실제로는 **규칙이 못 쓸 후보를 목록에 올린 것**이다.
+
+    ★ **⑥ 과 같은 함수로 잰다** (2026-09-17 · ``settle_split``). 전에는 ④ 가 «날짜별 여유에
+      드는가» 만 보고 ⑥ 은 거기에 «나눌 실익이 있나 · 그 회차 수가 서나» 를 더 봤다. 그래서
+      창이 한 값인 날 ④ 는 세 후보를 올려 판단자를 불렀고(SUCCESS) ⑥ 은 그 선택을 버리고
+      한 번에 샀다 (1차 실호출 실험). 이제 한 후보는 둘 다 통과해야 남는다 —
+
+        ㉠ ⑥ 이 그 비율을 **그대로 적용한다** (``AS_CHOSEN`` — 회차를 바꾸거나 접지 않는다)
+        ㉡ 그 비율의 수량이 **옮기지 않고** 날짜별 누적 여유에 든다 (``occupancy_fits``)
+
+      ㉡ 을 따로 두는 이유 — ⑥ 은 여유를 넘는 회차를 **옮겨서** 세운다. 그러면 앞으로 싣는
+      배분이 옮겨진 끝에 가운데가 무거운 배분으로 나가고, «고른 배분 = 나간 배분» 이 깨진다.
+
+    ★ **분할을 받을 안만 본다.** ⑥ 은 timing 축을 받은 안에만 비율을 편다 (§4-④ E3-3 확정 1).
+      나머지 안은 어느 후보를 골라도 한 번에 사므로, 거기서 재면 **쓰이지도 않을 계산 때문에**
+      후보가 사라진다. 축 배정은 ⑥ 과 같은 ``assign_axes`` 다 — 진입한 날 실효 축은 연 축과 같다.
+
+    🔴 **적용될 비균등 후보가 하나도 없으면 판단자를 안 부른다** — 목록에 ``BASE_EQUAL`` 하나가
+      남고 ``needs_call`` 이 거짓이 된다. ⚠️ 다만 **하나라도 적용되면 부른다.** ``BASE_EQUAL``
+      자신이 ⑥ 에서 바뀔 날이어도 그렇다 — 그것은 «되돌아갈 자리» 라 거르지 않는다.
+
+    ⚠️ **못 보면 안 올린다** (규칙 3). 도착일이나 날짜별 여유를 모르면 ㉡ 가 거짓이다.
     """
     선언 = constraints["split"]["allocation_weights"]
+    approved = 선언.get("status") == APPROVED
     후보 = allocation_candidates(선언, rounds)
-    if len(후보) == 1:
-        return 후보
-    lead_days = pending_value(state, constraints, "inbound_lead_days")
-    cap_by_date = (state.get("inventory") or {}).get("cap_by_date")
-    # 🔴 **최상위에서 읽는다** — ⑥ ``package_scenarios`` 와 ⑦ ``self_check`` 가 읽는 자리와
-    #   같다. 다른 데서 읽으면 사전검사와 실제 회차일이 **다른 달력**을 보게 되고, 그때
-    #   ④는 «선다» 는데 ⑥이 민 날짜가 여유를 넘긴다.
-    calendar = state.get("execution_calendar")
     남긴다 = {"BASE_EQUAL": 후보["BASE_EQUAL"]}
+    if len(후보) == 1:
+        return CandidateScreen(남긴다, {}, approved)
+    if by_trend is None:
+        by_trend = judge_sustained_rise(state["forecast"], constraints).holds
+    drafts = state["base_plan"]["drafts"]
+    배정 = assign_axes(
+        [draft["label"] for draft in drafts],
+        list(state.get("allowed_axes") or []),
+        constraints["allocation"]["aggressive_axis"],
+    )
+    나눌_안 = [draft for draft in drafts if 배정.get(draft["label"]) == TIMING_AXIS]
+    걸렀다: dict[str, str] = {}
     for 이름, 비율 in 후보.items():
         if 이름 == "BASE_EQUAL":
             continue
-        if all(
-            _배분이_이_안에서_선다(state, draft, 비율, lead_days, cap_by_date, calendar)
-            for draft in state["base_plan"]["drafts"]
-        ):
+        사유 = _적용되지_않는_사유(state, constraints, 나눌_안, 비율, by_trend=by_trend)
+        if 사유 is None:
             남긴다[이름] = 비율
-    return 남긴다
+        else:
+            걸렀다[이름] = 사유
+    return CandidateScreen(남긴다, 걸렀다, approved)
 
 
-def _배분이_이_안에서_선다(
+def safe_allocation_candidates(
     state: PurchaseAgentState,
-    draft: dict,
+    constraints: dict,
+    rounds: int,
+    *,
+    by_trend: bool | None = None,
+) -> dict[str, list[float]]:
+    """``screen_allocation_candidates`` 가 **남긴 것만**."""
+    return screen_allocation_candidates(state, constraints, rounds, by_trend=by_trend).kept
+
+
+def _적용되지_않는_사유(
+    state: PurchaseAgentState,
+    constraints: dict,
+    나눌_안: list[dict],
     비율: list[float],
-    lead_days: int | None,
-    cap_by_date: dict | None,
-    calendar: dict | None,
-) -> bool:
-    """이 배분이 **이 안에서** 설 수 있는가. ⑥ 이 실제로 밟는 자리를 그대로 밟는다.
+    *,
+    by_trend: bool,
+) -> str | None:
+    """이 비율이 **결과에 그대로 적용되지 않는** 사유. 적용되면 ``None``.
 
-    🔴 **⑥ 이 1회차로 되돌릴 안은 후보를 거를 근거가 못 된다.** 감당 못 하는 안
-    (``split_infeasible_reason``)은 어느 배분을 골랐든 단일 회차가 되므로, 거기서 다회차
-    도착일을 재서 후보를 빼면 **쓰이지도 않을 계산 때문에** 후보가 사라진다.
-
-    ⚠️ 총량·커버일수·달력은 ⑥ 이 ``materialize_split`` 에 넘기는 것과 **같은 값**이어야
-    한다. 하나라도 다른 자리에서 읽으면 「④는 된다는데 ⑦이 컷하는」 안이 생기고, 그 안은
-    왜 죽었는지 설명할 수 없다.
+    🔴 **③·⑥ 이 쓰는 칸을 그대로 읽는다** — 총량은 ``total_qty_kg``, 커버는 안이 들고 있는
+      ``coverage_days``, 달력은 **State 최상위** ``execution_calendar`` 다. 다른 데서 읽으면
+      사전검사와 실제 회차일이 **다른 달력**을 보게 된다 (2026-09-14 리뷰 `#662`).
     """
-    회차 = [{"ratio": r} for r in 비율]
-    total = draft["total_qty_kg"]
-    coverage = draft["coverage_days"]
-    if split_infeasible_reason(total, 회차, coverage):
-        return True
-    return occupancy_fits(
-        split_quantities(total, 회차),
-        arrival_dates(state["date"], coverage, len(회차), lead_days, calendar),
-        cap_by_date,
-    )
+    if not 나눌_안:
+        return EXCLUDED_NO_SPLIT_PLAN
+    lead_days = pending_value(state, constraints, "inbound_lead_days")
+    cap_by_date = (state.get("inventory") or {}).get("cap_by_date")
+    calendar = state.get("execution_calendar")
+    회차 = [{"ratio": ratio} for ratio in 비율]
+    for draft in 나눌_안:
+        결과 = settle_split(
+            draft,
+            TIMING_AXIS,
+            회차,
+            by_trend=by_trend,
+            constraints=constraints,
+            as_of=state["date"],
+            lead_days=lead_days,
+            cap_by_date=cap_by_date,
+            calendar=calendar,
+        )
+        if 결과.kind != AS_CHOSEN:
+            return 결과.kind
+        if not occupancy_fits(
+            split_quantities(draft["total_qty_kg"], 회차),
+            arrival_dates(state["date"], draft["coverage_days"], len(회차), lead_days, calendar),
+            cap_by_date,
+        ):
+            return EXCLUDED_OVER_CAPACITY
+    return None
 
 
 #: 후보 id → 사람이 읽는 설명. 🔴 **판단자에게도 이 말로 준다** — id 만 주면 무엇을
@@ -283,6 +375,11 @@ def _choose_allocation(
       무변화다.
     """
     if selector is None or not enabled(SPLIT_ALLOCATION):
+        return "BASE_EQUAL", None
+    if not decision["entered"]:
+        # 🔴 **진입하지 않은 날은 선택이라는 단계 자체가 없다** (2026-09-17). 전에는 여기서도
+        #   판단자를 불러 «건너뛰었다» 가 매일 흔적에 남았다 — 어댑터
+        #   ``_split_allocation_call`` 이 약속한 «진입 안 한 날은 줄을 안 남긴다» 와 달랐다.
         return "BASE_EQUAL", None
     cap = split_entry_cap(state, constraints)
     context = build_split_context(
@@ -331,9 +428,16 @@ def split_plan(
     """
     constraints = load_constraints()
     decision = evaluate_split_entry(state, constraints)
-    후보 = safe_allocation_candidates(state, constraints, decision["rounds"])
+    거름 = screen_allocation_candidates(
+        state, constraints, decision["rounds"], by_trend=bool(decision["by_trend"])
+    )
+    후보 = 거름.kept
     고른, 판단 = _choose_allocation(state, constraints, decision, 후보, selector)
     decision["allocation_candidates"] = sorted(후보)
+    # 🔴 **왜 판단자를 안 불렀나를 가른다** — 승인 전인가, 적용되지 않을 것이 확정됐나.
+    #   어댑터가 흔적의 ``skip_reason`` 을 이 둘로 쓴다.
+    decision["allocation_approved"] = 거름.approved
+    decision["allocation_excluded"] = dict(sorted(거름.excluded.items()))
     decision["allocation_chosen"] = 고른
     # 🔴 판단 흔적을 **결과와 함께** 들고 다닌다 — ⑥ 이 그 사실을 risks 에 적고
     #   어댑터가 실행 흔적에 역할별로 남긴다. 상태와 결과가 갈리면 서로를 부정한다.

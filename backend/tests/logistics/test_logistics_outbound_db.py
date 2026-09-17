@@ -335,7 +335,7 @@ def test_6_취소하면_가용이_돌아온다(conn: psycopg.Connection) -> None
     _예약(conn, rid="RSV-남", qty="80")
     _할당한다(conn, ("LOT-A", "80"), rid="RSV-남")
 
-    결과 = release_reservation(conn, reservation_id="RSV-남")
+    결과 = release_reservation(conn, reservation_id="RSV-남", released_as_of=AS_OF)
 
     assert 결과.applied is True and 결과.status == "RELEASED"
     assert all(행["status"] == "CANCELLED" for 행 in _할당(conn))
@@ -416,6 +416,42 @@ def test_13b_비ACTIVE_Lot_은_후보가_아니다(conn: psycopg.Connection) -> 
     후보 = recommend_fefo_candidates(conn, sim_run_id=SIM_RUN_ID, item_id=ITEM_ID, as_of=AS_OF)
 
     assert 후보 == ()
+
+
+def test_13c_기준일_뒤에_들어온_Lot_은_후보가_아니다(conn: psycopg.Connection) -> None:
+    """🔴 **아직 안 들어온 물건에서는 뺄 수 없다 (#812 · #818).**
+
+    종전에는 `_available_lots` 가 `received_at` 을 안 봐서 **기준일보다 뒤에 입고된
+    Lot** 이 후보로 올라왔다. 신선도는 `as_of` 기준이라 경과일이 음수가 되고,
+    `한계 − 경과` 가 **한계보다 큰 값**으로 커진다 (실측 화면 「배추 10일 한계 ·
+    신선도 잔여 188일」).
+
+    ★ 이 판은 **값을 깎아서**가 아니라 **모집단으로** 막혔는지를 본다 — 미래 Lot 을
+      후보에서 빼면 한계를 넘는 신선도는 나올 자리가 없다.
+    """
+    _lot(conn, "LOT-지난", qty="100", received_at=date(2026, 1, 1))
+    _lot(conn, "LOT-그날", qty="100", received_at=AS_OF)
+    _lot(conn, "LOT-미래", qty="100", received_at=AS_OF + timedelta(days=1))
+
+    후보 = recommend_fefo_candidates(conn, sim_run_id=SIM_RUN_ID, item_id=ITEM_ID, as_of=AS_OF)
+
+    assert [c.lot_id for c in 후보] == ["LOT-지난", "LOT-그날"]
+    #  한계 30일(fixture)을 넘는 신선도는 미래 Lot 에서만 나온다.
+    assert all(c.remaining_freshness_days is not None for c in 후보)
+    assert max(c.remaining_freshness_days for c in 후보) <= 30
+
+
+def test_13d_미래_Lot_은_품목_가용에도_안_선다(conn: psycopg.Connection) -> None:
+    """🔴 후보에서만 빼면 안 된다 — `item_free_stock_qty` 도 같은 모집단을 봐야 한다.
+
+    둘이 갈리면 *"예약은 잡히는데 붙일 Lot 이 없는"* 예약이 생긴다.
+    """
+    _lot(conn, "LOT-미래", qty="100", received_at=AS_OF + timedelta(days=1))
+
+    결과 = _부분예약(conn, required="100")
+
+    assert 결과.applied is False
+    assert 결과.reserved_qty_kg == Decimal(0)
 
 
 # ── 14~20. Allocation ───────────────────────────────────────────────────
@@ -585,7 +621,7 @@ def test_27b_출고된_예약은_취소할_수_없다(conn: psycopg.Connection) 
     ship_allocated_stock(conn, reservation_id=RSV, shipped_at=AS_OF)
 
     with pytest.raises(OutboundIntegrityError, match="이미 출고된"):
-        release_reservation(conn, reservation_id=RSV)
+        release_reservation(conn, reservation_id=RSV, released_as_of=AS_OF)
 
 
 def test_28_예약만_하고_출고하지_않으면_원장이_없다(conn: psycopg.Connection) -> None:
@@ -825,7 +861,7 @@ def test_D5_D6_놓아준_예약은_가용을_돌려준다(conn: psycopg.Connecti
     with pytest.raises(InvalidOutboundRequest):
         _예약한다(conn, "RSV-B", "10")
 
-    release_reservation(conn, reservation_id="RSV-A", status=상태)
+    release_reservation(conn, reservation_id="RSV-A", status=상태, released_as_of=AS_OF)
 
     assert _예약한다(conn, "RSV-B", "100").applied is True
 
@@ -1108,7 +1144,7 @@ def test_S6b_같은_id_에_다른_요구량이면_충돌이다(conn: psycopg.Con
 def test_S6c_놓아준_예약은_다시_채우지_않는다(conn: psycopg.Connection) -> None:
     _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
     _부분예약(conn, required="100")
-    release_reservation(conn, reservation_id=RSV)
+    release_reservation(conn, reservation_id=RSV, released_as_of=AS_OF)
 
     with pytest.raises(OutboundIntegrityError, match="놓아준 예약"):
         _부분예약(conn, required="100")
@@ -1370,7 +1406,7 @@ def _되살아난_Lot_상황(conn: psycopg.Connection) -> None:
     assert _내할당(conn) == {"LOT-OLD": Decimal(40)}
 
     _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
-    release_reservation(conn, reservation_id="RSV-OTHER")
+    release_reservation(conn, reservation_id="RSV-OTHER", released_as_of=AS_OF)
     assert _부분예약(conn, required="100").reserved_qty_kg == Decimal(100)
 
 

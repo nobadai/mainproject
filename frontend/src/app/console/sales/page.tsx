@@ -28,7 +28,6 @@ import {
   useConsoleData,
 } from "@/components/console/ConsoleData";
 import { DomainHeader } from "@/components/console/DomainShell";
-import { RunPicker, useSimRun } from "@/components/console/RunPicker";
 import { PartnerProfileForm } from "@/components/console/PartnerProfileForm";
 import { SalesCandidatePanel } from "@/components/console/SalesCandidatePanel";
 import {
@@ -45,9 +44,10 @@ import {
   STAGE_LABELS,
 } from "@/lib/console_api";
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { FINANCE_SALES_SIM_RUN_ID } from "@/lib/run_context";
 
 import { AgingBars } from "../finance/AgingBars";
-import { DataBasis, NoRunChosen, TechDetails } from "../finance/TechDetails";
+import { DataBasis, TechDetails } from "../finance/TechDetails";
 import {
   DATA_SOURCE_NOTE,
   itemText,
@@ -86,24 +86,33 @@ const TABS: { key: Tab; label: string }[] = [
 
 export default function SalesPage() {
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
-  const simRun = useSimRun();
+  const simRun = FINANCE_SALES_SIM_RUN_ID;
   const [tab, setTab] = useState<Tab>("overview");
+  const [salesRefresh, setSalesRefresh] = useState(0);
   return (
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
+    <div className="flex w-full flex-col gap-4 sm:gap-5">
       <DomainHeader title="판매" tabs={TABS} active={tab} onChange={setTab} />
       <DataBasis asOf={asOf} note={DATA_SOURCE_NOTE} />
-      {/* 🔴 실행 축은 내부 식별자다. 고르는 자리는 남기되 기본 화면에서 내린다. */}
-      <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
-        <RunPicker asOf={asOf} />
-      </TechDetails>
-      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
+      <Body simRun={simRun} asOf={asOf} tab={tab} salesRefresh={salesRefresh} onSalesConfirmed={() => setSalesRefresh((value) => value + 1)} />
     </div>
   );
 }
 
-function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab }) {
-  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} />;
-  if (tab === "candidates") return <Candidates simRun={simRun} asOf={asOf} />;
+function Body({
+  simRun,
+  asOf,
+  tab,
+  salesRefresh,
+  onSalesConfirmed,
+}: {
+  simRun: string;
+  asOf: string;
+  tab: Tab;
+  salesRefresh: number;
+  onSalesConfirmed: () => void;
+}) {
+  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} salesRefresh={salesRefresh} />;
+  if (tab === "candidates") return <Candidates simRun={simRun} asOf={asOf} onSalesConfirmed={onSalesConfirmed} />;
   if (tab === "partners") return <Partners simRun={simRun} asOf={asOf} />;
   if (tab === "collections") return <Collections simRun={simRun} asOf={asOf} />;
   if (tab === "orders") return <Orders simRun={simRun} asOf={asOf} />;
@@ -112,7 +121,15 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
 }
 
 
-function Candidates({ simRun, asOf }: { simRun: string; asOf: string }) {
+function Candidates({
+  simRun,
+  asOf,
+  onSalesConfirmed,
+}: {
+  simRun: string;
+  asOf: string;
+  onSalesConfirmed: () => void;
+}) {
   const [proposalRefresh, setProposalRefresh] = useState(0);
   const proposals = useConsoleData<SalesProposalsResponse>(
     `sales-proposals:${simRun}:${asOf}:${proposalRefresh}`,
@@ -120,22 +137,26 @@ function Candidates({ simRun, asOf }: { simRun: string; asOf: string }) {
     true,
   );
   const refreshProposals = () => setProposalRefresh((value) => value + 1);
+  const refreshAfterConfirmation = () => {
+    refreshProposals();
+    onSalesConfirmed();
+  };
   return (
     <>
       <SalesCandidatePanel simRun={simRun} asOf={asOf} onCreated={refreshProposals} />
-      <TodayProposalsPanel asOf={asOf} state={proposals} onConfirmed={refreshProposals} />
+      <TodayProposalsPanel asOf={asOf} state={proposals} onConfirmed={refreshAfterConfirmation} />
     </>
   );
 }
 
 /* ── 판매 현황 ─────────────────────────────────────────────────────────── */
 
-function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
+function Overview({ simRun, asOf, salesRefresh }: { simRun: string; asOf: string; salesRefresh: number }) {
   const [trendFrom, setTrendFrom] = useState("");
   const [trendTo, setTrendTo] = useState("");
   const [appliedTrendRange, setAppliedTrendRange] = useState({ from: "", to: "" });
   const summary = useConsoleData<SalesSummaryResponse>(
-    `sales-summary:${simRun}:${asOf}`,
+    `sales-summary:${simRun}:${asOf}:${salesRefresh}`,
     () => salesOverview.summary(simRun, asOf),
     true,
   );
@@ -156,7 +177,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     true,
   );
 
-  const todayConfirmedSales = summary.data?.recent_sales.filter((sale) => sale.sale_date === asOf) ?? [];
+  const todayConfirmedSales = summary.data?.today_confirmed_sales ?? [];
 
   return (
     <>
@@ -189,7 +210,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
         )}
       </Panel>
 
-      <Panel title="금일 확정 판매안" subtitle="후보가 아닌, 이 기준일에 실제 판매 원장으로 확정된 건만 보여줍니다">
+      <Panel title="금일 확정 판매안" subtitle="후보가 아닌, 이 기준일에 실제 판매를 확정한 원장만 보여줍니다. 납품 예정일은 별도입니다.">
         {summary.loading ? (
           <Skeleton what="금일 확정 판매" />
         ) : summary.error ? (
@@ -201,9 +222,12 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
             rows={todayConfirmedSales}
             columns={[
               { key: "partner", label: "거래처", render: (row) => partnerText(row.partner_name, row.customer_partner_id) },
-              { key: "amount", label: "판매 금액", align: "right", render: (row) => moneyWon(row.total_amount_krw) },
-              { key: "quantity", label: "판매량", align: "right", render: (row) => quantity(row.total_quantity_kg) },
+              { key: "item", label: "품목", render: (row) => itemText(row.item_name, row.item_id) },
+              { key: "quantity", label: "확정 수량", align: "right", render: (row) => quantity(row.quantity_kg) },
+              { key: "price", label: "확정 단가", align: "right", render: (row) => `${moneyWon(row.unit_price_krw_per_kg)}/kg` },
+              { key: "amount", label: "판매 금액", align: "right", render: (row) => moneyWon(row.line_amount_krw) },
               { key: "status", label: "판매 상태", render: (row) => row.order_status },
+              { key: "delivery", label: "납품 예정일", mono: true, render: (row) => row.sale_date },
             ]}
           />
         )}
@@ -217,14 +241,14 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
             setAppliedTrendRange({ from: trendFrom, to: trendTo });
           }}
         >
-          <label className="flex flex-col gap-1 text-[12px] text-ink2">시작일
+          <label className="flex flex-col gap-1 text-[16px] text-ink2">시작일
             <input type="date" value={trendFrom} onChange={(event) => setTrendFrom(event.target.value)} />
           </label>
-          <label className="flex flex-col gap-1 text-[12px] text-ink2">종료일
+          <label className="flex flex-col gap-1 text-[16px] text-ink2">종료일
             <input type="date" value={trendTo} onChange={(event) => setTrendTo(event.target.value)} />
           </label>
-          <button type="submit" className="rounded-lg border px-3 py-2 text-[12px] font-semibold" style={{ borderColor: "var(--color-hair)" }}>기간 적용</button>
-          {(appliedTrendRange.from || appliedTrendRange.to) && <button type="button" onClick={() => { setTrendFrom(""); setTrendTo(""); setAppliedTrendRange({ from: "", to: "" }); }} className="rounded-lg border px-3 py-2 text-[12px]">전체 기간</button>}
+          <button type="submit" className="rounded-lg border px-3 py-2 text-[16px] font-semibold" style={{ borderColor: "var(--color-hair)" }}>기간 적용</button>
+          {(appliedTrendRange.from || appliedTrendRange.to) && <button type="button" onClick={() => { setTrendFrom(""); setTrendTo(""); setAppliedTrendRange({ from: "", to: "" }); }} className="rounded-lg border px-3 py-2 text-[16px]">전체 기간</button>}
         </form>
         {trend.loading ? (
           <Skeleton what="매출 추이" />
@@ -369,7 +393,7 @@ function Partners({ simRun, asOf }: { simRun: string; asOf: string }) {
                 <button
                   key={row.partner_id}
                   onClick={() => setSelected(row.partner_id)}
-                  className="rounded-lg border px-3 py-1.5 text-[11.5px]"
+                  className="rounded-lg border px-3 py-1.5 text-[15.5px]"
                   style={{ borderColor: "var(--color-hair)" }}
                 >
                   {partnerText(row.partner_name, row.partner_id)} 상세
@@ -459,7 +483,7 @@ function PartnerDetailPanel({
           />
           <Metric label="미수금" value={moneyWon(data.summary.receivable_balance_krw)} />
         </Metrics>
-        <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+        <p className="mb-0 mt-3 text-[15.5px] text-ink2">
           여신 한도는 재무에서 관리합니다 — 판매 화면이 «한도 − 채권» 으로 만들지 않습니다.
         </p>
       </Panel>
@@ -557,7 +581,7 @@ function Badge({ text, tone }: { text: string; tone: "good" | "bad" | "neutral" 
   const background =
     tone === "neutral" ? "var(--color-grid)" : `var(--color-t-${tone === "good" ? "good" : "bad"}-bg)`;
   return (
-    <span className="rounded-full px-3 py-1 text-[11.5px]" style={{ color, background }}>
+    <span className="rounded-full px-3 py-1 text-[15.5px]" style={{ color, background }}>
       {text}
     </span>
   );
@@ -670,7 +694,7 @@ function Orders({ simRun, asOf }: { simRun: string; asOf: string }) {
                     type="button"
                     onClick={() => setSelected(row.sale_id)}
                     aria-pressed={selected === row.sale_id}
-                    className="rounded-md border px-2 py-1 text-[11px]"
+                    className="rounded-md border px-2 py-1 text-[15px]"
                     style={{
                       borderColor:
                         selected === row.sale_id ? "var(--color-t-info)" : "var(--color-hair)",
@@ -715,14 +739,14 @@ function Lifecycle({ simRun, asOf, saleId }: { simRun: string; asOf: string; sal
           { key: "detail", label: "설명", render: (row) => row.detail },
         ]}
       />
-      <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+      <p className="mb-0 mt-3 text-[15.5px] text-ink2">
         {data.agent_lineage === "LIVE"
           ? "후보 → 판매 구간은 확정에 실린 업무 키로 이어졌습니다."
           : "이 판매에는 업무 키가 실려 있지 않아 후보 → 판매 구간을 잇지 못합니다. 날짜·품목으로 추정해 잇지 않습니다."}
       </p>
       <div className="mt-3">
         <TechDetails>
-          <p className="m-0 font-mono text-[11px] text-ink2">
+          <p className="m-0 font-mono text-[15px] text-ink2">
             {data.sale_id} · 확정 구간 {data.confirmed_lineage} · 후보 구간 {data.agent_lineage}
           </p>
           <div className="mt-2">
@@ -845,7 +869,7 @@ function Runs({ simRun }: { simRun: string }) {
                 setPage(0);
               }}
               placeholder="품목 또는 거래처 검색"
-              className="min-w-[190px] rounded-md border px-3 py-1.5 text-[12px]"
+              className="min-w-[190px] rounded-md border px-3 py-1.5 text-[16px]"
               style={{ borderColor: "var(--color-hair)" }}
             />
             <label className="sr-only" htmlFor="sales-run-date">기준일 필터</label>
@@ -856,7 +880,7 @@ function Runs({ simRun }: { simRun: string }) {
                 setAsOf(event.target.value);
                 setPage(0);
               }}
-              className="rounded-md border px-2 py-1.5 text-[12px]"
+              className="rounded-md border px-2 py-1.5 text-[16px]"
               style={{ borderColor: "var(--color-hair)" }}
             >
               <option value="">모든 기준일</option>
@@ -870,7 +894,7 @@ function Runs({ simRun }: { simRun: string }) {
                 setRuntime(event.target.value);
                 setPage(0);
               }}
-              className="rounded-md border px-2 py-1.5 text-[12px]"
+              className="rounded-md border px-2 py-1.5 text-[16px]"
               style={{ borderColor: "var(--color-hair)" }}
             >
               <option value="">모든 조회 상태</option>
@@ -878,7 +902,7 @@ function Runs({ simRun }: { simRun: string }) {
             </select>
           </div>
           {filteredRows.length === 0 ? (
-            <p className="m-0 rounded-lg border px-4 py-5 text-[12px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
+            <p className="m-0 rounded-lg border px-4 py-5 text-[16px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
               조건에 맞는 실행 이력이 없습니다. 검색어나 필터를 바꿔 보세요.
             </p>
           ) : (
@@ -903,7 +927,7 @@ function Runs({ simRun }: { simRun: string }) {
               },
                 ]}
               />
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[12px] text-ink2">
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[16px] text-ink2">
             <span>
               검색 결과 {filteredRows.length}건 중 {currentPage * pageSize + 1}–
               {Math.min((currentPage + 1) * pageSize, filteredRows.length)}건

@@ -46,7 +46,7 @@ function inline(text: string, keyBase: string): ReactNode[] {
       out.push(
         <code
           key={`${keyBase}-c${i}`}
-          className="rounded px-1 py-0.5 font-mono text-[11px]"
+          className="rounded px-1 py-0.5 font-mono text-[15px]"
           style={{ background: "var(--color-sunk)", color: "var(--color-t-info)" }}
         >
           {m[1]}
@@ -82,10 +82,10 @@ function cells(line: string): string[] {
 const isDivider = (line: string) => /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(line) && line.includes("-");
 
 const HEAD = [
-  "m-0 mb-3 mt-1 text-[15.5px] font-bold",
-  "m-0 mb-2 mt-5 border-b pb-1 text-[13.5px] font-semibold",
-  "m-0 mb-1.5 mt-4 text-[12.5px] font-semibold",
-  "m-0 mb-1.5 mt-3 text-[12px] font-semibold",
+  "m-0 mb-3 mt-1 text-[19.5px] font-bold",
+  "m-0 mb-2 mt-5 border-b pb-1 text-[17.5px] font-semibold",
+  "m-0 mb-1.5 mt-4 text-[16.5px] font-semibold",
+  "m-0 mb-1.5 mt-3 text-[16px] font-semibold",
 ];
 
 export function Markdownish({ text }: { text: string }) {
@@ -116,7 +116,7 @@ export function Markdownish({ text }: { text: string }) {
       out.push(
         <pre
           key={key()}
-          className="tabular thin-scroll m-0 mb-3 overflow-x-auto rounded-lg p-3 font-mono text-[11px] leading-relaxed"
+          className="tabular thin-scroll m-0 mb-3 overflow-x-auto rounded-lg p-3 font-mono text-[15px] leading-relaxed"
           style={{ background: "var(--color-sunk)" }}
         >
           {body.join("\n")}
@@ -165,7 +165,7 @@ export function Markdownish({ text }: { text: string }) {
       }
       out.push(
         <div key={key()} className="thin-scroll mb-3 overflow-x-auto">
-          <table className="tabular w-full border-collapse text-[11.5px]">
+          <table className="tabular w-full border-collapse text-[15.5px]">
             <thead>
               <tr>
                 {head.map((c, ci) => (
@@ -211,7 +211,7 @@ export function Markdownish({ text }: { text: string }) {
       out.push(
         <blockquote
           key={key()}
-          className="m-0 mb-2 whitespace-pre-line border-l-[3px] py-1.5 pl-3 text-[12px] leading-relaxed"
+          className="m-0 mb-2 whitespace-pre-line border-l-[3px] py-1.5 pl-3 text-[16px] leading-relaxed"
           style={{ borderColor: "var(--color-t-info)", color: "var(--color-mut)" }}
         >
           {inline(body.join("\n"), `q${k}`)}
@@ -235,9 +235,9 @@ export function Markdownish({ text }: { text: string }) {
       ));
       out.push(
         ordered ? (
-          <ol key={key()} className="m-0 mb-2 list-decimal pl-5 text-[12.5px]">{kids}</ol>
+          <ol key={key()} className="m-0 mb-2 list-decimal pl-5 text-[16.5px]">{kids}</ol>
         ) : (
-          <ul key={key()} className="m-0 mb-2 list-disc pl-5 text-[12.5px]">{kids}</ul>
+          <ul key={key()} className="m-0 mb-2 list-disc pl-5 text-[16.5px]">{kids}</ul>
         ),
       );
       continue;
@@ -261,7 +261,7 @@ export function Markdownish({ text }: { text: string }) {
       continue;
     }
     out.push(
-      <p key={key()} className="m-0 mb-2 whitespace-pre-line text-[12.5px] leading-relaxed">
+      <p key={key()} className="m-0 mb-2 whitespace-pre-line text-[16.5px] leading-relaxed">
         {inline(para.join("\n"), `p${k}`)}
       </p>,
     );

@@ -688,7 +688,7 @@ with get_connection() as conn:
 `app/logistics/console_service.py` 에 `/logistics/inventory` · `/inbound` ·
 `/outbound` 가 쓰는 함수가 다 있습니다. FEFO 후보는 예약마다가 아니라 품목마다
 한 번 묻습니다 (`get_fefo_candidates_by_item(conn=, sim_run_id=, item_ids=, as_of=)`).
-물류 문제 장부는 `app/logistics/agent/exceptions.py` 가 주인입니다
+물류 문제 장부는 `app/logistics/monitoring/exceptions.py` 가 주인입니다
 (`live_exceptions_at` · `resolved_exceptions_on`). **같은 쿼리를 두 벌 두면 언젠가
 값이 갈라집니다.**
 

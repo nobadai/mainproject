@@ -220,8 +220,13 @@ def test_공용_계약을_쓰는_파일이_늘지_않는다():
     #   품목으로 좁히면서 `ITEMS` 를 계약에서 읽는다. 🔴 세 이름을 적재층이 다시
     #   적으면 계약이 늘거나 줄 때 한쪽만 바뀐다 — commitment.py·forecast_gate.py 와
     #   같은 자리다.
+    # ★ 2026-09-17 에 report.py 가 들어왔다 (`#802`) — 재고·물류 보고서가 **표시할
+    #   품목 범위**를 `ITEMS` 에서 읽는다. 🔴 피마늘·건고추를 보고서 코드에 직접
+    #   적어서 거르지 않는다 — 범위는 업무 결정이고 그 주인은 계약이다.
+    #   commitment.py·forecast_gate.py·inputs.py 와 같은 자리다.
     assert users == {
         "band.py": ["app.contracts.core"],
+        "report.py": ["app.contracts.core"],
         "commitment.py": ["app.contracts.core"],
         "critic_bridge.py": ["app.contracts.core"],
         "envelope.py": ["app.contracts.core"],

@@ -66,7 +66,8 @@ export function FinanceCashChart({ rows }: { rows: ClosingItem[] }) {
     });
   }
 
-  const points: CashPoint[] = rows.map((row, index) => ({
+  const orderedRows = [...rows].sort((left, right) => left.close_date.localeCompare(right.close_date));
+  const points: CashPoint[] = orderedRows.map((row, index) => ({
     index,
     label: shortDate(row.close_date),
     base: shown.has("base") ? toNumber(row.base_cash_balance_krw) : null,
@@ -115,7 +116,7 @@ export function FinanceCashChart({ rows }: { rows: ClosingItem[] }) {
               dataKey="index"
               axisLine={false}
               tickLine={false}
-              tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+              tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
               tickFormatter={(index: number) => points[index]?.label ?? ""}
               minTickGap={28}
             />
@@ -123,7 +124,7 @@ export function FinanceCashChart({ rows }: { rows: ClosingItem[] }) {
               domain={[low, high]}
               axisLine={false}
               tickLine={false}
-              tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+              tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
               tickFormatter={(value: number) => manwon(value)}
               width={72}
             />
@@ -170,7 +171,7 @@ export function FinanceCashChart({ rows }: { rows: ClosingItem[] }) {
           </LineChart>
         </ResponsiveContainer>
       </div>
-      <p className="mb-0 mt-2 text-[12px] leading-relaxed text-ink2">
+      <p className="mb-0 mt-2 text-[16px] leading-relaxed text-ink2">
         빨간 구간은 최소 운영현금에 못 미치는 범위입니다. 두 선을 함께 켜면 대출 금액만큼
         간격이 벌어져 각 선의 하루 변화가 작게 보입니다 — 변화를 보려면 한쪽만 켜세요.
         가로축은 마감된 날만 차례로 놓은 것이라, 칸 간격이 실제 날짜 간격을 뜻하지 않습니다.
@@ -193,7 +194,7 @@ function CashTooltip({ active, payload }: { active?: boolean; payload?: TooltipE
   const loanGap = gap(point.loan);
   const both = point.base !== null && point.loan !== null;
   return (
-    <div className="min-w-56 rounded-lg border border-hair bg-panel p-3 text-[12px] shadow-lg">
+    <div className="min-w-56 rounded-lg border border-hair bg-panel p-3 text-[16px] shadow-lg">
       <p className="mb-2 mt-0 font-semibold">{point.label}</p>
       <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
         {point.base !== null && <Row label={LABEL.base} value={point.base} />}
@@ -263,7 +264,7 @@ function SeriesToggle({
       type="button"
       onClick={onClick}
       aria-pressed={on}
-      className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11.5px]"
+      className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[15.5px]"
       style={{
         borderColor: on ? color : "var(--color-hair)",
         opacity: on ? 1 : 0.5,

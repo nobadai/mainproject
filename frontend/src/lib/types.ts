@@ -34,6 +34,7 @@ export type DomainAction =
   | "SALES_PROPOSALS_TODAY"
   | "SALES_CONFIRMED_TODAY"
   | "SALES_REPORT_GENERATE"
+  | "LOGISTICS_REPORT_GENERATE"
   | "PARTNER_LIST"
   | "PARTNER_CREATE"
   | "PARTNER_DETAIL_GET"
@@ -93,13 +94,13 @@ export interface DecisionOut {
 }
 
 export interface DomainActionAnswer {
-  domain: "finance" | "sales" | "partner";
+  domain: "finance" | "sales" | "logistics" | "partner";
   action: string;
   text: string;
   data: Record<string, unknown>;
   /** 기존 Markdown은 debug/fallback 용이며 domain report의 본문은 data facts다. */
   markdown?: string | null;
-  report_kind?: "FINANCE" | "SALES" | null;
+  report_kind?: "FINANCE" | "SALES" | "LOGISTICS" | null;
 }
 
 export interface AskResponse {
@@ -354,7 +355,7 @@ export interface RunReport {
 /**
  * 실매입 기록의 반영 상태. 백엔드 `PurchaseRecordStatus` 의 거울.
  *
- * 🔴 화면에는 이 값을 그대로 쓰지 않는다 — 사람 말(기록 대기 · 반영됨 · 반영되지 않음)로 옮긴다.
+ * 🔴 화면에는 이 값을 그대로 쓰지 않는다 — 사람 말(기록 대기 · 반영됨 · 입고 처리 중)로 옮긴다.
  */
 export type PurchaseRecordStatus =
   | "AWAITING_PURCHASE_RECORD"

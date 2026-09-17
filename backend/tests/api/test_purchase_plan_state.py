@@ -17,8 +17,10 @@
     ① request_id · history_run_id 가 실린다
     ② 못 읽은 행 id 는 None 이다 — 지어내지 않는다
     ③ state 네 갈래가 실제 상태를 가린다 (후보 · 승인됨 · 매입 기록됨)
-    ④ approved 가 그대로 있다 — 쓰는 화면이 있다
+    ④ approved 가 그대로 있다 — 읽는 자리가 있다 (대시보드 서버 · 09-17 정정)
     ⑤ 상태 어휘의 주인이 하나다 (`app/api/plan_state.py`) — 대시보드와 같은 것
+    ⑥ 「승인 대기」는 요청(품목·날) 단위다 — 형제 안이 결정되면 대기가 아니다 (09-17)
+    ⑦ 결정은 **최대 회차 하나만** 유효하다 — 되돌린 승인은 「승인됨」이 아니다 (09-17)
 
 🔴 **실 DB 에 안 닿는다.** `_read` 와 실매입 기록 조회를 대역으로 세우고, 「읽어 온 값을
    어떻게 싣는가」만 본다.
@@ -246,7 +248,11 @@ def test_기록을_못_읽어도_안_목록은_산다(tab, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_approved_가_그대로_있다(tab):
-    """🔴 쓰는 화면이 있다 (`console/purchase/page.tsx`). `state` 를 더하면서 지우지 않았다."""
+    """🔴 읽는 자리가 있다 — 대시보드 서버 `_state` 가 `plan.approved` 를 읽는다.
+
+    ~~쓰는 화면이 있다 (`console/purchase/page.tsx`)~~ — 낡았다 (2026-09-17). 매입 화면은
+    이제 `state` 를 읽는다. `state` 를 더하면서 `approved` 를 지우지 않았다.
+    """
     plans = tab(
         data=_data(
             [_run("REQ-A", _scenario("보수"), _scenario("기본"))],
@@ -255,7 +261,9 @@ def test_approved_가_그대로_있다(tab):
     ).plans
 
     보수, 기본 = plans
-    assert 보수.approved is False and 보수.pending is True
+    #  🔴 `보수.pending` 이 `True` 였다 — 같은 요청에서 기본안이 승인됐는데 보수안을
+    #     「승인 대기」로 셌다 (2026-09-17 정정). 대기는 요청 단위다 · ⑥ 참조.
+    assert 보수.approved is False and 보수.pending is False
     assert 기본.approved is True and 기본.pending is False
 
 
@@ -271,13 +279,169 @@ def test_상태_어휘는_공용_자리에서_온다():
 
 
 def test_매입_탭이_내는_낱말은_그_넷_안이다(tab):
+    #  🔴 **요청을 둘로 나눴다** (2026-09-17). 전에는 한 요청(REQ-A)에 승인을 두 번(기본 →
+    #     공격) 넣어 둘 다 「승인됨/매입 기록됨」을 받았는데, 결정 표는 **최대 회차 하나만
+    #     유효**하다(⑦ · 마스터 `approved_decisions` 와 같은 규칙). 이 검사가 보려는 것은
+    #     낱말이 넷 안인가이므로, 같은 세 낱말이 나오게 요청을 품목 둘로 갈랐다.
     plans = tab(
         data=_data(
-            [_run("REQ-A", _scenario("보수"), _scenario("기본"), _scenario("공격"))],
-            [_approval("REQ-A", "기본"), _approval("REQ-A", "공격")],
+            [
+                _run("REQ-A", _scenario("보수"), _scenario("기본")),
+                _run("REQ-B", _scenario("공격"), item="무"),
+            ],
+            [_approval("REQ-A", "기본"), _approval("REQ-B", "공격")],
         ),
-        records=_recorded("배추", "공격"),
+        records=_recorded("무", "공격"),
     ).plans
 
     assert [p.state for p in plans] == ["후보", "승인됨", "매입 기록됨"]
     assert {p.state for p in plans} <= set(plan_state.PLAN_STATES)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ⑥  「승인 대기」는 요청(품목·날) 단위다 (2026-09-17)
+#
+#  전에는 (요청, 안 이름) 한 쌍으로만 봐서, 같은 요청에서 보수안이 승인되면 고르지 않은
+#  기본안이 「승인 대기」로 남았다. 실 DB (REH-0914 · 08-31) 에서 매입 탭 통계와 대시보드
+#  배지가 3건을 셌는데, 기다리는 것은 양파 1건이었다.
+#
+#  🔴 낱말은 안 바꾼다 — 형제 안은 「후보」 그대로이고 **대기 수에서만** 빠진다.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _waiting(tabout) -> float | None:
+    return next(s for s in tabout.stats if s.label == "승인 대기").raw
+
+
+def test_같은_요청에_결정이_있으면_형제_안도_대기가_아니다(tab):
+    tabout = tab(
+        data=_data(
+            [_run("REQ-A", _scenario("보수"), _scenario("기본"))],
+            [_approval("REQ-A", "보수")],
+        )
+    )
+    보수, 기본 = tabout.plans
+
+    assert (보수.pending, 기본.pending) == (False, False)
+    assert _waiting(tabout) == 0
+    #  ★ 낱말의 주인은 `plan_state.py` 다 — 여기서 「후보」를 딴 말로 바꾸지 않는다
+    assert (보수.state, 기본.state) == ("승인됨", "후보")
+
+
+def test_결정이_없으면_그대로_대기다(tab):
+    """★ 규칙 8 — 수를 상수와 대 보지 않는다. **결정 하나를 넣고 빼서** 수가 따라오는지 본다."""
+    runs = [
+        _run("REQ-배추", _scenario("보수"), _scenario("기본")),
+        _run("REQ-양파", _scenario("공격"), item="양파"),
+    ]
+
+    결정전 = tab(data=_data(runs))
+    결정후 = tab(data=_data(runs, [_approval("REQ-배추", "보수")]))
+
+    assert [p.pending for p in 결정전.plans] == [True, True, True]
+    assert [p.pending for p in 결정후.plans] == [False, False, True]
+    #  ★ 결정이 난 요청의 안 둘이 **같이** 빠지고, 결정 없는 양파는 그대로 남는다
+    assert (_waiting(결정전), _waiting(결정후)) == (3, 1)
+
+
+def test_대기_판정과_승인_판정은_같은_결정_행에서_나온다(tab):
+    """🔴 무엇을 「결정」으로 치는지가 두 곳에서 갈리면 「승인됨」과 「대기 아님」이 따로 논다.
+
+    `decided` 는 **안 이름이 붙은 행**만 본다. 안 이름 없는 행(`REQUEST_CHANGE`)만 있는
+    요청을 대기에서 빼면, 그 요청의 안은 「후보」인데 아무도 기다리지 않는 것으로 셈된다.
+    """
+    tabout = tab(
+        data=_data(
+            [_run("REQ-A", _scenario("보수"))],
+            [{"request_id": "REQ-A", "decision": "REQUEST_CHANGE", "scenario_label": None}],
+        )
+    )
+    (plan,) = tabout.plans
+
+    assert plan.state == "후보"
+    assert plan.pending is True
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ⑦  결정은 최대 회차 하나만 유효하다 (2026-09-17)
+#
+#  결정 표는 append-only 라 번복도 새 행이다. 마스터 `approved_decisions` 는
+#  `DISTINCT ON (request_id) … ORDER BY decision_seq DESC` 로 최신 회차만 본다.
+#  매입 탭은 순서를 안 봐서, 「승인 되돌리기」(REQUEST_CHANGE · 안 이름 없음) 뒤에도 옛
+#  APPROVE 행이 남아 「승인됨 · 매입 기록됨」으로 떴다 (FINAL-0918 09-14 배추 실측).
+#
+#  🔴 낱말은 안 바꾼다 — 되돌린 안은 「후보」로 돌아간다.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _decision(request_id: str, seq: int, decision: str, label: str | None) -> dict[str, Any]:
+    return {"request_id": request_id, "decision_seq": seq, "decision": decision,
+            "scenario_label": label}
+
+
+def test_승인_뒤_되돌리면_승인됨이_아니다(tab):
+    tabout = tab(
+        data=_data(
+            [_run("REQ-A", _scenario("보수"), _scenario("기본"))],
+            [_decision("REQ-A", 1, "APPROVE", "보수"),
+             _decision("REQ-A", 2, "REQUEST_CHANGE", None)],
+        ),
+        #  ★ 실매입 기록이 있어도 — 승인이 유효하지 않으면 「매입 기록됨」도 아니다
+        records=_recorded("배추", "보수"),
+    )
+    보수, 기본 = tabout.plans
+
+    assert (보수.state, 기본.state) == ("후보", "후보")
+    assert 보수.approved is False
+    #  🔴 되돌린 요청은 다시 기다린다 — 안 이름 붙은 유효 결정이 없다 (⑥ 과 같은 행)
+    assert (보수.pending, 기본.pending) == (True, True)
+
+
+def test_되돌린_뒤_다시_승인하면_승인됨이다(tab):
+    tabout = tab(
+        data=_data(
+            [_run("REQ-A", _scenario("보수"), _scenario("기본"))],
+            [_decision("REQ-A", 1, "APPROVE", "보수"),
+             _decision("REQ-A", 2, "REQUEST_CHANGE", None),
+             _decision("REQ-A", 3, "APPROVE", "기본")],
+        ),
+    )
+    보수, 기본 = tabout.plans
+
+    #  ★ 최신 회차의 안만 승인됐다 — 1회차의 보수는 번복됐다
+    assert (보수.state, 기본.state) == ("후보", "승인됨")
+    assert (보수.pending, 기본.pending) == (False, False)
+
+
+def test_결정_순서는_목록_순서가_아니라_회차로_본다(tab):
+    """★ 규칙 8 — **같은 행을 순서만 바꿔** 넣어도 판정이 회차를 따라가는지 본다.
+
+    DB 가 행을 회차 순으로 준다는 보장이 없다 (조회에 ORDER BY 가 없다). 목록 뒤쪽을
+    새것으로 읽으면 이 검사가 운다.
+    """
+    행 = [_decision("REQ-A", 2, "REQUEST_CHANGE", None), _decision("REQ-A", 1, "APPROVE", "보수")]
+
+    for 결정들 in (행, list(reversed(행))):
+        (보수,) = tab(data=_data([_run("REQ-A", _scenario("보수"))], 결정들)).plans
+        assert 보수.state == "후보", 결정들
+
+
+def test_결정_조회가_회차를_같이_읽는다(monkeypatch):
+    """🔴 조회가 `decision_seq` 를 안 실으면 위 판정은 **목록 순서**로 떨어진다.
+
+    대역 검사들은 `_read` 를 통째로 갈아 끼우므로 이 칸이 빠져도 안 운다 — 질의 문면을
+    직접 본다.
+    """
+    import app.finance.db as finance_db
+
+    monkeypatch.setenv("DB_SCHEMA", "haetdeul")
+    문면: list[str] = []
+
+    def _record(query: Any, params: Any = None) -> list[dict[str, Any]]:
+        문면.append(query.as_string(None))
+        return []
+
+    monkeypatch.setattr(finance_db, "fetch_all", _record)
+
+    purchase_query._read(AS_OF, sim_run_id=AXIS)
+
+    (결정,) = [t for t in 문면 if "master_decisions" in t]
+    assert "decision_seq" in 결정

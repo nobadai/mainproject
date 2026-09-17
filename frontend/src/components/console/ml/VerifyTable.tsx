@@ -69,14 +69,14 @@ export function VerifyTable({ items }: { items: VerifyItem[] }) {
         className="thin-scroll overflow-x-auto rounded-lg border"
         style={{ borderColor: "var(--color-hair)" }}
       >
-        <table className="w-full border-collapse text-[12px]">
+        <table className="w-full border-collapse text-[16px]">
           <thead>
             <tr style={{ background: "var(--color-sunk)" }}>
               {HEAD.map((h) => (
                 <th
                   key={h.label}
                   scope="col"
-                  className={`whitespace-nowrap px-3 py-2 text-[11px] font-medium ${
+                  className={`whitespace-nowrap px-3 py-2 text-[15px] font-medium ${
                     h.right ? "text-right" : "text-left"
                   }`}
                   style={{ color: "var(--color-mut)" }}
@@ -145,7 +145,7 @@ export function VerifyTable({ items }: { items: VerifyItem[] }) {
                   </td>
                   <td className="px-3 py-2">
                     <span
-                      className="whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-semibold"
+                      className="whitespace-nowrap rounded px-2 py-0.5 text-[15px] font-semibold"
                       style={{ background: tone.bg, color: tone.fg }}
                     >
                       {en(VERIFY, r.verdict)}
@@ -158,7 +158,7 @@ export function VerifyTable({ items }: { items: VerifyItem[] }) {
         </table>
       </div>
 
-      <p className="m-0 text-[11.5px] leading-relaxed" style={{ color: "var(--color-mut)" }}>
+      <p className="m-0 text-[15.5px] leading-relaxed" style={{ color: "var(--color-mut)" }}>
         <b style={{ color: "var(--color-ink)" }}>표 보는 법</b> — 오차의 &laquo;차이&raquo;가
         &laquo;최소 차이&raquo; 기준보다 더 크게 벌어졌을 때만 결과를 판정합니다. 기준 범위 안에
         있을 때는{" "}
@@ -178,7 +178,7 @@ export function VerifyTable({ items }: { items: VerifyItem[] }) {
 
       {worse > 0 && (
         <p
-          className="m-0 rounded-lg px-3.5 py-2.5 text-[12px] leading-relaxed"
+          className="m-0 rounded-lg px-3.5 py-2.5 text-[16px] leading-relaxed"
           style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
         >
           ★ <b>성능이 떨어진 품목이 {worse}개 있습니다.</b> 성능이 좋아진 품목이 {better}개
@@ -189,7 +189,7 @@ export function VerifyTable({ items }: { items: VerifyItem[] }) {
       )}
       {worse === 0 && better === 0 && decided.length > 0 && (
         <p
-          className="m-0 rounded-lg px-3.5 py-2.5 text-[12px] leading-relaxed"
+          className="m-0 rounded-lg px-3.5 py-2.5 text-[16px] leading-relaxed"
           style={{ background: "var(--color-sunk)", color: "var(--color-mut)" }}
         >
           성능이 떨어진 품목은 없지만,{" "}

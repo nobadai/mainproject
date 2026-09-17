@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
@@ -14,6 +14,7 @@ import { DomainReadResult } from "@/components/console/DomainReadResult";
 import { SalesConversation } from "@/components/console/SalesConversation";
 import { Markdownish } from "@/components/console/ml/Markdownish";
 import { ApiError, ask, execute } from "@/lib/api";
+import { useSimRun } from "@/components/console/RunPicker";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
@@ -103,6 +104,58 @@ type LlmTraceData = Pick<
   "intent" | "llm_status" | "llm_provider" | "llm_model" | "llm_attempts" | "llm_fallback_used"
 >;
 
+/** Browser-only chat state. Keep only what is needed to redraw a conversation after refresh. */
+const CHAT_STORAGE_KEY = "haetdeul.master.chat.v1";
+type ReportPeriodState = "idle" | "awaiting" | "custom";
+type PersistedTurn =
+  | Extract<Turn, { kind: "me" | "bot" | "domain" | "sales" | "error" }>;
+
+function persistedTurns(turns: Turn[]): PersistedTurn[] {
+  return turns.flatMap((turn): PersistedTurn[] => {
+    switch (turn.kind) {
+      case "me":
+      case "error":
+        return [turn];
+      case "bot":
+        return [{ kind: "bot", text: turn.text, markdown: turn.markdown, hideText: turn.hideText }];
+      case "domain":
+        // `result.data` is the structured report/read payload required for a restored card.
+        // Trace/provider details and the full ask response deliberately stay out of storage.
+        return [{ kind: "domain", result: turn.result }];
+      case "sales":
+        return [{ kind: "sales", asOf: turn.asOf, detail: { text: turn.detail.text, note: turn.detail.note } }];
+      default:
+        // Confirmations and procurement execution state must be obtained live, not resumed from storage.
+        return [];
+    }
+  });
+}
+
+function readChatSnapshot(): { turns: PersistedTurn[]; reportPeriod: ReportPeriodState; dateFrom: string; dateTo: string } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const snapshot: unknown = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) ?? "null");
+    if (!snapshot || typeof snapshot !== "object") return null;
+    const value = snapshot as { turns?: unknown; reportPeriod?: unknown; dateFrom?: unknown; dateTo?: unknown };
+    const turns = Array.isArray(value.turns)
+      ? value.turns.filter((turn): turn is PersistedTurn =>
+          Boolean(turn && typeof turn === "object" && "kind" in turn && ["me", "bot", "domain", "sales", "error"].includes(String((turn as { kind?: unknown }).kind))),
+        )
+      : [];
+    const reportPeriod: ReportPeriodState = value.reportPeriod === "awaiting" || value.reportPeriod === "custom"
+      ? value.reportPeriod
+      : "idle";
+    return {
+      turns,
+      reportPeriod,
+      dateFrom: typeof value.dateFrom === "string" ? value.dateFrom : "",
+      dateTo: typeof value.dateTo === "string" ? value.dateTo : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 판매가 답했는가. **구조화된 조회 답(`status.answers.sales`)으로 가른다** — 문장을 긁지 않는다.
  *
@@ -166,6 +219,17 @@ function clarificationText(
 /** 분류가 못 돈 뒤 보내기를 더 잠가 두는 시간(초). **자동 재시도는 없다 — 사람이 누른다.** */
 const FALLBACK_COOLDOWN_SEC = 5;
 
+/**
+ * 바닥에서 이만큼 안이면 «바닥을 보고 있다» 로 본다(px).
+ *
+ * **이 값은 알림 버튼에만 쓴다.** 스크롤을 움직일지 말지는 여기서 안 정한다 —
+ * 판은 «내 글» 일 때만 내려간다.
+ *
+ * 딱 0 으로 두면 안 된다 — 한 줄 반쯤 남은 자리, 소수점 높이, 확대 배율 때문에
+ * 바닥까지 내려도 1~2px 이 남는 일이 흔하다. 그러면 바닥인데도 버튼이 뜬다.
+ */
+const STICK_PX = 40;
+
 function traceOf(res: AskResponse): LlmTraceData {
   return {
     intent: res.intent,
@@ -209,10 +273,15 @@ export function MasterConsole({ session }: { session: Session }) {
   //  🔴 시연용 기준일 (`#431`). `ask` · `execute` 가 실제로 싣는 값과 같은 곳을 읽는다
   //     — 머리에 적힌 날짜와 서버에 보내는 날짜가 갈리면 안 된다.
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  const simRun = useSimRun();
   //  세션 판정(하이드레이션 · 로그인 리다이렉트)은 **셸이 이미 했다**
   //  (`app/console/layout.tsx`). 여기까지 왔으면 사람이 있다.
   const [tab, setTab] = useState<"master" | "runs">("master");
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [chatSnapshot] = useState(() => readChatSnapshot());
+  const [turns, setTurns] = useState<Turn[]>(() => chatSnapshot?.turns ?? []);
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriodState>(() => chatSnapshot?.reportPeriod ?? "idle");
+  const [reportDates, setReportDates] = useState(() => ({ from: chatSnapshot?.dateFrom ?? "", to: chatSnapshot?.dateTo ?? "" }));
+  const [resetOpen, setResetOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   // 🔴 분류가 못 돈 뒤 남은 잠금 시간(초). **연타가 한도를 더 깎는다** — 실측에서
@@ -250,9 +319,71 @@ export function MasterConsole({ session }: { session: Session }) {
   const tail = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLInputElement>(null);
 
+  /* ── 자기가 보낸 글에만 내려간다 ──────────────────────────────────────
+   *
+   * 예전엔 `turns` 가 늘 때마다 **무조건** 바닥으로 내려갔다. 위로 올려 지난 답을
+   * 읽는 중에 새 글이 하나만 붙어도 읽던 자리가 끌려 내려갔다.
+   *
+   * **규칙은 하나뿐이다 — 내려가는 것은 `kind === "me"` 일 때뿐이다.**
+   * 답이 도착했을 때는 **어디에 있든 판을 움직이지 않는다.** 바닥 근처면 따라
+   * 내려가던 규칙은 없앴다 (2026-09-17 지시).
+   *
+   * ★ 새 글은 **아래에 붙는다.** 그러면 브라우저가 `scrollTop` 을 그대로 두므로
+   *   위에 보이던 내용은 한 픽셀도 안 움직인다 — **아무것도 안 하는 것**이
+   *   자리를 지키는 것이다. 그래서 `scrollTop` 보정을 따로 두지 않는다.
+   *
+   * 알림 버튼만 «바닥에서 얼마나 떨어졌나» 를 본다. 🔴 효과가 도는 시점은 새 글이
+   * **이미 붙은 뒤**라 그대로 재면 늘어난 높이만큼 부풀려진다. 그래서 직전 높이
+   * (`seenHeight`)를 들고 있다가 **붙기 전의 틈**을 되살려 잰다.
+   * ------------------------------------------------------------------ */
+
+  const scroller = useRef<HTMLDivElement>(null);
+  /** 마지막으로 본 판의 전체 높이. 새 글이 붙기 «전» 의 틈을 되살리는 데 쓴다. */
+  const seenHeight = useRef(0);
+  const [unread, setUnread] = useState(false);
+
+  function onScroll() {
+    const el = scroller.current;
+    if (!el) return;
+    seenHeight.current = el.scrollHeight;
+    //  바닥까지 내려왔으면 알릴 것이 없다 — 버튼은 스스로 사라진다
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX) setUnread(false);
+  }
+
+  /**
+   * 판을 바닥으로 민다.
+   *
+   * 🔴 **상태를 안 건드린다.** 효과 안에서 부르는 자리라, 여기서 `setUnread` 를
+   *    하면 `react-hooks/set-state-in-effect` 에 걸린다. 버튼은 아래 `onScroll` 이
+   *    바닥에 닿는 순간 스스로 지운다.
+   */
+  const scrollToTail = useCallback(() => {
+    tail.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, []);
+
   useEffect(() => {
-    tail.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns]);
+    const el = scroller.current;
+    if (turns.length === 0 || !el) return;
+
+    //  새 글이 붙기 **전** 의 바닥까지 거리. `scrollTop` 은 아래에 붙는 동안
+    //  안 바뀌므로, 직전 높이로 재면 붙기 전의 틈이 그대로 나온다.
+    const gapBefore = seenHeight.current - el.scrollTop - el.clientHeight;
+    seenHeight.current = el.scrollHeight;
+
+    //  ① 내가 보낸 글이면 바닥으로. ② 그 밖에는 **판을 건드리지 않는다** —
+    //     바닥에서 멀면 «새 메시지» 만 알린다.
+    if (turns.at(-1)?.kind === "me") scrollToTail();
+    else if (gapBefore > STICK_PX) setUnread(true);
+  }, [turns, scrollToTail]);
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({
+      turns: persistedTurns(turns),
+      reportPeriod,
+      dateFrom: reportDates.from,
+      dateTo: reportDates.to,
+    }));
+  }, [turns, reportDates, reportPeriod]);
 
   //  남은 초를 1초씩 깎는다. 0 이 되면 잠금이 풀린다 — 여기서 다시 보내지 않는다.
   useEffect(() => {
@@ -297,17 +428,30 @@ export function MasterConsole({ session }: { session: Session }) {
   }
 
   /** ① 발화문 분류. **확인이 필요하면 아무것도 실행하지 않는다.** */
-  async function send(text: string) {
+  async function send(text: string, context?: { dateFrom?: string; dateTo?: string }) {
     const utterance = text.trim();
     if (!utterance || locked) return;
+    setReportPeriod("idle");
+    setReportDates({ from: "", to: "" });
     setDraft("");
     push({ kind: "me", text: utterance });
     setBusy(true);
     try {
-      const res: AskResponse = await ask(utterance);
+      const res: AskResponse = await ask(utterance, { simRunId: simRun || undefined, dateFrom: context?.dateFrom, dateTo: context?.dateTo });
       //  분류가 못 돌았으면 연달아 누르지 못하게 몇 초 더 잠근다.
       if (classifyFailed(res)) setCooldown(FALLBACK_COOLDOWN_SEC);
-      if (res.confirm_required) {
+      const slots = res.intent.slots;
+      const awaitingReportPeriod =
+        res.outcome === "NEEDS_CLARIFICATION" &&
+        res.intent.domain_action === "FINANCE_REPORT_GENERATE" &&
+        !context?.dateFrom &&
+        !slots?.period &&
+        !slots?.start_date &&
+        !slots?.end_date;
+      if (awaitingReportPeriod) {
+        setReportPeriod("awaiting");
+        push({ kind: "bot", text: clarificationText(res, "어느 기간의 재무 보고서를 생성할까요?") });
+      } else if (res.confirm_required) {
         push({
           kind: "confirm",
           text: clarificationText(res, "진행할까요?"),
@@ -575,14 +719,14 @@ export function MasterConsole({ session }: { session: Session }) {
      * 못해 `overflow-y-auto` 가 안 걸린다.
      */
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
+      <header className="relative flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
         {(["master", "runs"] as const).map((k) => (
           <button
             key={k}
             type="button"
             onClick={() => setTab(k)}
             aria-pressed={tab === k}
-            className={`rounded-md px-2.5 py-1 text-[11.5px] font-medium transition ${
+            className={`rounded-md px-2.5 py-1 text-[15.5px] font-medium transition ${
               tab === k ? "bg-ink text-paper" : "text-muted hover:bg-sunk"
             }`}
           >
@@ -596,7 +740,7 @@ export function MasterConsole({ session }: { session: Session }) {
               type="button"
               onClick={() => shortcut(k)}
               disabled={locked}
-              className="rounded-md border border-line px-2 py-1 text-[11px] text-muted
+              className="rounded-md border border-line px-2 py-1 text-[15px] text-muted
                 transition hover:bg-sunk disabled:opacity-40"
             >
               {
@@ -607,7 +751,9 @@ export function MasterConsole({ session }: { session: Session }) {
             </button>
           ))}
         </span>
-        <span className="ml-auto text-[11px] text-faint">기준일 {formatKoreanDate(asOf)}</span>
+        <span className="ml-auto text-[15px] text-faint">기준일 {formatKoreanDate(asOf)}</span>
+        <button type="button" onClick={() => setResetOpen(true)} className="rounded-md border border-line px-2 py-1 text-[15px] text-muted transition hover:bg-sunk focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">대화 초기화</button>
+        {resetOpen && <div role="dialog" aria-modal="true" aria-label="대화 초기화 확인" className="absolute right-4 top-12 z-20 rounded-lg border border-line bg-surface p-3 text-[16px] shadow-lg"><p className="m-0">현재 대화내용을 모두 초기화할까요?<br />이 작업은 되돌릴 수 없습니다.</p><div className="mt-3 flex justify-end gap-2"><button type="button" onClick={() => setResetOpen(false)} className="rounded border border-line px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">취소</button><button type="button" onClick={() => { setTurns([]); setReportPeriod("idle"); setReportDates({ from: "", to: "" }); setDraft(""); localStorage.removeItem(CHAT_STORAGE_KEY); setResetOpen(false); }} className="rounded bg-accent px-2 py-1 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">초기화</button></div></div>}
       </header>
 
         {isHistory ? (
@@ -616,8 +762,25 @@ export function MasterConsole({ session }: { session: Session }) {
           </div>
         ) : (
           <>
-            <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4">
+            {/* 안내 버튼이 구르는 판 위에 떠야 해서 `relative` 한 겹을 덧댄다.
+                높이 규칙(`min-h-0 flex-1`)은 덧댄 겹과 안쪽 판이 그대로 이어받는다. */}
+            <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={scroller}
+              onScroll={onScroll}
+              className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4"
+            >
               {turns.length === 0 && <Empty onPick={send} />}
+              {reportPeriod !== "idle" && (
+                <ReportControls
+                  mode={reportPeriod}
+                  onPreset={(preset) => void send(`${preset} 재무 보고서 만들어줘`)}
+                  onChooseCustom={() => setReportPeriod("custom")}
+                  dates={reportDates}
+                  onDatesChange={setReportDates}
+                  onCustomSubmit={(dateFrom, dateTo) => void send("재무 보고서 만들어줘", { dateFrom, dateTo })}
+                />
+              )}
 
               {turns.map((turn, i) => (
                 <TurnView
@@ -661,11 +824,28 @@ export function MasterConsole({ session }: { session: Session }) {
               ))}
 
               {busy && (
-                <p className="m-0 text-[13px] text-faint">
+                <p className="m-0 text-[17px] text-faint">
                   데이터를 확인하고 있습니다.
                 </p>
               )}
               <div ref={tail} />
+            </div>
+
+            {/* 위에서 읽는 동안 새 글이 오면 여기서만 알린다 — 판은 안 움직인다. */}
+            {unread && (
+              <button
+                type="button"
+                onClick={() => {
+                  setUnread(false);
+                  scrollToTail();
+                }}
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-line
+                  bg-surface px-3 py-1 text-[16px] text-muted shadow-[0_6px_18px_-8px_rgba(21,26,22,.5)]
+                  transition hover:border-accent hover:text-accent-ink"
+              >
+                새 메시지 ↓
+              </button>
+            )}
             </div>
 
             <div className="border-t border-line px-4 py-3">
@@ -681,18 +861,18 @@ export function MasterConsole({ session }: { session: Session }) {
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   placeholder="자금 현황, 판매안, 거래처, 보고서를 자연어로 물어보세요"
-                  className="min-w-0 flex-1 bg-transparent text-[14.5px] outline-none placeholder:text-faint"
+                  className="min-w-0 flex-1 bg-transparent text-[18.5px] outline-none placeholder:text-faint"
                 />
                 {/* 잠긴 동안 남은 초를 버튼이 적는다 — 왜 안 눌리는지 보여야 사람이 기다린다. */}
                 <button
                   type="submit"
                   disabled={locked || !draft.trim()}
-                  className="rounded-lg bg-accent px-4 py-1.5 text-[13.5px] font-semibold text-white disabled:opacity-45"
+                  className="rounded-lg bg-accent px-4 py-1.5 text-[17.5px] font-semibold text-white disabled:opacity-45"
                 >
                   {cooldown > 0 ? `${cooldown}초 뒤 다시` : "보내기"}
                 </button>
               </form>
-              <p className="m-0 mt-2 text-[11.5px] text-faint">
+              <p className="m-0 mt-2 text-[15.5px] text-faint">
                 장부를 바꾸는 요청은{" "}
                 <b className="text-muted">확인을 한 번 더 받습니다</b>. 조회와 보고서는 바로
                 돕니다.
@@ -732,7 +912,7 @@ function TurnView({
   if (turn.kind === "me")
     return (
       <div className="flex justify-end">
-        <p className="m-0 max-w-[74%] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-sm text-white">
+        <p className="m-0 max-w-[74%] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-[18px] text-white">
           {turn.text}
         </p>
       </div>
@@ -742,12 +922,12 @@ function TurnView({
     return (
       <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
         {!turn.hideText && (
-          <div className="whitespace-pre-wrap text-sm leading-relaxed">
+          <div className="whitespace-pre-wrap text-[18px] leading-relaxed">
             {turn.text}
           </div>
         )}
         {turn.markdown && (
-          <div className={turn.hideText ? "text-sm" : "mt-2 text-sm"}>
+          <div className={turn.hideText ? "text-[18px]" : "mt-2 text-[18px]"}>
             <Markdownish text={turn.markdown} />
           </div>
         )}
@@ -758,7 +938,7 @@ function TurnView({
   if (turn.kind === "domain") {
     return (
       <div className="max-w-[94%] rounded-xl border border-line bg-surface p-4">
-        <div className="whitespace-pre-wrap text-sm leading-relaxed">{turn.result.text}</div>
+        <div className="whitespace-pre-wrap text-[18px] leading-relaxed">{turn.result.text}</div>
         {turn.result.report_kind && (
           <div className="mt-3">
             <DomainReportPreview kind={turn.result.report_kind} facts={turn.result.data} />
@@ -782,7 +962,7 @@ function TurnView({
         {turn.scenario ? (
           <ApprovedPlan scenario={turn.scenario} decision={turn.decision} />
         ) : (
-          <p className="m-0 rounded-xl border border-line bg-surface px-3.5 py-2.5 text-sm">
+          <p className="m-0 rounded-xl border border-line bg-surface px-3.5 py-2.5 text-[18px]">
             {turn.decision.decided_by} 님이 {what}을 승인했습니다.
           </p>
         )}
@@ -800,10 +980,10 @@ function TurnView({
   if (turn.kind === "confirm")
     return (
       <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line-soft bg-sunk px-3.5 py-2.5">
-        <p className="m-0 text-sm">{turn.text}</p>
+        <p className="m-0 text-[18px]">{turn.text}</p>
         <LlmTrace trace={turn.trace} />
         {turn.done ? (
-          <p className="m-0 mt-2 text-[12.5px] text-faint">
+          <p className="m-0 mt-2 text-[16.5px] text-faint">
             확인함 — 아래 결과를 보세요
           </p>
         ) : (
@@ -811,7 +991,7 @@ function TurnView({
             type="button"
             onClick={() => onConfirm(turn, index)}
             disabled={busy}
-            className="mt-2.5 rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
+            className="mt-2.5 rounded-lg bg-accent px-4 py-1.5 text-[17px] font-semibold text-white disabled:opacity-45"
           >
             네, 진행합니다
           </button>
@@ -827,33 +1007,128 @@ function TurnView({
   );
 }
 
+//: 하루가 도는 차례. **누르는 순서 그대로** 적는다 (2026-09-16).
+//
+//  ★ 시연에서 사람이 제일 자주 묻는 것이 «이제 뭘 눌러야 하나» 다. 화면이 그 답을
+//    들고 있으면 진행하는 사람이 순서를 외우지 않아도 된다.
+//  🔴 **여기에 없는 단계를 지어내지 않는다.** 네 자리 전부 사람이 실제로 누르는 것이다 —
+//     승인과 실매입 기록은 매입 화면, 판매 승인은 판매 화면에서 한다.
+const DAY_STEPS = [
+  "하루 열기",
+  "매입안 승인",
+  "실제 매입가 기록",
+  "판매안 승인",
+  "하루 닫기",
+];
+
 function Empty({ onPick }: { onPick: (text: string) => void }) {
+  //: 눌러서 바로 답이 나오는 말만 둔다. **순서가 뜻이다** — 잔액 같은 «점» 에서
+  //  «흐름» 을 거쳐 «보고서» 로 간다 (재무 요청 2026-09-16).
+  //
+  //  🔴 되묻는 말은 넣지 않는다. 「여신 한도 알려줘」는 거래처를 되물어 한 번
+  //     클릭으로 안 끝나고, 「오늘 확정된 판매」는 기준일이 어긋나면 빈손이다.
   const samples = [
     "현재 자금 상황 알려줘",
     "받을 돈 보여줘",
     "오늘 판매안 보여줘",
     "거래처 목록 보여줘",
+    "이번 달 현금 흐름 보여줘",
     "이번 주 재무 보고서 만들어줘",
   ];
   return (
     <div className="rounded-xl border border-dashed border-line p-6">
-      <p className="m-0 text-sm font-semibold">무엇을 도와드릴까요?</p>
-      <p className="m-0 mt-1 text-[13px] text-muted">
+      <p className="m-0 text-[18px] font-semibold">무엇을 도와드릴까요?</p>
+      <p className="m-0 mt-1 text-[17px] text-muted">
         마스터가 알아듣고 필요한 부서를 부릅니다. 무엇을 확인했고 무엇을 못
         봤는지 함께 답합니다.
       </p>
+
+      <div className="mt-4 rounded-lg border border-line bg-sunk p-3">
+        <p className="m-0 text-[16px] font-semibold">하루는 이 순서로 돕니다</p>
+        <ol className="m-0 mt-2 flex flex-wrap items-center gap-x-1 gap-y-1 p-0 text-[16px] text-muted">
+          {DAY_STEPS.map((step, i) => (
+            <li key={step} className="flex items-center gap-1 list-none">
+              <span className="rounded bg-surface px-1.5 py-0.5 tabular-nums">
+                {i + 1}
+              </span>
+              <span>{step}</span>
+              {i < DAY_STEPS.length - 1 && (
+                <span aria-hidden="true" className="px-1">
+                  ›
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+        <p className="m-0 mt-2 text-[16px] text-muted">
+          질문과 질문 사이에 몇 초를 두십시오. 말을 알아듣는 기능이 잠시 멈추면
+          말을 바꾸지 마시고 같은 말을 다시 눌러 주세요.
+        </p>
+      </div>
+
       <div className="mt-3 flex flex-wrap gap-2">
         {samples.map((s) => (
           <button
             key={s}
             type="button"
             onClick={() => onPick(s)}
-            className="rounded-full border border-line bg-sunk px-3 py-1 text-xs text-muted hover:border-accent hover:text-accent-ink"
+            className="rounded-full border border-line bg-sunk px-3 py-1 text-[16px] text-muted hover:border-accent hover:text-accent-ink"
           >
             {s}
           </button>
         ))}
       </div>
     </div>
+  );
+}
+
+function ReportControls({
+  mode,
+  onPreset,
+  onChooseCustom,
+  dates,
+  onDatesChange,
+  onCustomSubmit,
+}: {
+  mode: Exclude<ReportPeriodState, "idle">;
+  onPreset: (preset: string) => void;
+  onChooseCustom: () => void;
+  dates: { from: string; to: string };
+  onDatesChange: (dates: { from: string; to: string }) => void;
+  onCustomSubmit: (dateFrom: string, dateTo: string) => void;
+}) {
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!dates.from || !dates.to) return setError("시작일과 종료일을 모두 선택해 주세요.");
+    if (dates.from > dates.to) return setError("종료일은 시작일 이후여야 합니다.");
+    setError("");
+    onCustomSubmit(dates.from, dates.to);
+  }
+
+  if (mode === "custom") {
+    return (
+      <section className="mt-5 rounded-lg border border-line bg-sunk p-3" aria-label="재무 보고서 기간 직접 선택">
+        <p className="m-0 text-[18px] font-semibold">보고 기간 직접 선택</p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <label className="text-[16px] font-medium text-muted">시작일<input type="date" value={dates.from} onChange={(e) => onDatesChange({ ...dates, from: e.target.value })} className="mt-1 block w-full rounded border border-line bg-surface p-2 text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" /></label>
+          <label className="text-[16px] font-medium text-muted">종료일<input type="date" value={dates.to} onChange={(e) => onDatesChange({ ...dates, to: e.target.value })} className="mt-1 block w-full rounded border border-line bg-surface p-2 text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" /></label>
+        </div>
+        {error && <p className="mb-0 mt-2 text-[16px] text-red-700" role="alert">{error}</p>}
+        <button type="button" onClick={submit} className="mt-3 rounded bg-accent px-3 py-2 text-[16px] font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">이 기간으로 보고서 생성</button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="mt-5 rounded-lg border border-line bg-sunk p-3" aria-label="재무 보고서 기간 선택">
+      <p className="m-0 text-[18px] font-semibold">어느 기간의 재무 보고서를 생성할까요?</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {["최근 7일", "최근 30일", "최근 3개월", "최근 1년"].map((label) => (
+          <button key={label} type="button" onClick={() => onPreset(label)} className="rounded border border-line bg-surface px-2 py-1 text-[16px] text-ink transition hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{label}</button>
+        ))}
+        <button type="button" onClick={onChooseCustom} className="rounded border border-line bg-surface px-2 py-1 text-[16px] text-ink transition hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">직접 선택</button>
+      </div>
+    </section>
   );
 }

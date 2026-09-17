@@ -39,10 +39,13 @@ from app.purchase_agent.llm.split_allocation import ROLE as SPLIT_ROLE
 from app.purchase_agent.nodes.classify_situation import (
     SplitEntryCap,
     compute_ci_width,
+    compute_rise_rate_2w,
     coverage_by_label,
     estimate_daily_demand,
     is_gate_excluded,
+    judge_sustained_rise,
     split_entry_cap,
+    sustained_rise_sentence,
     volume_gate_holds,
 )
 from app.purchase_agent.quotes import QuoteSource, observed_at, quote_block_reason
@@ -323,9 +326,8 @@ def _split_allocation_call(
     없었고, 「꺼졌다」도 「건너뛰었다」도 아니다. 없는 판단에 상태를 붙이면 «매일 뭔가를
     건너뛴다» 로 읽힌다.
     """
-    판단 = (((state or {}).get("split_plan") or [{}])[0].get("decision") or {}).get(
-        "allocation_judgment"
-    )
+    결정 = ((state or {}).get("split_plan") or [{}])[0].get("decision") or {}
+    판단 = 결정.get("allocation_judgment")
     if 판단 is None:
         return ()
     return (
@@ -338,12 +340,24 @@ def _split_allocation_call(
             model=판단.llm_model or None,
             **_판(SPLIT_ROLE, 판단.llm_attempts),
             skip_reason=(
-                "배분 후보가 하나뿐이라 고를 것이 없었다"
-                if 판단.llm_status == "SKIPPED_TEMPLATE"
-                else None
+                _split_skip_reason(결정) if 판단.llm_status == "SKIPPED_TEMPLATE" else None
             ),
         ),
     )
+
+
+def _split_skip_reason(결정: Mapping[str, Any]) -> str:
+    """④ 판단자를 **왜 안 불렀나** — 승인 전과 «적용되지 않을 것이 확정» 을 가른다.
+
+    🔴 **한 문장으로 뭉치지 않는다** (2026-09-17). 둘은 여는 방법이 다르다 — 앞은 정책
+      승인이고, 뒤는 그날 입력(날짜별 여유 · 궤적)이다. 뭉치면 흔적만 보고 «비율을
+      승인하면 불리겠지» 로 읽는데, 승인해도 뒤쪽 날은 계속 안 불린다.
+    """
+    if not 결정.get("allocation_approved"):
+        return "배분 비율이 승인 전이라 후보가 균등 하나뿐이었다"
+    if 결정.get("allocation_excluded"):
+        return "다른 배분 후보가 결과에 그대로 적용되지 않을 것이 미리 확정돼 고를 것이 없었다"
+    return "배분 후보가 하나뿐이라 고를 것이 없었다"
 
 
 def _sourcing_call(state: Mapping[str, Any] | None) -> tuple[LLMCallMetadata, ...]:
@@ -1084,6 +1098,10 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
     )
     # 기준값도 ①과 같은 함수로 뽑는다 — 고정 임계가 아니라 **도착일 창고 여유**다 (`#308`).
     arrival_cap = split_entry_cap(state, constraints)
+    # 가격 경로가 보는 두 값 — ①·④ 와 **같은 함수**로 다시 구한다 (위 ``ci_width`` 와 같은 이유).
+    rise_rate = compute_rise_rate_2w(state["forecast"], judgment_day)
+    rise_threshold = constraints["triggers"]["pre_purchase_rise_rate"]
+    trend = judge_sustained_rise(state["forecast"], constraints)
 
     def ref(kind: str) -> tuple[str, ...]:
         return (f"{item}-{kind}-{as_of}",)
@@ -1146,6 +1164,25 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             #   여유를 못 받은 날에 *"미달"* 이라고 쓰면 판정하지 않은 것이 판정한 것으로
             #   읽히고, 읽는 사람은 그날 축이 왜 닫혔는지 되물을 수 없다.
             evidence_detail=_volume_gate_sentence(estimated_total_kg, arrival_cap),
+        ),
+        Evidence(
+            claim="allowed_axes",
+            source="tool_calc",
+            # **네 번째 게이트 — 가격 경로의 상승률 · 궤적** (2026-09-17). 전에는 이 게이트의
+            # 근거가 따로 없어, 안정인 날 timing 이 닫혀도 «상승률이 모자랐나 · 예측이
+            # 내려갔나 · 판정을 못 했나» 를 기록에서 가를 수 없었다.
+            # 🔴 stable 여부는 위 CI 근거가 말한다 — 여기서 겹쳐 적지 않는다.
+            ref_ids=ref("TREND"),
+            value=round(rise_rate, 6),
+            unit="ratio",
+            evidence_grade="SIM_FIXED",
+            evidence_detail=(
+                f"D+{judgment_day} 예측 상승률 {rise_rate:+.1%} "
+                f"{_relation(rise_rate, rise_threshold, '>=')} 임계 {rise_threshold:.0%} · "
+                + sustained_rise_sentence(
+                    trend.verdict, trend.withheld_reason, trend.first_decline
+                )
+            ),
         ),
         Evidence(
             claim="allowed_axes",

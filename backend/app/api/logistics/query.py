@@ -70,8 +70,6 @@ from app.api.primitives import (
 )
 from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.contracts.core import ITEMS
-from app.logistics.agent.exceptions import live_exceptions_at, resolved_exceptions_on
-from app.logistics.agent.schemas import DetectionRecord, ExceptionRow
 from app.logistics.console_service import (
     get_fefo_candidates_by_item,
     get_inbound_console,
@@ -86,6 +84,11 @@ from app.logistics.historical_repository import (
     runtime_coverage_at,
     snapshot_days_between,
 )
+from app.logistics.inbound_schedules import (  # noqa: F401  아래 주석대로 밖에 여는 이름이다
+    schedule_view_scope as read_scope,
+)
+from app.logistics.monitoring.exceptions import live_exceptions_at, resolved_exceptions_on
+from app.logistics.monitoring.schemas import DetectionRecord, ExceptionRow
 from app.logistics.schemas import (
     ConsoleInboundResponse,
     ConsoleInventoryResponse,
@@ -94,6 +97,15 @@ from app.logistics.schemas import (
 )
 
 log = logging.getLogger(__name__)
+
+#  🔵 **`read_scope()` — 한 화면이 물류를 두 갈래로 읽을 때 감싸는 범위** (2026-09-17).
+#
+#     `build()` 와 `dashboard_stock()` 은 서로를 모르므로 같은 `(실행, 기준일)` 일정
+#     조회를 **각자 한 번씩** 보낸다 (실측 0.145s + 0.139s). 이 범위 안에서는 처음
+#     한 번만 읽는다. **읽기 전용 한 판에만 쓴다** — 규칙과 경고는 저쪽 docstring 에.
+#
+#     ★ 물류 안쪽(`app.logistics.*`)을 대시보드가 직접 임포트하지 않게 **여기로만**
+#       연다. 이 파일이 물류를 읽는 유일한 길이라는 규율(파일 머리)을 그대로 지킨다.
 
 PANES = ("summary", "stock", "inbound", "outbound")
 
@@ -112,17 +124,192 @@ _SEVERITY = {"CRITICAL": "매우 높음", "HIGH": "높음", "MEDIUM": "보통", 
 
 #: 문제 어휘. `detect.py` 가 여는 코드 둘뿐이다.
 _EXCEPTION_LABEL = {
-    "FRESHNESS_PRESSURE": "신선도 압박",
-    "CAPACITY_PRESSURE": "용량 압박",
+    "FRESHNESS_PRESSURE": "신선도 확인 필요",
+    "CAPACITY_PRESSURE": "창고 여유 확인 필요",
 }
 
+#  ── 사용자 표시 사전 ─────────────────────────────────────────────────────
+#
+#  ★ **표시만 바꾼다.** 여기 있는 것은 전부 물류가 이미 판정해 준 값을 사람 말로 옮기는
+#    사전이다. 숫자를 보고 상태를 다시 매기지 않는다 — 그 판정의 주인은 도메인이다.
+#
+#  ★ **키는 실제 계약값이다.** 각 사전에 정본 위치를 적어 둔다. 계약에 없는 상태를
+#    지어내지 않고, 계약이 늘면 여기도 같이 는다.
 
-def _t(cols: list[tuple[str, str, str]], rows: list[dict], **kw) -> Table:
-    """표를 짧게 쓰기 위한 도우미. (키, 이름, 정렬) 세 쪽지로 칸을 만든다."""
+#  🔴 **회전(turnover)은 이 화면에 안 적는다** (#812).
+#
+#     종전에는 Lot 표에 「회전 잔여」·「회전 상태」 두 칸이 있었고 내부 어휘를 그대로
+#     옮긴 사전(`_TURNOVER_LABEL`: 정상 · 판매 우선 검토 · 회전목표 초과)이 여기 있었다.
+#     신선도 잔여 옆에 비슷한 숫자가 하나 더 서서, 사용자는 **둘 중 무엇을 봐야 하는지**
+#     알 수 없었다 — 회전은 회사 내부 관리 지표이고 「회전목표 초과」는 판매불가가
+#     아니라, 화면에서 둘을 나란히 두면 없는 위험처럼 읽힌다.
+#
+#     ⚠️ **계산도 정책도 그대로다.** `turnover.py` · `item_turnover_policies` ·
+#        Agent 판단(`query/tools.LotFact` · `status_query`) 어느 것도 안 건드렸고,
+#        `ConsoleInventoryLot.remaining_turnover_days` · `turnover_status` 도 응답에
+#        그대로 실린다. 빠진 것은 **이 표가 그 둘을 그리는 일** 하나뿐이다.
+#
+#     ★ 회전에서 나온 **업무 신호**는 남는다 — 「우선 출고 대상」 · 「폐기 검토 대상」
+#       (`_lot_action`)은 Backend 가 이미 낸 판정이고, 화면이 새로 만든 것이 아니다.
+
+#: 예약 상태. 정본 `app/logistics/outbound.py::ReservationStatus`.
+#:
+#: 🔴 **«할당» 이 무엇의 할당인지 적는다** (#812). 종전 「예약」·「일부 할당」은 실패나
+#:    보류처럼 읽혔다 — `RESERVED` 는 *"수량은 확보됐고 어느 Lot 에서 낼지만 아직"* 이라
+#:    정상 진행 상태다. 계약값(`ReservationStatus`)은 그대로 두고 **표시만** 바꾼다.
+#:
+#: ```text
+#: RESERVED             수량 확보 완료 · Lot 은 아직
+#: PARTIALLY_ALLOCATED  일부만 Lot 이 정해졌다
+#: ALLOCATED            전량 Lot 이 정해졌다 (아직 나간 것은 아니다)
+#: ```
+_RESERVATION_LABEL = {
+    "RESERVED": "수량 확보 · Lot 미배정",
+    "PARTIALLY_ALLOCATED": "일부 Lot 배정",
+    "ALLOCATED": "Lot 배정 완료",
+    "RELEASED": "예약 해제",
+    "CANCELLED": "취소",
+}
+
+#: 도착 건 진행 상태. 정본 `app/logistics/receipts.py::ReceiptStatus`.
+#: ★ 사용자가 볼 흐름은 **입고 예정 → 창고 도착 → 검수 → 재고 반영** 넷이다.
+_RECEIPT_LABEL = {
+    "ARRIVED": "창고 도착",
+    "INSPECTING": "검수 중",
+    "INSPECTED": "검수 완료",
+    "PUTAWAY_DONE": "재고 반영 완료",
+    "CLOSED": "종료",
+}
+
+#: 검수 판정. 정본 `app/logistics/inspections.py::InspectionVerdict`.
+_VERDICT_LABEL = {"PASS": "합격", "HOLD": "보류", "REJECT": "거절"}
+
+
+def _receipt_progress(row: Any) -> tuple[str, str]:
+    """도착한 물량 한 줄의 **처리 상태**와 **재고 처리**. 🔴 판정을 새로 만들지 않는다.
+
+    ```text
+    창고 도착        검수 전                      재고: 검수 대기
+    검수 완료        검수는 끝 · 재고 아직        재고: 반영 대기
+    처리 완료        stock_applied               재고: 재고 반영 완료
+    처리 완료        settled_without_stock (#805) 재고: 반영할 재고 없음
+    ```
+
+    🔴 **«입고 처리 완료» 와 «재고 반영 완료» 는 다른 사실이다** (#805). 수용할 것이
+       0 이라 재고를 안 만들고 끝난 입고도 **처리는 끝난 것**이다 — 「아직」으로 적으면
+       도착 요약에서는 빠진 건이 이 표에서만 영영 밀린 것처럼 보인다.
+
+    🔴 **실패라고 적지 않는다.** 만들 재고가 없던 것이지 처리가 실패한 것이 아니다.
+
+    ⚠️ **`accepted_qty_kg == 0` 으로 여기서 다시 판정하지 않는다.** 그 규칙의 주인은
+       `inbound_schedules.settled_without_stock` 하나다. 그 값이 `None`(그날 일정을
+       못 읽음)이면 둘을 가릴 수 없으므로 «—» 로 둔다 — 넘겨짚지 않는다.
+    """
+    if row.stock_applied:
+        return "처리 완료", "재고 반영 완료"
+    if row.settled_without_stock:
+        return "처리 완료", "반영할 재고 없음"
+    if row.receipt_status == "ARRIVED":
+        return "창고 도착", "검수 대기"
+    #  검수는 끝났는데 재고가 없다 — 「반영 대기」인지 「반영할 재고 없음」인지는
+    #  일정이 낸 사실로만 갈린다. 못 읽었으면 가리지 않는다.
+    if row.settled_without_stock is None:
+        return _label(_RECEIPT_LABEL, row.receipt_status) or "—", "—"
+    return "검수 완료", "반영 대기"
+
+
+def _label(table: dict[str, str], value: Any) -> str | None:
+    """사전에 있으면 사람 말로, 없으면 «—». **내부 코드를 그대로 내보내지 않는다.**"""
+    if value is None or value == "":
+        return None
+    return table.get(str(value), "—")
+
+
+def _lot_names(lots: Any) -> dict[str, str]:
+    """Lot 하나하나의 **사용자 표시명.** 🔴 **raw `lot_id` 를 쪼개지 않는다.**
+
+    구조화 칸(`item_name` · `received_at`)으로만 만들고, 같은 품목·같은 입고일 Lot 이
+    여럿일 때만 `lot_id` 정렬로 **안정된 순번**을 덧붙인다.
+
+    ```text
+    양파 · 08-12 입고
+    무 · 08-28 입고 · #1
+    무 · 08-28 입고 · #2
+    ```
+    """
+    groups: dict[tuple[str, Any], list[Any]] = {}
+    for lot in lots:
+        groups.setdefault((lot.item_name or lot.item_id, lot.received_at), []).append(lot)
+    out: dict[str, str] = {}
+    for (item, received), members in groups.items():
+        head = f"{item} · {_md(received)} 입고" if received is not None else str(item)
+        ordered = sorted(members, key=lambda one: one.lot_id)
+        for index, lot in enumerate(ordered, start=1):
+            out[lot.lot_id] = head if len(ordered) == 1 else f"{head} · #{index}"
+    return out
+
+
+def _lot_action(sell_priority: bool, disposal_candidate: bool) -> str:
+    """Lot 관리 조치. 🔴 **boolean 두 칸을 사용자가 조합하게 하지 않는다.**
+
+    ★ 이미 내려온 두 칸만 본다. 신선도 잔여 일수를 보고 둘 중 무엇도 다시 판단하지
+      않는다 — 판정의 주인은 `turnover` 다.
+    """
+    if sell_priority and disposal_candidate:
+        return "우선 출고 · 폐기 검토 대상"
+    if sell_priority:
+        return "우선 출고 대상"
+    if disposal_candidate:
+        return "폐기 검토 대상"
+    return "특이사항 없음"
+
+
+def _resv_name(row: ConsoleReservation) -> str:
+    """예약 한 건의 **사용자 표시명.** raw `reservation_id` · `sale_id` 를 안 쓴다.
+
+    🔴 **납기가 없으면 아무 말도 안 붙인다** (#812).
+
+    ```text
+    종전   무 · 납기 미정      «아직 안 정했다» 로 읽힌다 — 담당자가 정할 일이 아니다
+    고쳤다 무 · 납기 정보 없음  뜻은 맞지만 **모든 줄에 똑같이** 붙어 아무것도 안 가른다
+    지금   무                  없는 칸을 말하지 않는다
+    ```
+
+       `due_date` 는 Sales ↔ Logistics 계약에 납기 칸이 없어 **구조적으로 늘 비어 있다**
+       (`03_출고관리.md` §O-1: *"계약에 없어 항상 NULL(결함 아님 · #423)"* · 실측 0/495).
+       늘 같은 값인 꼬리표는 구분에도 못 쓰고 정보도 아니다 — 여섯 줄에 여섯 번 적힐 뿐이다.
+
+    ★ **계약이 납기를 주기 시작하면 저절로 붙는다.** 지운 것은 «없다» 는 말이지
+      날짜를 적는 길이 아니다.
+    """
+    item = row.item_name or row.item_id
+    due = _md(row.due_date)
+    return f"{item} · {due} 납기" if due else str(item)
+
+
+def _t(cols: list[tuple], rows: list[dict], **kw) -> Table:
+    """표를 짧게 쓰기 위한 도우미.
+
+    쪽지는 `(키, 이름, 정렬)` 셋이고, **네 번째로 너비**를 줄 수 있다.
+
+    ```text
+    ("item", "품목", "left")           너비는 균등 배분
+    ("item", "품목", "left", "14%")    이 표에서 이 칸은 14%
+    ```
+
+    🔴 **너비는 표마다 정한다** (#812). 칸이 넷인 표와 일곱인 표에 같은 규칙을 걸 수
+       없다 — 그 사실을 `Column.width` 주석에 적어 뒀다.
+    """
     return Table(
         columns=[
-            Column(key=k, label=lab, align=al, mono=(al == "right" or k in ("id", "lot")))
-            for k, lab, al in cols
+            Column(
+                key=쪽지[0],
+                label=쪽지[1],
+                align=쪽지[2],
+                mono=(쪽지[2] == "right" or 쪽지[0] in ("id", "lot")),
+                width=쪽지[3] if len(쪽지) > 3 else None,
+            )
+            for 쪽지 in cols
         ],
         rows=rows,
         **kw,
@@ -200,6 +387,14 @@ def _still_working(r: ConsoleReservation) -> bool:
     return not any(a.status == "SHIPPED" for a in r.allocations)
 
 
+#: 그날 우선도를 증명할 수 없을 때 칸에 붙이는 말.
+#:
+#: 🔴 **«기준일 당시 우선도 확인 불가» 라고 적지 않는다** (#812). 구현 사정(감지 이력이
+#:    그날 이하로 없다)이 그대로 드러나 사용자가 «내가 뭘 잘못 골랐나» 로 읽는다.
+#:    결과만 짧게 적고, **왜 그런지는 카드 footer 가 한 번 말한다.**
+_SEVERITY_UNKNOWN = "우선도 정보 없음"
+
+
 def _severity_at(row: ExceptionRow, as_of: date) -> tuple[str, str | None]:
     """그날 우선도. 🔴 **미래 값을 과거 화면으로 흘리지 않는다.**
 
@@ -226,16 +421,18 @@ def _severity_at(row: ExceptionRow, as_of: date) -> tuple[str, str | None]:
         return _SEVERITY.get(chosen.severity, chosen.severity), None
     if row.detection_history:
         # 이력은 있으나 기준일 이하 감지가 없다 — 그날 우선도를 증명할 수 없다.
-        return "—", "기준일 당시 우선도 확인 불가"
+        return "—", _SEVERITY_UNKNOWN
     # 이력 없는 옛 행(적용 전 생성) — 기존 규칙 그대로.
     detected = row.last_detected_as_of
     if detected is None or detected > as_of:
-        return "—", "기준일 당시 우선도 확인 불가"
+        return "—", _SEVERITY_UNKNOWN
     return _SEVERITY.get(row.severity, row.severity), None
 
 
 def _summary_pane(
     inv: ConsoleInventoryResponse,
+    inb: ConsoleInboundResponse,
+    ob: ConsoleOutboundResponse,
     live: tuple[ExceptionRow, ...],
     resolved: tuple[ExceptionRow, ...],
     uncertainties: tuple[str, ...],
@@ -253,33 +450,45 @@ def _summary_pane(
     ⚠️ **Lot 위험 수와 Exception 수는 다른 지표다.** 만료된 Lot 은 새 문제로 다시
        열지 않으므로, 재고·신선도 탭의 «폐기 검토» 를 여기 건수에 더하지 않는다.
     """
-    열린것 = [row for row in live if row.opened_as_of == as_of]
-    이어진것 = [row for row in live if row.opened_as_of < as_of]
-    용량압박 = [row for row in live if row.code == "CAPACITY_PRESSURE"]
+    newly_opened = [row for row in live if row.opened_as_of == as_of]
+    carried_over = [row for row in live if row.opened_as_of < as_of]
+    capacity_issues = [row for row in live if row.code == "CAPACITY_PRESSURE"]
 
-    #  Lot → 품목. 🔴 **못 찾으면 비워 둔다** — 지어내지 않는다.
-    lot_item = {lot.lot_id: lot.item_name for lot in inv.lots}
+    #  Lot → 사용자 표시명. 🔴 **못 찾으면 지어내지 않는다.**
+    lot_name = _lot_names(inv.lots)
 
-    def 문제_행(row: ExceptionRow, 상태: str) -> dict[str, str | float | int | None]:
-        우선도, 단서 = _severity_at(row, as_of)
-        품목 = lot_item.get(row.subject_id)
-        본날 = row.last_detected_as_of
+    def subject_name(row: ExceptionRow) -> str:
+        """문제의 대상을 사람 말로. **raw Lot ID 를 화면에 싣지 않는다.**
+
+        `detect.py` 가 여는 대상은 둘뿐이다 — `LOT` 과 `WAREHOUSE`.
+        Lot 이름을 못 찾는 경우(그날 잔량이 0 이라 목록에 없는 Lot)는
+        **품목을 지어내지 않고** 「Lot 정보 없음」으로 둔다.
+        """
+        if row.subject_type == "WAREHOUSE":
+            return "창고 전체"
+        return lot_name.get(row.subject_id) or "Lot 정보 없음"
+
+    def issue_row(row: ExceptionRow, state: str) -> dict[str, str | float | int | None]:
+        severity, hint = _severity_at(row, as_of)
+        last_seen = row.last_detected_as_of
         return {
             "kind": _EXCEPTION_LABEL.get(row.code, row.code),
-            "subject": f"{품목} · {row.subject_id}" if 품목 else row.subject_id,
-            "sev": 우선도 if 단서 is None else f"{우선도} ({단서})",
+            "subject": subject_name(row),
+            #  ★ 못 증명할 때는 «— (긴 설명)» 대신 **짧은 결과 한 마디만** 적는다.
+            #    이유는 카드 footer 가 한 번 말한다 (#812).
+            "sev": severity if hint is None else hint,
             "opened": _md(row.opened_as_of),
-            "seen": _md(본날) if 본날 is not None and 본날 <= as_of else "—",
-            "state": 상태,
+            "seen": _md(last_seen) if last_seen is not None and last_seen <= as_of else "—",
+            "state": state,
         }
 
-    문제_표 = [
-        *[문제_행(row, "신규") for row in 열린것],
-        *[문제_행(row, "지속 중") for row in 이어진것],
-        *[문제_행(row, "해소됨") for row in resolved],
+    issue_rows = [
+        *[issue_row(row, "신규") for row in newly_opened],
+        *[issue_row(row, "지속 중") for row in carried_over],
+        *[issue_row(row, "해소됨") for row in resolved],
     ]
 
-    미확인 = (
+    unconfirmed_note = (
         None
         if not uncertainties
         else Note(
@@ -290,104 +499,160 @@ def _summary_pane(
     )
 
     cap = inv.capacity
-    보장 = cap.guaranteed_capacity_kg
-    사용률 = None if 보장 is None or 보장 <= 0 else float(cap.used_capacity_kg / 보장 * 100)
-    여유 = None if 보장 is None else 보장 - cap.used_capacity_kg
+    guaranteed = cap.guaranteed_capacity_kg
+    usage_pct = (
+        None
+        if guaranteed is None or guaranteed <= 0
+        else float(cap.used_capacity_kg / guaranteed * 100)
+    )
+    headroom = None if guaranteed is None else guaranteed - cap.used_capacity_kg
+
+    #  ★ **업무 숫자를 맨 앞에 둔다** — 사용자가 먼저 볼 것은 재고이지 점검 건수가 아니다.
+    #    값은 전부 이미 읽어 온 read model 것이고 여기서 새로 세지 않는다.
+    shown_items = [it for it in inv.items if _on_screen(it.item_name)]
+    on_hand = sum((it.on_hand_qty_kg for it in shown_items), Decimal(0))
+    available = _sum([it.available_qty_kg for it in shown_items])
+    attention_lots = sum(
+        it.sell_priority_lot_count + it.disposal_candidate_lot_count for it in shown_items
+    )
+    open_issues = len(newly_opened) + len(carried_over)
+    working = [r for r in ob.reservations if _on_screen(r.item_name) and _still_working(r)]
 
     return Pane(
         key="summary",
         label="한눈에 보기",
         stats=[
-            Stat(label="신규", value=f"{len(열린것):,}", unit="건",
-                 detail=f"기준일 {as_of} 에 새로 열린 문제",
-                 tone="bad" if 열린것 else "good", raw=float(len(열린것))),
-            Stat(label="지속 중", value=f"{len(이어진것):,}", unit="건",
-                 detail="그 전에 열려 아직 해소되지 않은 문제",
-                 tone="warn" if 이어진것 else "good", raw=float(len(이어진것))),
-            Stat(label="해소", value=f"{len(resolved):,}", unit="건",
-                 detail="기준일에 조건이 없어져 닫힌 문제",
-                 tone="good", raw=float(len(resolved))),
-            Stat(label="용량 압박", value=f"{len(용량압박):,}", unit="건",
-                 detail="창고 자리 부족으로 열린 문제",
-                 tone="bad" if 용량압박 else "good", raw=float(len(용량압박))),
+            Stat(label="현재고", value=_kg(on_hand), unit="kg",
+                 detail=f"기준일 창고 보유량 · 품목 {len(shown_items)}종",
+                 tone="good" if on_hand > 0 else "warn", raw=_raw(on_hand)),
+            Stat(label="판매가능량",
+                 value=_kg(available) if available is not None else "—",
+                 unit="kg" if available is not None else None,
+                 detail=("예약을 뺀 팔 수 있는 양" if available is not None
+                         else "못 읽은 축이 있습니다 — 0 이 아닙니다"),
+                 tone="good" if available else "warn", raw=_raw(available)),
+            Stat(label="창고 여유", value=_kg(headroom) if headroom is not None else "—",
+                 unit="kg" if headroom is not None else None,
+                 detail=(f"보장 용량의 {usage_pct:.1f}% 사용" if usage_pct is not None
+                         else "보장 용량을 못 읽어 계산하지 않습니다"),
+                 tone="good" if headroom is not None and headroom > 0 else "warn",
+                 raw=_raw(headroom)),
+            Stat(label="확인할 문제", value=f"{open_issues:,}", unit="건",
+                 detail=(f"새로 열림 {len(newly_opened)}건 · 이어짐 {len(carried_over)}건"
+                         + (f" · 창고 여유 {len(capacity_issues)}건" if capacity_issues else "")),
+                 tone="bad" if open_issues else "good", raw=float(open_issues)),
         ],
         cards=[
             Card(
-                key="exceptions", title="기준일 물류 이상 현황",
-                subtitle="입고 후와 출고 후 점검이 장부에 남긴 문제입니다",
+                #  🔴 «지금» 이라고 적지 않는다 (#812) — 이 화면은 과거 기준일도 연다.
+                #     기준일은 화면 맨 위가 한 번 말한다.
+                key="progress", title="진행 중인 일",
+                subtitle="들어올 물량 · 내보낼 예약 · 먼저 봐야 할 재고입니다",
+                source_ref="inbound_schedules · inventory_reservations · inventory_lots",
+                stats=[
+                    #  🔴 「입고 예정」 칸을 뺐다 (#812) — 이 실행은 도착 전 상태를
+                    #     남기지 않아 어느 기준일에도 값이 없다. 이유는 `_inbound_pane`
+                    #     머리말에 적어 뒀다.
+                    Stat(label="처리 중 예약", value=f"{len(working):,}", unit="건",
+                         detail="아직 내보낼 일이 남은 예약",
+                         tone="warn" if working else "good",
+                         raw=float(len(working))),
+                    Stat(label="신선도 관리 대상", value=f"{attention_lots:,}", unit="Lot",
+                         detail="우선 출고하거나 폐기를 검토할 Lot",
+                         tone="warn" if attention_lots else "good", raw=float(attention_lots)),
+                    Stat(label="기준일에 해소", value=f"{len(resolved):,}", unit="건",
+                         detail="조건이 없어져 닫힌 문제",
+                         tone="good", raw=float(len(resolved))),
+                ],
+            ),
+            Card(
+                key="exceptions", title="확인할 일",
+                #  ★ **안내를 subtitle 로 접어 넣었다** (#812). 재무·판매 카드는 설명을
+                #    제목 옆 한 구절로 적고 색 박스를 안 쓴다 — 같은 관습을 따른다.
+                #    `lead` 는 **진짜 경고**(목록이 확정되지 않음)일 때만 뜬다.
+                subtitle="찾아서 적어 두기까지가 자동입니다 — 대응은 담당자가 정합니다",
                 source_ref="logistics_exceptions",
-                lead=미확인 or Note(
-                    tone="info",
-                    text=("물류 점검은 걷기에서 **입고 후와 출고 후** 각각 한 번씩 돕니다. "
-                          "어느 점검이 찾았는지는 장부에 남지 않아 **나누어 세지 않습니다.** "
-                          "감지와 기록까지가 자동이고, 대응 여부는 담당자가 정합니다."),
-                ),
+                lead=unconfirmed_note,
                 table=_t(
                     [("kind", "이상 유형", "left"), ("subject", "대상", "left"),
                      ("sev", "우선도", "left"), ("opened", "최초 감지", "left"),
                      ("seen", "최근 확인", "left"), ("state", "상태", "left")],
-                    문제_표,
-                    empty_text="기준일에 열려 있거나 해소된 물류 문제가 없습니다",
+                    issue_rows,
+                    empty_text="이 기준일에 열려 있거나 해소된 물류 문제가 없습니다",
                 ),
-                footer=("우선도 · 최근 확인은 마지막 갱신이 기준일 뒤면 «—» 로 둡니다 — "
-                        "그날 값을 증명할 수 없기 때문입니다."),
+                #  ★ 표 칸은 결과만 적고(「우선도 정보 없음」) **이유는 여기서 한 번** 말한다.
+                #    🔴 «어느 점검이 찾았는지 장부에 안 남아 나누어 세지 않는다» 는
+                #       걷기 내부 사정이라 뺐다 — 담당자가 할 일을 바꾸지 않는다.
+                footer="기준일 뒤에 본 값은 그날 값으로 쓰지 않아 «—» 로 둡니다.",
             ),
             Card(
                 key="capacity", title="창고 수용 여유",
-                subtitle="압박 건수는 위 장부에서, 아래 수치는 재고·정책 정본에서 옵니다",
+                subtitle="창고에 얼마나 더 받을 수 있는지입니다",
                 source_ref="inventory_moves · agent_policy_config",
                 stats=[
-                    Stat(label="현재 사용량", value=_kg(cap.used_capacity_kg), unit="kg",
-                         detail="기준일 원장 기준 · 화면 품목 필터보다 앞섭니다",
+                    Stat(label="창고 사용량", value=_kg(cap.used_capacity_kg), unit="kg",
+                         detail="기준일 창고 실물 합계",
                          raw=_raw(cap.used_capacity_kg)),
-                    Stat(label="보장 용량", value=_kg(보장) if 보장 is not None else "—",
-                         unit="kg" if 보장 is not None else None,
-                         detail="지금 활성 정책 값입니다 (기준일 정책 이력이 아닙니다)",
-                         raw=_raw(보장)),
+                    #  🔴 **이 둘만 «현재값» 이다** (#812). 용량 정책 표에 유효일 칸이
+                    #     없어 기준일로 되살릴 수 없다 (`capacity_basis =
+                    #     CURRENT_ACTIVE_POLICY`). 화면 맨 위가 «기준일 시점 값» 이라고
+                    #     말하므로, **다른 축인 칸은 그 자리에서 직접 말해야 한다.**
+                    Stat(label="보장 용량",
+                         value=_kg(guaranteed) if guaranteed is not None else "—",
+                         unit="kg" if guaranteed is not None else None,
+                         detail="현재값",
+                         raw=_raw(guaranteed)),
                     Stat(label="최대 수용량",
                          value=_kg(cap.burst_capacity_kg) if cap.burst_capacity_kg else "—",
                          unit="kg" if cap.burst_capacity_kg else None,
-                         detail="지금 활성 정책 값입니다", raw=_raw(cap.burst_capacity_kg)),
-                    Stat(label="추가 수용 가능량", value=_kg(여유) if 여유 is not None else "—",
-                         unit="kg" if 여유 is not None else None,
-                         detail=(f"보장 용량의 {사용률:.1f}% 사용" if 사용률 is not None
+                         detail="현재값", raw=_raw(cap.burst_capacity_kg)),
+                    Stat(label="추가 수용 가능량",
+                         value=_kg(headroom) if headroom is not None else "—",
+                         unit="kg" if headroom is not None else None,
+                         detail=(f"보장 용량의 {usage_pct:.1f}% 사용" if usage_pct is not None
                                  else "보장 용량을 못 읽어 계산하지 않습니다"),
-                         tone="good" if 여유 is not None and 여유 > 0 else "warn",
-                         raw=_raw(여유)),
+                         tone="good" if headroom is not None and headroom > 0 else "warn",
+                         raw=_raw(headroom)),
                 ],
             ),
             Card(
                 key="items", title="품목별 재고 현황",
-                subtitle=f"발표 화면은 {' · '.join(ITEMS)} 를 그립니다",
+                subtitle=" · ".join(ITEMS),
                 source_ref="inventory_lots · inventory_reservations",
-                lead=Note(
-                    tone="info",
-                    text=("**현재고는 기준일 원장 값이고, 판매가능량 · 예약량은 «지금» "
-                          "기준입니다.** 시간축이 달라 이 값들을 서로 빼거나 더하지 "
-                          "않습니다. 창고 사용량은 화면에 안 그리는 품목까지 포함한 "
-                          "실물 합계입니다."),
-                ),
+                #  🔴 종전 문구는 «판매가능량 · 예약량은 지금 기준» 이라고 적었는데
+                #     #760 이후로는 **넷 다 기준일 축**이다 (`_MIXED_AXIS_NOTE` 와
+                #     `console_service` 머리말이 정본). 같은 화면에서 두 설명이
+                #     서로 어긋나 있었다.
+                #  🔴 **안내문을 통째로 뺐다** (#812). 종전 두 문장은 각각
+                #     «기준일 시점 값입니다»(화면 맨 위가 이미 말한다)와 «창고 사용량은
+                #     화면에 안 그리는 품목까지 포함한 합계라 다를 수 있습니다» 였다.
+                #     뒤엣것은 **화면 품목 필터라는 내부 사정**이라, 사용자가 이 표를
+                #     읽거나 무엇을 할지 정하는 데 아무것도 보태지 않는다.
                 table=_t(
                     [("item", "품목", "left"), ("onhand", "현재고", "right"),
                      ("avail", "판매가능량", "right"), ("resv", "예약량", "right"),
-                     ("expired", "만료 수량", "right"), ("risk", "신선도 위험 Lot", "right")],
+                     #  ★ 「미할당 예약량」 → 예약·출고 탭과 같은 어휘로 맞춘다 (#812).
+                     ("left", "Lot 미배정", "right"),
+                     ("expired", "폐기 검토 수량", "right"), ("risk", "먼저 볼 Lot", "right")],
                     [
                         {
                             "item": it.item_name,
                             "onhand": _kg_cell(it.on_hand_qty_kg),
                             "avail": _kg_cell(it.available_qty_kg),
                             "resv": _kg_cell(it.reserved_qty_kg),
+                            "left": _kg_cell(it.unallocated_reserved_qty_kg),
                             "expired": _kg_cell(it.expired_qty_kg),
                             "risk": it.sell_priority_lot_count + it.expired_lot_count,
                         }
-                        for it in inv.items
-                        if _on_screen(it.item_name)
+                        for it in shown_items
                     ],
                     empty_text="기준일에 그릴 품목이 없습니다",
                 ),
-                footer=("판매가능량이 «—» 면 못 읽은 축이 있다는 뜻입니다 — 0 이 아닙니다. "
-                        "신선도 위험 Lot 은 우선판매 신호와 만료 Lot 을 함께 센 수이고, "
-                        "위 이상 건수와 같은 지표가 아닙니다."),
+                #  ★ 칸 이름으로 이미 읽히는 말은 적지 않는다 (#812). 남긴 둘은 **오해를
+                #    막는 것**이다 — 「—」를 0 으로 읽는 것과, 「먼저 볼 Lot」을 위 문제
+                #    건수와 같은 지표로 읽는 것.
+                footer=("판매가능량이 «—» 면 못 읽었다는 뜻입니다 — 0 이 아닙니다. "
+                        "먼저 볼 Lot 은 위 문제 건수와 다른 지표입니다."),
             ),
         ],
     )
@@ -403,29 +668,28 @@ def _stock_pane(
     disposal = sum(it.disposal_candidate_lot_count for it in inv.items)
     sell_priority = sum(it.sell_priority_lot_count for it in inv.items)
 
-    #  운송 중은 입고 쪽 사실이다. `None` 이면 «못 읽음» 이라 0 으로 적지 않는다.
-    transit = inb.in_transit
-    transit_kg = (
-        None if transit is None else sum((t.quantity_kg for t in transit), Decimal(0))
+    #  🔴 현재고 합계 밑에 적던 «입고 예정 N kg» 을 뺐다 (#812) — 이 실행은 도착 전
+    #     상태를 남기지 않아 늘 0 kg 이었다. 이유는 `_inbound_pane` 머리말에 있다.
+    #  ★ 표시 순서: 폐기 검토 → 우선 출고 → 신선도 잔여 적은 순 → 입고일 오래된 순.
+    #    🔴 **표시 순서일 뿐 업무 판정이 아니다** — 값은 read model 것 그대로다.
+    #    `None` 신선도는 맨 뒤로 보낸다. 모르는 값을 «가장 급한 것» 으로 올리지 않는다.
+    shown_lots = sorted(
+        (lo for lo in inv.lots if _on_screen(lo.item_name)),
+        key=lambda lo: (
+            not lo.disposal_candidate,
+            not lo.sell_priority,
+            (1, 0) if lo.remaining_freshness_days is None else (0, lo.remaining_freshness_days),
+            lo.received_at,
+            lo.lot_id,
+        ),
     )
-    first_eta = None
-    if transit:
-        etas = [t.expected_arrival_date for t in transit if t.expected_arrival_date]
-        first_eta = min(etas) if etas else None
-
-    if transit_kg is None:
-        transit_text = "운송 중 — 못 읽었습니다"
-    elif first_eta:
-        transit_text = f"운송 중 {_kg(transit_kg)} · {_md(first_eta)} 도착 예정"
-    else:
-        transit_text = f"운송 중 {_kg(transit_kg)}"
 
     if available is None:
         avail_detail = f"못 읽은 축이 있습니다 — {inv.available_qty_unresolved_reason}"
     else:
         #  ★ **예약·할당 축도 이제 기준일 값이다 (#760).** 그날 Lot(`lot_state_at`)과
         #    그날 예약(`reservation_state_at`)으로 세운 스냅샷을 정본에 먹인다.
-        avail_detail = "예약 · 할당 · 신선도 반영 서버 계산값 (기준일 축)"
+        avail_detail = "예약을 뺀 팔 수 있는 양"
 
     return Pane(
         key="stock",
@@ -433,7 +697,7 @@ def _stock_pane(
         stats=[
             Stat(
                 label="현재고 합계", value=_kg(on_hand, 1), unit="kg",
-                detail=transit_text,
+                detail=f"품목 {len(inv.items)}종",
                 tone="good" if on_hand > 0 else "warn", raw=_raw(on_hand),
             ),
             Stat(
@@ -444,260 +708,553 @@ def _stock_pane(
                 raw=_raw(available),
             ),
             Stat(
-                label="예약 총량", value=_kg(reserved, 1), unit="kg",
-                detail=f"활성 예약 {sum(it.active_reservation_count for it in inv.items)}건",
+                label="활성 예약 수량", value=_kg(reserved, 1), unit="kg",
+                detail=(f"활성 예약 {sum(it.active_reservation_count for it in inv.items)}건이 "
+                        "요구한 수량입니다"),
                 tone="warn" if reserved > 0 else "neutral", raw=_raw(reserved),
             ),
             Stat(
-                label="폐기 검토", value=f"{disposal:,}", unit="Lot",
-                detail=f"우선판매 신호 {sell_priority} Lot",
+                label="폐기 검토 대상", value=f"{disposal:,}", unit="Lot",
+                detail=f"우선 출고 대상 {sell_priority} Lot",
                 tone="bad" if disposal > 0 else "good", raw=float(disposal),
             ),
         ],
         cards=[
             Card(
-                key="reservation", title="재고 확보 · Reservation 현황",
-                subtitle="예약 총량 안에 Lot 할당량이 포함됩니다",
+                key="reservation", title="처리 중 예약",
+                subtitle="아직 내보낼 일이 남은 예약만 그립니다",
                 source_ref="inventory_reservations · inventory_allocations",
-                flow=["현재고", "Reservation 으로 수량 확보", "Lot Allocation",
-                      "실출고 SHIPPED", "원장 OUT · 현재고 감소"],
-                lead=Note(
-                    tone="info",
-                    text=("예약과 할당은 재고를 **바로 줄이지 않습니다.** 실제 재고 감소는 "
-                          "실출고 시점에 일어납니다. **판매가능량**은 서버가 예약 · 할당 · "
-                          "Lot 상태 · 신선도를 반영해 계산한 값입니다."),
-                ),
+                #  🔴 **절차 그림을 뺐다** (#812 · 입고 탭과 같은 이유).
+                #     `현재고 → 예약으로 수량 확보 → Lot 배정 → 출고 → 현재고 감소` 는
+                #     업무 절차 소개라 날짜를 바꿔도 안 바뀐다. 담당자가 할 일을 정하는
+                #     값이 아니라 아래 표가 주인이고, 절차 정본은 `03_출고관리.md` 다.
+                #  🔴 Reservation ID · Sale 참조는 본문에 싣지 않는다 — 값은 응답에 그대로 있다.
+                #  🔴 **「납기일」 칸을 뺐다** (#812). Sales ↔ Logistics 계약에 납기 칸이
+                #     없어 `due_date` 는 구조적으로 늘 비어 있고(#423 · 실측 495건 전부),
+                #     전 줄이 «—» 인 칸은 어떤 판단에도 쓸 수 없다. **숨긴 것이 아니라
+                #     없는 값이다** — 그 사실을 아래 footer 가 한 번 말한다. 계약이 납기를
+                #     주기 시작하면 이 칸을 되돌린다.
                 table=_t(
-                    [("id", "Reservation", "left"), ("item", "품목", "left"),
-                     ("need", "요구량", "right"), ("resv", "예약량", "right"),
-                     ("alloc", "Lot 할당", "right"), ("left", "미할당 잔여", "right"),
-                     ("due", "출고기한", "left"), ("state", "상태", "left")],
+                    [("item", "품목", "left"),
+                     ("need", "요구량", "right"), ("resv", "확보량", "right"),
+                     ("alloc", "Lot 배정", "right"), ("left", "Lot 미배정", "right"),
+                     ("state", "진행 상태", "left")],
                     [
                         {
-                            "id": r.reservation_id,
                             "item": r.item_name or r.item_id,
                             "need": _kg_cell(r.required_qty_kg),
                             "resv": _kg_cell(r.reserved_qty_kg),
                             "alloc": _kg_cell(r.allocated_qty_kg),
                             "left": _kg_cell(r.unallocated_qty_kg),
-                            "due": _md(r.due_date),
-                            "state": r.status,
+                            "state": _label(_RESERVATION_LABEL, r.status),
                         }
                         for r in ob.reservations
                         if _on_screen(r.item_name) and _still_working(r)
                     ],
-                    empty_text="확보된 재고가 없습니다",
+                    empty_text="처리 중인 예약이 없습니다",
                 ),
+                footer="Lot 미배정은 아직 어느 Lot 에서 낼지 안 정한 몫입니다 — 부족이 아닙니다.",
             ),
             Card(
-                key="lots", title="Lot 상태",
-                subtitle="기준일 원장 잔량 + turnover 계산 결과",
-                source_ref="inventory_moves · inventory_lots · item_turnover_policies",
+                key="lots", title="Lot 별 신선도",
+                subtitle="먼저 처리해야 할 Lot 을 위에 둡니다",
+                source_ref="inventory_moves · inventory_lots · item_storage_policies",
+                #  🔴 raw Lot ID · 내부 Zone 코드 · `ACTIVE` 는 싣지 않는다. Zone 은 공식
+                #     표시명이 저장소에 없어(정본은 `item_storage_policies.storage_zone`
+                #     코드뿐) 임의 해석 대신 칸을 뺀다 — 내부 코드보다 정보 없음이 낫다.
                 table=_t(
-                    [("lot", "Lot", "left"), ("item", "품목", "left"), ("grade", "등급", "left"),
-                     ("qty", "잔량", "right"), ("fresh", "신선도 잔여", "right"),
-                     ("turn", "회전 잔여", "right"), ("state", "Lot 상태", "left"),
-                     ("signal", "회전 Signal", "left")],
+                    #  ★ 신선도 하나만 남긴다 (#812) — 비슷한 숫자를 둘 세우지 않는다.
+                    #  🔴 **「Lot」 칸을 뺐다** (#812). 그 값은 `배추 · 03-17 입고` 라
+                    #     **품목 칸과 입고일 칸을 합친 것**이었고, 그 둘이 바로 옆에
+                    #     각각 서 있었다 — 같은 사실을 한 줄에 세 번 적고 있었다.
+                    #     쪼갤 수 있는 값은 쪼갠 칸으로 둔다.
+                    [("item", "품목", "left"), ("grade", "등급", "left"),
+                     ("qty", "잔량", "right"), ("received", "입고일", "left"),
+                     ("fresh", "신선도 잔여", "right"), ("action", "필요한 조치", "left")],
                     [
                         {
-                            "lot": lo.lot_id,
                             "item": lo.item_name or lo.item_id,
                             #  ★ 등급은 **넘겨짚지 않는다.** DB NULL 은 "미확정" 이다.
                             "grade": lo.grade or "등급 미확정",
                             "qty": _kg_cell(lo.remaining_qty_kg),
+                            "received": _md(lo.received_at),
                             "fresh": _days(lo.remaining_freshness_days),
-                            "turn": _days(lo.remaining_turnover_days),
-                            "state": lo.status,
-                            "signal": lo.turnover_status,
+                            "action": _lot_action(lo.sell_priority, lo.disposal_candidate),
                         }
-                        for lo in inv.lots
-                        if _on_screen(lo.item_name)
+                        for lo in shown_lots
                     ],
-                    empty_text="이 날짜에 살아 있는 Lot 이 없습니다",
+                    empty_text="이 날짜에 남아 있는 Lot 이 없습니다",
                 ),
-                footer="신선도 잔여가 음수인 Lot 은 폐기 검토 대상입니다.",
+                footer="급한 Lot 이 위에 옵니다 — 폐기 검토 · 우선 출고 · 신선도 잔여 순입니다.",
             ),
-            Card(
-                key="principle", title="재고 처리 원칙",
-                lead=_MIXED_AXIS_NOTE,
-                bullets=[
-                    "예약과 할당은 재고를 줄이지 않습니다 — 실출고 때 줄어듭니다",
-                    "판매가능량은 화면이 계산하지 않습니다. 서버 값을 그대로 씁니다",
-                    "등급 미확정 Lot 은 «미확정» 으로 적습니다 — 특으로 넘겨짚지 않습니다",
-                    "현재고 · Lot 잔량은 원장(inventory_moves)을 기준일까지 더한 값입니다",
-                    "Lot 상태는 저장된 값이 아니라 그날 사실에서 유도합니다",
-                ],
-            ),
+            #  🔴 **「재고 처리 원칙」 카드를 통째로 없앴다** (#812). 다섯 줄 전부가
+            #     «이 화면을 어떻게 읽어야 하나» 였고, 그중 셋은 다른 자리가 이미
+            #     말하고 있었다 — 시간축은 화면 맨 위 한 줄, 예약이 재고를 안 줄인다는
+            #     것은 위 예약 카드, 조치의 주인이 서버라는 것은 개발 쪽 규율이다.
+            #     **표가 스스로 읽히지 않아 설명을 붙여야 한다면 고칠 곳은 표다.**
         ],
     )
 
 
-def _inbound_pane(inb: ConsoleInboundResponse) -> Pane:
+#: 입고 내역처럼 **이력이 계속 쌓이는 표**에 한 번에 펼치는 최대 줄 수.
+#: 🔴 실측 290행이 8개월치로 나와 «지금 할 일» 이 묻혔다. 자르되 **몇 건을 덜 폈는지
+#:    footer 에 적는다** — 숨기는 것과 접는 것은 다르다.
+_MAX_HISTORY_ROWS = 20
+
+
+def _positive(value: Any) -> bool:
+    """**값이 있고 0 보다 큰가.** 🔴 `None`(모름)은 «있다» 로 친다 — 0 이 아니다."""
+    return value is None or value > 0
+
+
+def _receipt_columns(receipts: Any) -> list[tuple[str, str, str]]:
+    """도착 표의 칸을 **그날 값에 맞춰** 고른다.
+
+    🔴 **전 줄이 같은 값인 칸은 세우지 않는다** (#812). 실측(2026-03-24)에서 아홉 칸 중
+       다섯이 상수였다 — 보류 0 · 거절 0 · 검수 「합격」 · 처리 「처리 완료」 그리고
+       주문이 수용과 같은 숫자였다. 읽을 것은 세 칸(도착일 · 품목 · 수용)뿐인데
+       눈은 아홉 칸을 훑는다.
+
+    🔴 **숨기는 것과 다르다.** 「입고 예정」이나 「납기」처럼 *구조적으로 못 채우는*
+       값이 아니라, **그날 마침 0 이었을 뿐** 언제든 생길 수 있는 값이다 (검수가
+       HOLD·REJECT 를 내면 그날 칸이 그대로 선다). 그래서 지우지 않고 **그날의 사실로
+       고른다** — 칸이 떴다는 것 자체가 «볼 것이 있다» 는 신호가 된다.
+
+    ⚠️ **`None` 은 0 이 아니다.** 못 읽은 값이 한 줄이라도 있으면 그 칸은 세운다 —
+       모르는 것을 «없었다» 로 접으면 그 사실이 화면에서 사라진다.
+    """
+    #  ★ **이 표는 너비를 안 정한다 — 균등이 맞다** (#812).
+    #
+    #    칸이 상황에 따라 4~9개로 변하는 표라 고정 너비를 박으면 칸 수가 바뀔 때마다
+    #    어긋난다. 실제로 `9% · 9% · 11% · 나머지` 로 줘 봤더니 마지막 칸이 71% 를
+    #    가져가 **값이 앞쪽 29% 에 몰렸다** (실측). 균등 배분(칸 넷 → 274·266·282px)이
+    #    이 표에는 이미 고르다.
+    cols: list[tuple] = [("arrive", "도착일", "left"), ("item", "품목", "left")]
+    #  ★ 주문과 수용이 한 줄도 안 갈리면 같은 숫자를 두 번 적는 것이다.
+    if any(r.ordered_qty_kg != r.accepted_qty_kg for r in receipts):
+        cols.append(("ord", "주문", "right"))
+    cols.append(("acc", "수용", "right"))
+    if any(_positive(r.hold_qty_kg) for r in receipts):
+        cols.append(("hold", "보류", "right"))
+    if any(_positive(r.rejected_qty_kg) for r in receipts):
+        cols.append(("rej", "거절", "right"))
+    if any(r.inspection_verdict != "PASS" for r in receipts):
+        cols.append(("verdict", "검수 결과", "left"))
+    #  ★ 「처리 상태」와 「재고 처리」는 완료의 두 축이다 (#805). 진행 중인 건이 하나도
+    #    없으면 앞 칸은 전 줄 «처리 완료» 라 아무것도 안 가른다 — 뒤 칸만 남긴다.
+    if any(_receipt_progress(r)[0] != "처리 완료" for r in receipts):
+        cols.append(("state", "처리 상태", "left"))
+    cols.append(("applied", "재고 처리", "left"))
+    return cols
+
+
+def _arrival_alerts(summary: Any) -> list[Stat]:
+    """도착 처리가 **막혀 있을 때만** 뜨는 칸.
+
+    🔴 **0 을 자리 채우기로 그리지 않는다** (#812). 이 둘은 «지금 손봐야 할 일이 있다»
+       는 경보이지 상시 지표가 아니다 — 늘 `0건` 으로 떠 있으면 진짜 1 이 된 날에도
+       눈에 안 띈다. 값이 생기면 그때 나타난다.
+
+    ⚠️ **없앤 것이 아니라 조건부다.** 도착 전 상태 목록이 비어 있는 동안에는 둘 다
+       구조적으로 0 이고(위 머리말), 그 목록이 채워지는 날 이 칸들이 그대로 돌아온다.
+    """
+    alerts: list[Stat] = []
+    if summary.blocked_count:
+        alerts.append(
+            Stat(label="처리 보류", value=f"{summary.blocked_count:,}", unit="건",
+                 detail="입고 처리에 필요한 정보가 없습니다",
+                 tone="warn", raw=float(summary.blocked_count))
+        )
+    if summary.unresolved_count:
+        alerts.append(
+            Stat(label="확인 필요", value=f"{summary.unresolved_count:,}", unit="건",
+                 detail="도착 여부를 판정할 근거가 없습니다",
+                 tone="warn", raw=float(summary.unresolved_count))
+        )
+    return alerts
+
+
+def _receipt_by_item(receipts: Any) -> list[dict[str, str | float | int | None]]:
+    """도착한 물량을 **품목별로** 묶는다.
+
+    ★ 새 판정이 아니라 **합계**다 (#812). 아래 표는 도착 건을 한 줄씩 늘어놓아 그날
+      무엇이 얼마나 들어왔는지는 291줄을 눈으로 더해야 알 수 있었다. 같은 값을 품목
+      축으로 한 번 더 보여 준다 — 원본 표는 그대로 있다.
+
+    🔴 **`None` 은 0 이 아니다.** 수용량을 못 읽은 건이 섞이면 그 품목 합계는 «—» 다 —
+       아는 것만 더해서 아는 척하지 않는다 (`_sum` 과 같은 규율).
+    """
+    묶음: dict[str, list[Any]] = {}
+    for r in receipts:
+        묶음.setdefault(r.item_name or r.item_id, []).append(r)
+    rows: list[dict[str, str | float | int | None]] = []
+    #  ★ 많이 들어온 품목을 위에 둔다. 합계를 못 낸 품목은 맨 뒤다.
+    for name, 것들 in 묶음.items():
+        수용 = _sum([r.accepted_qty_kg for r in 것들])
+        rows.append(
+            {
+                "item": name,
+                "count": len(것들),
+                "acc": _kg_cell(수용),
+                "_sort": float(수용) if 수용 is not None else -1.0,
+            }
+        )
+    rows.sort(key=lambda row: -float(row["_sort"] or 0))
+    for row in rows:
+        del row["_sort"]
+    return rows
+
+
+def _receipt_progress_counts(receipts: Any) -> list[tuple[str, int, str, str]]:
+    """도착한 건을 **재고 처리 결과별로** 센다.
+
+    🔴 **판정을 새로 만들지 않는다.** 아래 표의 「재고 처리」 칸과 **같은 함수**
+       (`_receipt_progress`)에게 물어 그 결과를 세기만 한다 — 다른 식으로 세면
+       위 숫자와 아래 표가 갈린다.
+
+    ⚠️ 완료의 형태가 둘이다 (#805). 「반영할 재고 없음」도 **정상 완료**라 경고색을
+       쓰지 않는다 — 수용할 것이 0 이었을 뿐 실패가 아니다.
+    """
+    #  ★ 순서가 곧 표시 순서다. `_receipt_progress` 가 내는 어휘 그대로 쓴다.
+    쓸것 = [
+        ("재고 반영 완료", "재고가 선 입고", "good"),
+        ("반영할 재고 없음", "수용할 물량이 없어 끝난 입고", "neutral"),
+    ]
+    센것 = {label: 0 for label, _, _ in 쓸것}
+    처리중 = 0
+    for r in receipts:
+        _, applied = _receipt_progress(r)
+        if applied in 센것:
+            센것[applied] += 1
+        else:
+            처리중 += 1
+    out = [
+        (label, 센것[label], detail, tone)
+        for label, detail, tone in 쓸것
+        if 센것[label]
+    ]
+    #  ★ 아직 안 끝난 건은 **0 이어도 적는다** — 「할 일 없음」이 사용자가 볼 값이다.
+    out.append(
+        ("처리 중", 처리중, "아직 두 완료 어디에도 안 닿은 건", "warn" if 처리중 else "good")
+    )
+    return out
+
+
+def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
+    """입고 · 검수. **보여 주는 기간은 그 달 1일 ~ 기준일이다.**
+
+    🔴 **누계를 «도착 건수» 라고 적지 않는다** (#812).
+
+    `receipt_state_at` 의 WHERE 는 `arrived_at <= as_of` 하나뿐이라 **아래쪽 경계가
+    없다.** 그래서 이 화면은 실행 첫날부터의 누계를 적고 있었다 — 실측:
+
+    ```text
+    도착 291건 · 151,921 kg   =  2026-01-06 ~ 2026-09-01   ← 8개월 누계
+    기준일                       2026-09-14
+    ```
+
+    한 달도 월초부터도 아닌 «처음부터 전부» 라, 어제 열어도 오늘 열어도 같은 숫자였고
+    화면 어디에도 **언제부터인지 안 적혀 있었다.** 재고 담당자가 «오늘 할 일» 을 정하는
+    데 쓸 수 없는 값이다.
+
+    ★ **그 달 1일부터 센다.** 월 실적과 대조하기 쉽고, 월초에도 「마지막 입고」가
+      며칠 전인지 따로 말해 주므로 빈 화면이 되지 않는다.
+
+    ⚠️ **응답에서 지운 것이 아니다.** `inb.receipts` 에는 기준일까지 전부 그대로 실려
+       있고, 여기서는 **그릴 것만 고른다** — 화면 품목 필터(`_on_screen`)와 같은 결이다.
+
+    🔴 **「입고 예정」(운송 중) 을 화면에서 뺐다** (#812).
+
+    이 축(`inb.in_transit`)은 *"입고 일정에 올라 있고 아직 창고에 도착하지 않은 건"*
+    인데, 이 저장소의 걷기는 **일정 행을 도착일에 만든다** (`created_as_of` =
+    `expected_arrival_date` · 실측 291/495 전부 간격 0). 그래서 일정이 있는데 Receipt 가
+    없는 날이 **하루도 없고**, 이 목록은 어느 기준일에도 늘 비어 있다.
+
+    ```text
+    화면이 적던 말        «이 기준일에 들어올 예정인 입고가 없습니다»
+    실제 사실             «이 실행은 도착 전 상태를 남기지 않는다»
+    ```
+
+    앞엣말은 **0 건을 확인했다는 주장**이라 사실과 다르다. 카드 · 흐름 단계 · 요약
+    숫자 셋을 다 뺀 이유가 그것이다 — 값을 숨긴 것이 아니라 **없는 값을 있는 척하지
+    않는 것**이다.
+
+    ⚠️ **도메인은 그대로다.** `inbound_schedules.in_transit_from` · `ConsoleInboundResponse
+       .in_transit` · Agent 경로 어느 것도 안 건드렸고, 응답에도 그대로 실린다.
+       `created_as_of` 를 고치는 일은 걷기 쪽이고 이번 이슈 범위 밖이다.
+
+    ⚠️ **못 읽은 경우(`None`)가 조용히 사라지지 않는다.** 그 사실은 도착 요약의
+       「확인 필요」(`unresolved_count`) 가 이미 자기 숫자로 말한다.
+    """
     summary = inb.arrival_summary
-    transit = inb.in_transit
+    월초 = as_of.replace(day=1)
+    기간 = f"{_md(월초)} ~ {_md(as_of)}"
+    #  ★ 이 달에 도착한 것만 센다. 아래 표 · 품목별 · 요약 숫자가 **같은 모집단**이다.
+    이달 = [r for r in inb.receipts if r.arrived_at >= 월초]
+    수용합계 = _sum([r.accepted_qty_kg for r in 이달])
+    #  ★ **마지막 입고는 기간 밖에서도 찾는다** (#812). 이 달에 한 건도 없으면 「0건」만
+    #    남아 화면이 «왜 비었는지» 를 안 말한다 — 실측 09-14 기준 마지막 입고가 09-01 로
+    #    13일 전이었고, 그 사실이 0 보다 중요하다.
+    최근도착 = max((r.arrived_at for r in inb.receipts), default=None)
+
+    #  ★ 아직 처리가 안 끝난 건을 **맨 위로** 올리고, 그다음 최근 도착 순이다.
+    #    🔴 잘라내도 «아직 할 일» 은 안 잘린다 — 그것이 이 정렬의 이유다.
+    #    판정은 하지 않는다. 재고가 섰거나(`stock_applied`) 수용 0 으로 끝난
+    #    (`settled_without_stock` · #805) 건은 둘 다 **끝난 것**이다.
+    receipts = sorted(
+        (r for r in 이달 if _on_screen(r.item_name)),
+        key=lambda r: (
+            bool(r.stock_applied or r.settled_without_stock),
+            -r.arrived_at.toordinal(),
+        ),
+    )
+    shown_receipts = receipts[:_MAX_HISTORY_ROWS]
+    hidden_receipts = len(receipts) - len(shown_receipts)
+    receipt_rows: list[dict[str, str | float | int | None]] = []
+    for r in shown_receipts:
+        #  🔴 «처리 완료» 와 «재고 반영 완료» 를 한 칸에 담지 않는다 (#805).
+        state, applied = _receipt_progress(r)
+        receipt_rows.append(
+            {
+                "arrive": _md(r.arrived_at),
+                "item": r.item_name or r.item_id,
+                "ord": _kg_cell(r.ordered_qty_kg),
+                "acc": _kg_cell(r.accepted_qty_kg),
+                "hold": _kg_cell(r.hold_qty_kg),
+                "rej": _kg_cell(r.rejected_qty_kg),
+                "verdict": _label(_VERDICT_LABEL, r.inspection_verdict),
+                "state": state,
+                "applied": applied,
+            }
+        )
 
     return Pane(
         key="inbound",
         label="입고 · 검수",
+        #  🔴 **움직이는 숫자만 세운다** (#812).
+        #
+        #     종전 넷(도착 예정 · 도착 지연 · 처리 보류 · 확인 필요)은 전부 «도착 전
+        #     상태 목록» 에서 세는데 그 목록이 구조적으로 늘 비어 있다(위 머리말).
+        #     그래서 어느 기준일을 열어도 `0건 · 0건 · 0건 · 0건` 이었다 — 네 칸이
+        #     자리만 차지하고 **아무것도 알려 주지 않았다.**
+        #
+        #     대신 그날 실제로 도착한 건(`inb.receipts` · 실측 495행)을 센다. 판정은
+        #     새로 만들지 않고 **아래 표와 같은 주인**(`_receipt_progress`)에게 묻는다 —
+        #     그래야 위 숫자와 아래 표가 어긋날 자리가 없다.
         stats=[
-            Stat(label="오늘 도착 예정", value=f"{summary.due_count:,}", unit="건",
-                 tone="good" if summary.due_count else "neutral",
-                 raw=float(summary.due_count)),
-            Stat(label="연체", value=f"{summary.overdue_count:,}", unit="건",
-                 detail="도착 예정일이 지났는데 안 들어온 것",
-                 tone="bad" if summary.overdue_count else "good",
-                 raw=float(summary.overdue_count)),
-            Stat(label="막힘", value=f"{summary.blocked_count:,}", unit="건",
-                 tone="warn" if summary.blocked_count else "neutral",
-                 raw=float(summary.blocked_count)),
-            Stat(label="판정 불가", value=f"{summary.unresolved_count:,}", unit="건",
-                 detail=f"원천 상태 {summary.source_status}",
-                 tone="warn" if summary.unresolved_count else "neutral",
-                 raw=float(summary.unresolved_count)),
+            *_arrival_alerts(summary),
+            #  🔴 **기간을 숫자 옆에 적는다** (#812). 종전에는 «기준일까지» 라고만 적어
+            #     8개월 누계가 그날 실적처럼 읽혔다.
+            Stat(label="이 달 도착", value=f"{len(이달):,}", unit="건",
+                 detail=기간, tone="neutral", raw=float(len(이달))),
+            #  ★ **건수만으로는 얼마가 들어왔는지 모른다** (#812). 같은 1건이 17kg 일
+            #    수도 1,435kg 일 수도 있다. 합계는 표에 이미 있는 수용량을 더한 것이고,
+            #    못 읽은 건이 섞이면 «—» 다 — 0 으로 메우지 않는다.
+            Stat(label="수용 합계",
+                 value=_kg(수용합계) if 수용합계 is not None else "—",
+                 unit="kg" if 수용합계 is not None else None,
+                 detail=("검수를 통과해 재고가 된 양" if 수용합계 is not None
+                         else "못 읽은 건이 있습니다 — 0 이 아닙니다"),
+                 tone="neutral", raw=_raw(수용합계)),
+            Stat(label="마지막 입고",
+                 value=_md(최근도착) or "—",
+                 detail=(f"{(as_of - 최근도착).days}일 전" if 최근도착 is not None
+                         else "이 실행에 도착 기록이 없습니다"),
+                 #  ★ 기간 밖 값이라 «이 달» 이 0 건이어도 여기는 차 있다.
+                 tone="warn" if 최근도착 is not None and (as_of - 최근도착).days > 7
+                 else "neutral",
+                 raw=None),
+            *(
+                Stat(label=label, value=f"{count:,}", unit="건",
+                     detail=detail, tone=tone, raw=float(count))
+                for label, count, detail, tone in _receipt_progress_counts(이달)
+            ),
         ],
         cards=[
+            #  🔴 **「입고 처리 흐름」 카드를 없앴다** (#812).
+            #
+            #     `실매입 확정 → 창고 도착 → 검수 → 입고 처리 완료` 는 **업무 절차
+            #     소개**이지 그날의 사실이 아니다. 날짜를 바꿔도 안 바뀌고, 담당자가
+            #     보고 할 일을 정하는 값도 아니다 — 매일 여는 화면의 첫 칸을 차지할
+            #     이유가 없다.
+            #
+            #     ⚠️ 절차 자체는 그대로다. 정본은 `docs/logistics/services/01_입고관리.md`
+            #        이고, 화면에는 그 절차가 **낸 결과**(도착 · 검수 · 재고 처리)가 아래
+            #        표로 이미 서 있다.
+            #  ★ **한 줄씩 늘어놓은 표 위에 «무엇이 얼마나» 를 먼저 둔다** (#812).
+            #    아래 표는 도착 건을 시간순으로 적어, 그날 무엇이 많이 들어왔는지 알려면
+            #    291줄을 눈으로 더해야 했다. 같은 값의 품목 축 합계다 — 새 사실이 아니다.
             Card(
-                key="flow", title="입고 처리 흐름",
-                flow=["매입 승인", "in_transit", "도착 Receipt", "검수", "입고 완료 · 원장 IN"],
-                lead=Note(
-                    tone="info",
-                    text="**도착과 입고 완료는 다릅니다.** 검수를 통과해야 재고가 늘어납니다.",
-                ),
-            ),
-            Card(
-                key="transit", title="운송 중",
-                subtitle="아직 도착하지 않았습니다 — 재고가 아닙니다",
-                source_ref="확정 매입 · 도착 예정 축",
-                lead=(
-                    None if transit is not None else Note(
-                        tone="warn",
-                        text=("운송 중 목록을 **못 읽었습니다** — 비어 있는 것과 다릅니다. "
-                              f"원천 상태 `{inb.in_transit_status}`."),
-                    )
-                ),
+                key="by_item", title="품목별 입고",
+                subtitle=f"{기간} 에 들어온 양입니다",
                 table=_t(
-                    [("id", "Inbound", "left"), ("item", "품목", "left"),
-                     ("qty", "수량", "right"), ("eta", "도착 예정", "left")],
-                    [
-                        {
-                            "id": t.inbound_id,
-                            "item": t.item,
-                            "qty": _kg_cell(t.quantity_kg),
-                            "eta": _md(t.expected_arrival_date),
-                        }
-                        for t in (transit or [])
-                    ],
-                    empty_text=(
-                        "운송 중인 물량이 없습니다"
-                        if transit is not None
-                        else "값을 못 읽었습니다 — 0 이 아닙니다"
-                    ),
+                    [("item", "품목", "left"), ("count", "건수", "right"),
+                     ("acc", "수용", "right")],
+                    _receipt_by_item(이달),
+                    empty_text="이 달에 도착한 물량이 없습니다",
                 ),
             ),
             Card(
-                key="receipt", title="도착 · Receipt 현황",
+                key="receipt", title="입고 처리 현황",
+                subtitle=f"{기간} · 검수와 재고 처리 상태입니다",
                 #  🔴 `arrival_schedule` 은 **표가 아니라 계약 필드명**이었다.
                 #     실제 출처는 이 둘이다.
                 source_ref="inbound_receipts · inbound_inspections",
+                #  🔴 Receipt ID 는 본문에 싣지 않는다 — 사용자가 읽을 값이 아니다.
                 table=_t(
-                    [("id", "Receipt", "left"), ("item", "품목", "left"),
-                     ("ord", "주문", "right"), ("acc", "합격", "right"),
-                     ("arrive", "도착일", "left"), ("state", "상태", "left"),
-                     ("verdict", "검수", "left"), ("applied", "재고 반영", "left")],
-                    [
-                        {
-                            "id": r.receipt_id,
-                            "item": r.item_name or r.item_id,
-                            "ord": _kg_cell(r.ordered_qty_kg),
-                            "acc": _kg_cell(r.accepted_qty_kg),
-                            "arrive": _md(r.arrived_at),
-                            "state": r.receipt_status,
-                            "verdict": r.inspection_verdict,
-                            "applied": "반영됨" if r.stock_applied else "아직",
-                        }
-                        for r in inb.receipts
-                        if _on_screen(r.item_name)
-                    ],
-                    empty_text="이 날짜까지 도착한 Receipt 이 없습니다",
+                    _receipt_columns(shown_receipts),
+                    receipt_rows,
+                    empty_text="이 날짜까지 창고에 도착한 물량이 없습니다",
                 ),
-                footer="재고가 되는 것은 주문 수량이 아니라 **합격 수량**입니다.",
+                #  ★ 접은 건수는 **반드시 남긴다** — 숨기는 것과 접는 것은 다르다.
+                footer=(
+                    "아직 안 끝난 건이 위에 옵니다."
+                    + (f" 최근 {len(shown_receipts)}건만 폈고 나머지 "
+                       f"{hidden_receipts:,}건은 접었습니다."
+                       if hidden_receipts > 0 else "")
+                ),
             ),
         ],
     )
 
 
-def _outbound_pane(
-    ob: ConsoleOutboundResponse, as_of: date, *, conn: Any, sim_run_id: str
-) -> Pane:
+def _outbound_pane(ob: ConsoleOutboundResponse, inv: ConsoleInventoryResponse) -> Pane:
+    """예약 · 출고.
+
+    ★ **기준일을 안 받는다** (#812). 후보를 «지금» 재고에서 구하던 때는 이 함수가
+      `as_of` 를 들고 다니며 후보 이름과 신선도를 그 날짜로 맞춰야 했다. 이제 재료가
+      전부 그날 축으로 들어오므로(`inv.lots` · `ob.reservations`) 날짜를 쥘 이유가 없고,
+      **쥐지 않으면 섞을 수도 없다.**
+    """
     #  ★ FEFO 후보는 **예약 한 건마다 그린다** — 예약이 없으면 그릴 대상도 없다.
     #    예약이 없을 때 Lot 을 신선도순으로 늘어놓아 «후보» 라고 부르지 않는다 —
     #    그건 서비스에 없는 계산을 화면이 새로 만드는 것이다 (#415).
     fefo_rows: list[dict] = []
     #  ★ 화면이 그리는 품목만 · 그날 아직 일이 남은 예약만 — 범위 밖 품목이나 이미 다
     #    나간 예약에 FEFO 를 물을 이유가 없다.
-    품목_예약 = [r for r in ob.reservations if _on_screen(r.item_name)]
-    화면_예약 = [r for r in 품목_예약 if _still_working(r)]
-    끝난_예약 = len(품목_예약) - len(화면_예약)
+    item_reservations = [r for r in ob.reservations if _on_screen(r.item_name)]
+    shown_reservations = [r for r in item_reservations if _still_working(r)]
+    settled_count = len(item_reservations) - len(shown_reservations)
     #  🔴 **FEFO 는 «아직 Lot 을 안 고른 몫» 이 있는 예약에만 그린다.** 목표량이 0 이면
     #     `allocate_reserved_stock_fefo` 도 아무것도 안 하므로 후보를 구할 이유가 없다.
     #     예약 164건에 164번 묻던 것이 대시보드 8.6초의 태반이었다 (마스터 실측 2026-09-15).
     #  🔴 **묻는 것은 품목마다 한 번이다** (2026-09-15). 후보는 예약과 무관한 값이라
     #     (`console_service.get_fefo_candidates_by_item`) 같은 품목 예약 여덟 건이 같은 답을
-    #     여덟 번 받고 커넥션도 여덟 번 열던 자리다. 예약이 없으면 **묻지도 않는다.**
-    물을_예약 = [r for r in 화면_예약 if r.unallocated_qty_kg > 0]
-    후보_by_item = (
+    #     여덟 번 받던 자리다. 예약이 없으면 **묻지도 않는다.**
+    #  🔴 **넘기는 예약은 «그린 것» 이 아니라 그날 **전부** 다** (#812). 남의 예약이
+    #     잡아 둔 몫도 그 Lot 에서 빠져야 가용량이 부풀지 않는다.
+    fefo_targets = [r for r in shown_reservations if r.unallocated_qty_kg > 0]
+    candidates_by_item = (
         get_fefo_candidates_by_item(
-            conn=conn, sim_run_id=sim_run_id,
-            item_ids=[r.item_id for r in 물을_예약], as_of=as_of,
+            lots=inv.lots,
+            reservations=ob.reservations,
+            item_ids=[r.item_id for r in fefo_targets],
         )
-        if 물을_예약
+        if fefo_targets
         else {}
     )
-    for resv in 물을_예약:
-        for rank, cand in enumerate(후보_by_item.get(resv.item_id, ()), start=1):
-            fefo_rows.append(
-                {
-                    "resv": resv.reservation_id,
-                    "lot": cand.lot_id,
-                    "grade": cand.grade or "등급 미확정",
-                    "qty": _kg_cell(cand.available_qty_kg),
-                    "fresh": _days(cand.remaining_freshness_days),
-                    "rank": rank,
-                }
-            )
+    #  🔴 **후보는 품목당 한 벌이다 — 예약마다 다시 그리지 않는다** (#812).
+    #
+    #     종전에는 예약 한 건마다 그 품목의 후보 전부를 다시 적었다. 무 예약이 다섯이면
+    #     같은 후보 일곱 줄이 **다섯 번** 나와 56줄이 됐는데, 실제 사실은 19개뿐이었다.
+    #
+    #     ```text
+    #     무 · 772 kg · 08-19 입고 · 가용 125 kg    ┐
+    #     무 · 463 kg · 08-19 입고 · 가용 125 kg    ├ 같은 Lot 하나다
+    #     무 ·  43 kg · 08-19 입고 · 가용 125 kg    ┘
+    #     ```
+    #
+    #     🔴 **읽는 사람이 더하게 된다.** 세 줄을 보면 375 kg 가 있는 것 같지만 실물은
+    #        125 kg 한 덩어리다 — 가용량은 예약마다 따로 있는 값이 아니라 **그 Lot 에서
+    #        아직 아무 할당에도 안 묶인 몫** 하나다 (`ConsoleFefoCandidate` 주석).
+    #
+    #     ★ 예약별 수치(요구 · 확보 · Lot 배정 · 미배정)는 「재고 · 신선도」 탭의
+    #       「처리 중 예약」 표가 이미 예약 축으로 보여 준다. 여기는 **Lot 축**이다.
+    #
+    #  🔴 raw `lot_id` 를 표에 싣지 않는다 — Lot 은 **입고일**로 가른다.
+    #
+    #  ★ **카드를 품목마다 나눈다** (#812). 한 표에 몰면 품목 칸에 「배추」가 일곱 번,
+    #    「무」가 일곱 번 찍히고 순위가 중간에서 1 로 되돌아간다 — 19줄이 한 덩어리라
+    #    어디까지가 한 품목인지 눈으로 세야 했다. 후보는 원래 품목마다 독립이므로
+    #    카드도 그렇게 나누면 **품목 칸과 순위 설명이 둘 다 필요 없어진다.**
+    미배정합계: dict[str, Decimal] = {}
+    품목이름: dict[str, str] = {}
+    for resv in fefo_targets:
+        미배정합계[resv.item_id] = (
+            미배정합계.get(resv.item_id, Decimal(0)) + resv.unallocated_qty_kg
+        )
+        품목이름.setdefault(resv.item_id, resv.item_name or resv.item_id)
+
+    #  ★ 배정할 몫이 많은 품목을 위에 둔다 — 먼저 손봐야 할 것이 먼저 보인다.
+    순서 = sorted(
+        (item_id for item_id in candidates_by_item if candidates_by_item[item_id]),
+        key=lambda item_id: -float(미배정합계.get(item_id, Decimal(0))),
+    )
+    fefo_cards: list[Card] = [
+        Card(
+            key=f"fefo-{item_id}",
+            title=f"{품목이름.get(item_id, item_id)} 출고 후보",
+            #  ★ 배정해야 할 양은 **제 카드 머리에** 한 번 적는다. 줄마다 되풀이하던
+            #    「Lot 미배정」 칸이 그 자리였다.
+            subtitle=(f"Lot 미배정 {_kg(미배정합계.get(item_id, Decimal(0)))} kg · "
+                      "위에서부터 먼저 내보냅니다"),
+            source_ref="inventory_reservations · inventory_lots",
+            table=_t(
+                [("received", "입고일", "left"), ("grade", "등급", "left"),
+                 ("qty", "가용", "right"), ("fresh", "신선도 잔여", "right"),
+                 ("rank", "순위", "right")],
+                [
+                    {
+                        "received": _md(cand.received_at),
+                        "grade": cand.grade or "등급 미확정",
+                        "qty": _kg_cell(cand.available_qty_kg),
+                        "fresh": _days(cand.remaining_freshness_days),
+                        "rank": rank,
+                    }
+                    for rank, cand in enumerate(candidates_by_item[item_id], start=1)
+                ],
+                empty_text="추천할 출고 후보가 없습니다",
+            ),
+        )
+        for item_id in 순서
+    ]
+    fefo_rows = [row for card in fefo_cards if card.table for row in card.table.rows]
 
     return Pane(
         key="outbound",
         label="예약 · 출고",
         stats=[
-            Stat(label="예약", value=f"{len(화면_예약):,}", unit="건",
-                 detail=(f"전량 출고·해제된 {끝난_예약}건은 뺐습니다" if 끝난_예약 else None),
-                 tone="good" if 화면_예약 else "neutral",
-                 raw=float(len(화면_예약))),
-            Stat(label="FEFO 후보", value=f"{len(fefo_rows):,}", unit="건",
-                 detail="예약이 있어야 후보가 나옵니다",
+            Stat(label="예약", value=f"{len(shown_reservations):,}", unit="건",
+                 detail=(f"전량 출고·해제된 {settled_count}건은 뺐습니다"
+                         if settled_count else None),
+                 tone="good" if shown_reservations else "neutral",
+                 raw=float(len(shown_reservations))),
+            Stat(label="Lot 미배정", value=f"{len(fefo_targets):,}", unit="건",
+                 detail="아직 어느 Lot 에서 낼지 안 정한 예약",
+                 tone="warn" if fefo_targets else "neutral",
+                 raw=float(len(fefo_targets))),
+            #  ★ **«후보 건수» 가 아니라 «후보 Lot 수» 다** — 예약마다 세던 때는 같은
+            #    Lot 이 여러 번 세어져 숫자가 부풀었다 (실측 19 → 56).
+            #  🔴 **«자동 배정» 처럼 보이면 안 된다** — 도메인 계약도 «추천만 한다 —
+            #     고르지도 쓰지도 않는다» 이다 (`get_fefo_candidates_by_item`). 카드가
+            #     품목마다 서므로 그 말은 **여기 한 번만** 적는다.
+            Stat(label="출고 후보 Lot", value=f"{len(fefo_rows):,}", unit="개",
+                 detail="추천입니다 — 자동으로 배정되지 않습니다",
                  tone="neutral", raw=float(len(fefo_rows))),
         ],
-        cards=[
+        #  ★ 그릴 후보가 하나도 없어도 **카드는 선다** — 빈 화면이 «왜 없는지» 를
+        #    말해야 한다. 예약이 없으면 후보도 없다는 것이 그 답이다.
+        cards=fefo_cards or [
             Card(
-                key="fefo", title="FEFO 후보",
-                subtitle="먼저 상하는 것을 먼저 내보냅니다 (First Expired, First Out)",
+                key="fefo", title="신선도 우선 출고 후보",
+                subtitle="신선도가 먼저 소진되는 Lot 부터 추천합니다",
                 source_ref="inventory_reservations · inventory_lots",
-                lead=Note(
-                    tone="info",
-                    text=("후보는 **고르는 것이 아닙니다** — 자동 Allocation 이 아닙니다. "
-                          "예약이 없으면 후보도 없습니다. **예약 · 할당 목록은 기준일 "
-                          "값입니다** — 예약 해제일(released_as_of) · 할당 결정 시각 · "
-                          "출고 Move 로 그날 상태를 되살립니다. 🔴 **후보의 «가용» 은 "
-                          "«지금» 재고입니다** — Lot 잔량에서 살아 있는 할당을 뺀 값이라 "
-                          "기준일로 되살리지 않습니다."),
-                ),
                 table=_t(
-                    [("resv", "Reservation", "left"), ("lot", "Lot", "left"),
-                     ("grade", "등급", "left"), ("qty", "가용", "right"),
-                     ("fresh", "신선도 잔여", "right"), ("rank", "순서", "right")],
-                    fefo_rows,
-                    empty_text="확보된 예약이 없어 후보가 없습니다",
+                    [("received", "입고일", "left"), ("grade", "등급", "left"),
+                     ("qty", "가용", "right"), ("fresh", "신선도 잔여", "right"),
+                     ("rank", "순위", "right")],
+                    [],
+                    empty_text="Lot 을 정해야 할 예약이 없습니다",
                 ),
             ),
         ],
@@ -710,21 +1267,24 @@ def _outbound_pane(
 #     예시 재고(14,600kg)가 있었고 그것이 실적처럼 나갔다.
 
 
-_PRINCIPLE = Note(
-    tone="neutral",
-    text=("재고 수치는 **물류가 보고한 것만** 적습니다. 보고가 없는 날은 "
-          "0 이 아니라 **공란**입니다 — 둘은 다릅니다."),
-)
-
-#: **그날 값이 아닌** 칸은 이제 Zone 자리 수 하나뿐이다 — 되살릴 정본(자리 정원
-#: 유효일)이 없어서다. 판매가능량·예약 3칸은 #760(LOG-HIST-002)으로 기준일 축이 됐다.
-#: 화면이 그 사실을 읽고 적는다.
-_MIXED_AXIS_NOTE = Note(
-    tone="info",
-    text=("**Zone 자리 수만 «지금» 값입니다.** Zone 자리 정원에는 유효일이 없어 기준일로 "
-          "되살릴 수 없습니다. 현재고 · Lot · 신선도 · 회전 · Receipt · Lot 자리 · "
-          "예약·할당 · 판매가능량은 모두 기준일 값입니다."),
-)
+#: 화면 맨 위 안내. 🔴 **없앴다** (#812).
+#:
+#:    종전 문구: *"이 화면의 수치는 고른 기준일 시점 값입니다. 보고가 없는 날은 0 이
+#:    아니라 공란입니다 — 둘은 다릅니다."*
+#:
+#:    두 문장 다 화면에 둘 이유가 없었다.
+#:
+#: ```text
+#: «기준일 시점 값»   화면 맨 위 기준일 줄(`DataBasis`)이 이미 말한다
+#: «공란 ≠ 0»        칸이 «—» 로 직접 보여 주는 사실이다 — 문장으로 얹을 것이 아니다
+#: ```
+#:
+#:    ⚠️ **규율이 사라진 것이 아니다.** `None` 을 0 으로 안 쓰는 것은 `_kg_cell` ·
+#:       `_days` · `_sum` 이 코드로 지키고, 화면은 `cellText` 가 «—» 로 그린다.
+#:       설명문은 그 규율의 **자랑**이었지 실행이 아니었다.
+#:
+#:    ★ Current 축인 칸(용량 한도 정책 둘)은 자기 자리에서 「현재값」이라고 직접 말한다.
+_PRINCIPLE = None
 
 
 def _empty_pane(key: str, label: str, note: Note, stats: list[Stat] | None = None) -> Pane:
@@ -870,16 +1430,16 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
             live = live_exceptions_at(conn, sim_run_id=run, as_of=as_of)
             resolved = resolved_exceptions_on(conn, sim_run_id=run, as_of=as_of)
             panes = [
-                _summary_pane(inv, live.rows, resolved, live.uncertainties, as_of),
+                _summary_pane(inv, inb, ob, live.rows, resolved, live.uncertainties, as_of),
                 _stock_pane(inv, inb, ob),
-                _inbound_pane(inb),
-                _outbound_pane(ob, as_of, conn=conn, sim_run_id=run),
+                _inbound_pane(inb, as_of),
+                _outbound_pane(ob, inv),
             ]
     except Exception as error:  #  DB 미연결 · 표 없음 · 원장/계보 무결성 다 잡는다
         log.exception("물류 값을 못 읽었습니다")
         http_status = _http_status_for_error(error)
-        다시 = http_status == HTTPStatus.SERVICE_UNAVAILABLE
-        재시도 = "잠시 뒤 다시 열어 보세요." if 다시 else ""
+        retryable = http_status == HTTPStatus.SERVICE_UNAVAILABLE
+        retry_text = "잠시 뒤 다시 열어 보세요." if retryable else ""
         return LogisticsTabResult(
             tab=_empty_tab(
                 status="ERROR",
@@ -887,7 +1447,7 @@ def build_result(as_of: date, pane: str) -> LogisticsTabResult:
                     tone="bad",
                     text=(f"**값을 못 읽었습니다** (`{type(error).__name__}`). "
                           f"예시 숫자로 대신하지 않습니다 — 이 화면에는 지금 사실이 "
-                          f"없습니다. {재시도}").strip(),
+                          f"없습니다. {retry_text}").strip(),
                 ),
                 source_note=(
                     f"읽기 실패 ({type(error).__name__}) · 보고 있는 실행: {run} · 기준일: {as_of}"
@@ -972,14 +1532,14 @@ def _onhand_series(as_of: date, n: int, at: int) -> list[float | None]:
         series = onhand_total_by_day(
             conn, sim_run_id=SHOWN_SIM_RUN_ID, start=start, end=as_of
         )
-        열린_날 = snapshot_days_between(
+        open_days = snapshot_days_between(
             conn, sim_run_id=SHOWN_SIM_RUN_ID, start=start, end=as_of
         )
     data: list[float | None] = [None] * n
     for index in range(at + 1):
         day = start + timedelta(days=index)
         # 🔴 열린 날에만 숫자를 적는다. 안 연 날의 0 은 «없다» 가 아니라 «모른다» 다.
-        if day in 열린_날 and day in series:
+        if day in open_days and day in series:
             data[index] = float(series[day])
     return data
 

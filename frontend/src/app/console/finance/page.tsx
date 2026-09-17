@@ -28,7 +28,6 @@ import {
   useConsoleData,
 } from "@/components/console/ConsoleData";
 import { DomainHeader } from "@/components/console/DomainShell";
-import { RunPicker, useSimRun } from "@/components/console/RunPicker";
 import {
   AGING_LABELS,
   financeConsole,
@@ -42,6 +41,7 @@ import {
   type ReceivablesResponse,
 } from "@/lib/console_api";
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { FINANCE_SALES_SIM_RUN_ID } from "@/lib/run_context";
 
 import { AgingBars } from "./AgingBars";
 import { CreditPanel } from "./CreditPanel";
@@ -51,7 +51,7 @@ import { ExpenseActions, ExpenseCreateForm, paidDateText } from "./ExpenseOps";
 import { ReceivableCollectionForm } from "./ReceivableCollectionForm";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
-import { DataBasis, NoRunChosen, TechDetails } from "./TechDetails";
+import { DataBasis, TechDetails } from "./TechDetails";
 import {
   DATA_SOURCE_NOTE,
   financingModeText,
@@ -65,32 +65,22 @@ import {
   verdictText,
 } from "./user_text";
 
-type Tab = "overview" | "cash" | "receivables" | "payables" | "expenses" | "loans" | "runs";
+type Tab = "overview" | "cash" | "receivables" | "payables" | "expenses" | "credit" | "loans" | "runs";
 const TABS: { key: Tab; label: string }[] = [
-  { key: "overview", label: "재무 현황" },
-  { key: "cash", label: "자금 흐름" },
-  { key: "receivables", label: "받을 돈" },
-  { key: "payables", label: "줄 돈" },
-  { key: "expenses", label: "비용" },
+  { key: "overview", label: "요약" }, { key: "cash", label: "현금흐름" }, { key: "receivables", label: "미수금" }, { key: "payables", label: "지급 예정" }, { key: "expenses", label: "운영비" }, { key: "credit", label: "여신" },
   { key: "loans", label: "차입" },
   { key: "runs", label: "실행 이력" },
 ];
 
 export default function FinancePage() {
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
-  const simRun = useSimRun();
+  const simRun = FINANCE_SALES_SIM_RUN_ID;
   const [tab, setTab] = useState<Tab>("overview");
   return (
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
+    <div className="flex w-full flex-col gap-4 sm:gap-5">
       <DomainHeader title="재무" tabs={TABS} active={tab} onChange={setTab} />
       <DataBasis asOf={asOf} note={DATA_SOURCE_NOTE} />
-      {/* 🔴 실행 축은 내부 식별자다. 고르는 자리는 남기되 기본 화면에서 내린다 —
-          공용 `RunPicker` 는 고치지 않고 **위치만** 옮겼다. 아무것도 안 골랐으면
-          열어 둔다. 닫아 두면 사용자가 고를 자리를 못 찾는다. */}
-      <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
-        <RunPicker asOf={asOf} />
-      </TechDetails>
-      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
+      <Body simRun={simRun} asOf={asOf} tab={tab} onTab={setTab} />
     </div>
   );
 }
@@ -115,19 +105,20 @@ function latestClosing(rows: ClosingItem[] | undefined, asOf: string): ClosingIt
   return best;
 }
 
-function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab }) {
-  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} />;
+function Body({ simRun, asOf, tab, onTab }: { simRun: string; asOf: string; tab: Tab; onTab: (tab: Tab) => void }) {
+  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} onTab={onTab} />;
   if (tab === "cash") return <Cashflow simRun={simRun} asOf={asOf} />;
   if (tab === "receivables") return <Receivables simRun={simRun} asOf={asOf} />;
   if (tab === "payables") return <Payables simRun={simRun} asOf={asOf} />;
   if (tab === "expenses") return <Expenses simRun={simRun} asOf={asOf} />;
+  if (tab === "credit") return <><Panel title="여신" subtitle="거래처별 신용 한도와 사용 상태를 확인하고 관리합니다."><p className="m-0 text-[18px] text-ink2">한도·현재 미수·가용 여신은 Finance read model 값을 그대로 표시합니다.</p></Panel><CreditPanel simRun={simRun} asOf={asOf} /><CreditLimitForm simRun={simRun} asOf={asOf} refreshKey={0} onSaved={() => undefined} /></>;
   if (tab === "loans") return <Loans simRun={simRun} asOf={asOf} />;
   return <Runs simRun={simRun} />;
 }
 
 /* ── 재무 현황 ─────────────────────────────────────────────────────────── */
 
-function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
+function Overview({ simRun, asOf, onTab }: { simRun: string; asOf: string; onTab: (tab: Tab) => void }) {
   const [creditRefresh, setCreditRefresh] = useState(0);
   const [cashRefresh, setCashRefresh] = useState(0);
   const summary = useConsoleData<FinanceSummaryResponse>(
@@ -172,8 +163,9 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
                 날짜를 가질 수 있고, 사용자는 같은 시점 숫자로 읽는다. 묶음을 나누고
                 각 묶음이 어느 날짜의 값인지 제목에 적는다. */}
             <BasisGroup title="재무 상태" basis={state.state_date}>
-              <Metric label="현재 현금" value={moneyWon(state.current_cash_krw)} />
+              <button type="button" aria-label="현금흐름 보기" onClick={() => onTab("cash")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="현재 현금 · 현금흐름 보기" value={moneyWon(state.current_cash_krw)} /></button>
               <Metric label="최소 운영현금" value={moneyWon(state.minimum_operating_cash_krw)} />
+              <button type="button" aria-label="차입 상세 보기" onClick={() => onTab("loans")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="차입잔액 · 상세 보기" value={moneyWon(state.current_debt_krw)} /></button>
             </BasisGroup>
             {closing ? (
               <BasisGroup title="일마감" basis={closing.close_date}>
@@ -181,12 +173,12 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
                 <Metric label="대출 포함 현금" value={moneyWon(closing.loan_cash_balance_krw)} />
               </BasisGroup>
             ) : (
-              <p className="mb-0 text-[12px] text-ink2">
+              <p className="mb-0 text-[16px] text-ink2">
                 기준일까지 마감된 날이 없어 대출 제외·포함 현금을 적을 수 없습니다.
               </p>
             )}
             {closing && closing.close_date !== state.state_date && (
-              <p className="mb-0 text-[11.5px] text-ink2">
+              <p className="mb-0 text-[15.5px] text-ink2">
                 재무 상태는 {state.state_date}, 마지막 일마감은 {closing.close_date} 입니다 - 두
                 숫자는 서로 다른 날의 값입니다.
               </p>
@@ -214,21 +206,16 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
         ) : (
           <>
             <Metrics>
-              <Metric
-                label="받을 돈"
-                value={moneyWon(receivables.data?.summary.total_outstanding_krw)}
-              />
-              <Metric
-                label="그중 연체"
-                value={moneyWon(overdueReceivable(receivables.data))}
-                hint="만기가 지난 금액"
-              />
-              <Metric label="줄 돈" value={moneyWon(payables.data?.summary.total_outstanding_krw)} />
+              <button type="button" aria-label="미수금 상세 보기" onClick={() => onTab("receivables")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="받을 돈 · 상세 보기" value={moneyWon(receivables.data?.summary.total_outstanding_krw)} /></button>
+              <Metric label="1–7일 연체" value={moneyWon(receivables.data.summary.days_1_7_krw)} />
+              <Metric label="8–30일 연체" value={moneyWon(receivables.data.summary.days_8_30_krw)} />
+              <Metric label="30일 초과" value={moneyWon(receivables.data.summary.days_30_plus_krw)} />
+              <button type="button" aria-label="지급 예정 상세 보기" onClick={() => onTab("payables")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="지급 예정 · 상세 보기" value={moneyWon(payables.data?.summary.total_outstanding_krw)} /></button>
               <Metric label="그중 연체" value={moneyWon(payables.data?.summary.overdue_krw)} />
             </Metrics>
             <div className="mt-4 grid gap-5 sm:grid-cols-2">
               <div>
-                <b className="text-[12px]">받을 돈 — 경과 구간</b>
+                <b className="text-[16px]">받을 돈 — 경과 구간</b>
                 <div className="mt-2">
                   <AgingBars
                     empty="아직 받을 돈이 없습니다."
@@ -242,7 +229,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
                 </div>
               </div>
               <div>
-                <b className="text-[12px]">줄 돈 — 만기 구간</b>
+                <b className="text-[16px]">줄 돈 — 만기 구간</b>
                 <div className="mt-2">
                   <AgingBars
                     empty="아직 줄 돈이 없습니다."
@@ -274,24 +261,6 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
 }
 
 /**
- * 연체된 받을 돈. **한 구간이 아니라 만기가 지난 구간 전부다.**
- *
- * ⚠️ 전에는 `1–7일` 한 칸만 «그중 연체» 로 적어, 8일 넘게 밀린 돈이 연체에서 빠졌다.
- *   합치는 것은 표시용이고, 구간 금액 자체는 백엔드가 나눈 값 그대로다.
- */
-function overdueReceivable(data: ReceivablesResponse | null): number | null {
-  if (!data) return null;
-  const parts = [
-    data.summary.days_1_7_krw,
-    data.summary.days_8_30_krw,
-    data.summary.days_30_plus_krw,
-  ].map(toNumber);
-  //  🔴 한 구간이라도 값이 없으면 합을 만들지 않는다 — 없는 것을 0 으로 읽지 않는다.
-  if (parts.some((value) => value === null)) return null;
-  return parts.reduce<number>((sum, value) => sum + (value ?? 0), 0);
-}
-
-/**
  * 같은 기준일을 공유하는 숫자 묶음. **날짜를 묶음 제목에 적는다.**
  *
  * ⚠️ 지표마다 작은 글씨로 날짜를 붙이면 사용자는 그것을 «부가 설명» 으로 읽고 넘긴다.
@@ -308,7 +277,7 @@ function BasisGroup({
 }) {
   return (
     <div>
-      <p className="m-0 mb-2 text-[11.5px] text-ink2">
+      <p className="m-0 mb-2 text-[15.5px] text-ink2">
         {title} 기준 <b className="text-ink tabular-nums">{basis}</b>
       </p>
       <Metrics>{children}</Metrics>
@@ -336,7 +305,7 @@ function CashBufferNote({
   const short = value < 0;
   return (
     <p
-      className="mb-0 mt-3 rounded-lg px-3 py-2 text-[12px]"
+      className="mb-0 mt-3 rounded-lg px-3 py-2 text-[16px]"
       style={{
         background: short ? "var(--color-t-bad-bg)" : "var(--color-t-good-bg)",
         color: short ? "var(--color-t-bad)" : "var(--color-t-good)",
@@ -384,14 +353,14 @@ function AgentCard({
           </div>
           {/* 🔴 **화면 위의 데이터 기준일과 다른 축이다.** 이 카드는 실행 전체에서 가장
               최근 판단을 읽으므로, 날짜만 작게 붙여 두면 사용자가 같은 기준일로 읽는다. */}
-          <p className="mb-0 mt-2 text-[11.5px] text-ink2">
+          <p className="mb-0 mt-2 text-[15.5px] text-ink2">
             이 실행에서 가장 최근에 내려진 판단이며, 판단 기준일은{" "}
             <b className="text-ink tabular-nums">{state.data.as_of}</b> 입니다 - 화면 위의 데이터
             기준일과 다를 수 있습니다.
           </p>
           {/* ⚠️ 실행별 LLM 설명은 저장되지 않는다. 없으면 없다고 적고 지어내지 않는다. */}
           {state.data.interpretation && (
-            <p className="mb-0 mt-3 text-[12px] leading-relaxed text-ink2">
+            <p className="mb-0 mt-3 text-[16px] leading-relaxed text-ink2">
               {state.data.interpretation}
             </p>
           )}
@@ -402,17 +371,17 @@ function AgentCard({
                 <Metric label="verdict" value={state.data.verdict ?? "null"} />
                 <Metric label="llm_status" value={state.data.llm_status} />
               </div>
-              <p className="mb-0 mt-3 font-mono text-[11px] text-ink2">
+              <p className="mb-0 mt-3 font-mono text-[15px] text-ink2">
                 {state.data.request_id} · {state.data.mode} · {state.data.sim_run_id}
               </p>
               <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--color-hair)" }}>
-                <b className="text-[12px]">근거 참조</b>
-                <p className="mb-0 mt-1 break-all font-mono text-[11px] text-ink2">
+                <b className="text-[16px]">근거 참조</b>
+                <p className="mb-0 mt-1 break-all font-mono text-[15px] text-ink2">
                   {state.data.evidence?.length ? state.data.evidence.join(", ") : "근거 참조 없음"}
                 </p>
               </div>
               <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--color-hair)" }}>
-                <b className="text-[12px]">저장된 결정론 결과</b>
+                <b className="text-[16px]">저장된 결정론 결과</b>
                 <DeterministicRows result={state.data.deterministic_result} />
               </div>
             </TechDetails>
@@ -432,14 +401,14 @@ function AgentCard({
  */
 function DeterministicRows({ result }: { result: Record<string, unknown> | null }) {
   if (!result) {
-    return <p className="mb-0 mt-1 text-[12px] text-ink2">이 실행에는 저장된 결정론 결과가 없습니다.</p>;
+    return <p className="mb-0 mt-1 text-[16px] text-ink2">이 실행에는 저장된 결정론 결과가 없습니다.</p>;
   }
   const entries = Object.entries(result);
   if (entries.length === 0) {
-    return <p className="mb-0 mt-1 text-[12px] text-ink2">저장된 칸이 없습니다.</p>;
+    return <p className="mb-0 mt-1 text-[16px] text-ink2">저장된 칸이 없습니다.</p>;
   }
   return (
-    <dl className="m-0 mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-x-4 gap-y-1.5 text-[11.5px]">
+    <dl className="m-0 mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-x-4 gap-y-1.5 text-[15.5px]">
       {entries.map(([key, value]) => (
         <div key={key} className="contents">
           <dt className="truncate font-mono text-ink2">{key}</dt>
@@ -486,7 +455,7 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
               type="button"
               onClick={() => setDays(range.key)}
               aria-pressed={days === range.key}
-              className="rounded-full border px-3 py-1 text-[11.5px]"
+              className="rounded-full border px-3 py-1 text-[15.5px]"
               style={{
                 borderColor: days === range.key ? "var(--color-t-info)" : "var(--color-hair)",
                 opacity: days === range.key ? 1 : 0.6,
@@ -496,7 +465,7 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
             </button>
           ))}
           {rows.length > 0 && (
-            <span className="text-[11.5px] text-ink2">
+            <span className="text-[15.5px] text-ink2">
               {rows[0].close_date} ~ {rows[rows.length - 1].close_date} · {rows.length}일
             </span>
           )}
@@ -879,7 +848,7 @@ function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
             ]}
           />
         )}
-        <p className="mb-0 mt-3 text-[11px] text-ink2">
+        <p className="mb-0 mt-3 text-[15px] text-ink2">
           상태 표기: {expenseStatusText("ACCRUED")} · {expenseStatusText("PAID")} · {expenseStatusText("CANCELLED")}.
           취소한 비용은 현금에 영향을 주지 않으며 앞으로 나갈 돈에서도 빠집니다.
         </p>
@@ -928,7 +897,7 @@ function Loans({ simRun, asOf }: { simRun: string; asOf: string }) {
           화면에 내부 상태 이름을 남기지 않으려고 같은 내용을 문장으로 적는다.
           공용 컴포넌트는 이번 판의 수정 범위 밖이라 고치지 않고 쓰지 않는다. */}
       <Panel title="차입 상세">
-        <p className="m-0 text-[12px] leading-relaxed text-ink2">
+        <p className="m-0 text-[16px] leading-relaxed text-ink2">
           대출 건별 이자율·실행일·만기·상환 일정은 아직 기록되지 않습니다. 없는 값을 화면이
           만들지 않으므로, 지금 답할 수 있는 것은 위의 차입잔액까지입니다.
         </p>
@@ -982,7 +951,7 @@ function Runs({ simRun }: { simRun: string }) {
         />
       )}
       {data.rows.length > 0 && (
-        <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+        <p className="mb-0 mt-3 text-[15.5px] text-ink2">
           판단 기준일은 그 판단이 어느 날짜를 두고 내려졌는지이고, 실행 시각은 시스템이 실제로
           계산한 시점입니다 - 둘 다 화면 위의 데이터 기준일과 다른 축입니다.
         </p>

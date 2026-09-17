@@ -38,7 +38,13 @@ import pytest
 
 from app.logistics import disposal, ledger, outbound, repository, transport, turnover, warehouse
 from app.logistics.db import get_connection
-from app.logistics.schemas import InventoryLogisticsSnapshot, OutboundCommitment
+from app.logistics.schemas import (
+    ConsoleAllocation,
+    ConsoleInventoryLot,
+    ConsoleReservation,
+    InventoryLogisticsSnapshot,
+    OutboundCommitment,
+)
 from app.logistics.tools import build_inventory_by_item
 
 pytestmark = pytest.mark.db
@@ -374,7 +380,7 @@ def test_06_놓아준_예약은_품목_가용으로_돌아온다(conn: psycopg.C
     _예약(conn, "RSV-1", "300")
     assert _품목가용(_스냅샷(conn)) == Decimal(400)
 
-    outbound.release_reservation(conn, reservation_id="RSV-1")
+    outbound.release_reservation(conn, reservation_id="RSV-1", released_as_of=AS_OF)
 
     assert _품목가용(_스냅샷(conn)) == Decimal(700) == _가용(conn)
 
@@ -476,12 +482,36 @@ def test_12_조회_경로가_쓰기를_만들지_않는다(conn: psycopg.Connect
     assert _쓰기흔적(conn) == 이전
 
 
-def test_12b_빌린_커넥션으로_읽어도_쓰기를_만들지_않고_답이_같다(conn: psycopg.Connection) -> None:
-    """★ 화면은 커넥션 하나를 빌려 준다 (2026-09-15). 그 경로도 읽기뿐이고, 자기 커넥션 경로와
-    같은 답을 낸다 — FEFO 후보는 품목당 한 번 물어도 예약마다 묻던 것과 같은 목록이다.
-    """
-    from app.logistics import console_service
+def _화면_Lot(t: turnover.LotTurnover) -> ConsoleInventoryLot:
+    """그날 축 Lot 한 줄. 파생값은 전부 `turnover` 가 만든 것을 그대로 옮긴다."""
+    return ConsoleInventoryLot(
+        lot_id=t.lot_id,
+        item_id=t.item_id,
+        item_name=ITEM_NAME,
+        grade=None,
+        remaining_qty_kg=t.remaining_qty_kg,
+        received_at=t.received_at,
+        status="ACTIVE",
+        storage_zone=LEGACY_ZONE,
+        remaining_freshness_days=t.remaining_freshness_days,
+        remaining_turnover_days=t.remaining_turnover_days,
+        turnover_status=t.turnover_status,
+        sell_priority=t.sell_priority,
+        disposal_candidate=t.disposal_candidate,
+    )
 
+
+def test_12b_빌린_커넥션으로_읽어도_쓰기를_만들지_않는다(conn: psycopg.Connection) -> None:
+    """★ 화면은 커넥션 하나를 빌려 준다 (2026-09-15). 그 경로도 읽기뿐이고, 자기 커넥션
+    경로와 같은 답을 낸다.
+
+    ⚠️ **FEFO 후보는 더 이상 이 축에 없다 (#812).** `get_fefo_candidates_by_item` 은
+       커넥션을 받지 않는다 — 그날 축 재료(`lot_state_at` · `reservation_state_at`)를
+       이미 읽어 둔 화면이 넘겨 주고, 이 함수는 거기서 세기만 한다. 종전에는
+       `outbound.recommend_fefo_candidates` 를 다시 불러 **«지금» 재고**로 후보를
+       세웠고, 그래서 과거 기준일에 미래 Lot 이 올라왔다.
+       두 경로가 안 갈리는지는 아래 `test_12d` 가 본다.
+    """
     _lot(conn, qty="700")
     _예약(conn, "RSV-1", "300")
     _할당(conn, "RSV-1", "LOT-A", "100")
@@ -491,15 +521,74 @@ def test_12b_빌린_커넥션으로_읽어도_쓰기를_만들지_않고_답이_
     자기것 = repository.get_outbound_commitments(sim_run_id=SIM_RUN_ID)
     assert 빌린것 == 자기것
 
-    후보 = console_service.get_fefo_candidates_by_item(
-        conn=conn, sim_run_id=SIM_RUN_ID, item_ids=[ITEM_ID, ITEM_ID], as_of=AS_OF
+    assert _쓰기흔적(conn) == 이전
+
+
+def test_12d_화면_FEFO_와_자동할당_FEFO_는_같은_Lot_을_같은_순서로_본다(
+    conn: psycopg.Connection,
+) -> None:
+    """🔴 **추천한 Lot 과 실제로 나갈 Lot 이 갈리면 안 된다.**
+
+    화면(`console_service.get_fefo_candidates_by_item`)은 그날 축 재료 위에서 세고,
+    자동 할당(`outbound.recommend_fefo_candidates`)은 SQL 위에서 센다. 길은 둘이지만
+    정렬 키는 `turnover.fefo_sort_key` 하나뿐이라 **같은 답**이 나와야 한다.
+
+    ★ 이 픽스처는 원장 이동이 없어 그날 잔량 = `remaining_qty_kg` 다 — 두 축이 같은
+      사실을 보는 자리를 골라, *"길이 다르면 답도 다른가"* 만 남긴다.
+    """
+    from app.logistics import console_service
+
+    _lot(conn, "LOT-B", qty="500", 받은날=AS_OF - timedelta(days=3))
+    _lot(conn, "LOT-A", qty="700")
+    _예약(conn, "RSV-1", "300")
+    _할당(conn, "RSV-1", "LOT-A", "100")
+    이전 = _쓰기흔적(conn)
+
+    lots = [
+        _화면_Lot(t)
+        for t in turnover.load_lot_turnover(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
+    ]
+    예약 = ConsoleReservation(
+        reservation_id="RSV-1",
+        item_id=ITEM_ID,
+        item_name=ITEM_NAME,
+        sale_id=SALE_ID,
+        required_qty_kg=Decimal(300),
+        reserved_qty_kg=Decimal(300),
+        allocated_qty_kg=Decimal(100),
+        unallocated_qty_kg=Decimal(200),
+        due_date=None,
+        status="PARTIALLY_ALLOCATED",
+        allocations=[
+            ConsoleAllocation(
+                allocation_id="ALO-1",
+                lot_id="LOT-A",
+                pallet_id=None,
+                allocated_qty_kg=Decimal(100),
+                allocation_basis="HUMAN_OVERRIDE",
+                decided_by=BY,
+                decided_at=DECIDED_AT,
+                status="ALLOCATED",
+                note=None,
+            )
+        ],
     )
-    직접 = outbound.recommend_fefo_candidates(
+
+    화면 = console_service.get_fefo_candidates_by_item(
+        lots=lots, reservations=[예약], item_ids=[ITEM_ID, ITEM_ID]
+    )
+    자동 = outbound.recommend_fefo_candidates(
         conn, sim_run_id=SIM_RUN_ID, item_id=ITEM_ID, as_of=AS_OF
     )
-    assert list(후보) == [ITEM_ID]
-    assert [(c.lot_id, c.available_qty_kg) for c in 후보[ITEM_ID]] == [
-        (c.lot_id, c.available_qty_kg) for c in 직접
+
+    assert list(화면) == [ITEM_ID]
+    assert [(c.lot_id, c.available_qty_kg) for c in 화면[ITEM_ID]] == [
+        (c.lot_id, c.available_qty_kg) for c in 자동
+    ]
+    #  ★ 먼저 들어온 LOT-B 가 앞이고, LOT-A 는 남의 할당 100 이 빠진 600 이다.
+    assert [(c.lot_id, c.available_qty_kg) for c in 화면[ITEM_ID]] == [
+        ("LOT-B", Decimal(500)),
+        ("LOT-A", Decimal(600)),
     ]
 
     assert _쓰기흔적(conn) == 이전

@@ -27,8 +27,14 @@ export class ScreenError extends Error {
  *
  *     /dashboard  2.14s   ← 여섯 중 제일 느리다
  *     /logistics  0.73s
- *     /purchase   0.97s
+ *     /purchase   0.97s   🔴 낡았다 — 아래 09-17 줄
  *     /sales      0.17s
+ *
+ * 🔵 2026-09-17 `/purchase` 다시 잼 (프록시 경유 3회 중앙값 · as_of 08-31) —
+ *
+ *     /purchase   1.39s → 0.18s   도착일 조회에 걷기 축을 SQL 로 걸었다 (`2c292726`)
+ *
+ *   ⚠️ 나머지 셋은 09-11 값 그대로 둔다 — 이 판에서 다시 재지 않은 수를 고치지 않는다.
  *
  * ★ 20초는 그 최대의 **약 10배**다. 넉넉한 쪽으로 골랐다 — 이 상한이 하려는 일은
  *   *"느린 요청을 빨리 자르는 것"* 이 아니라 *"영영 안 끝나는 요청을 끝내는 것"* 이다
@@ -110,6 +116,8 @@ export interface Column {
   label: string;
   align: Align;
   mono: boolean;
+  /** 칸 너비(CSS `12%` · `120px`). `null` 이면 균등 배분. **표마다 따로 정한다** (`#812`). */
+  width: string | null;
 }
 export type Cell = string | number | null;
 export interface Table {
@@ -298,7 +306,14 @@ export interface Plan {
   payments: Table;
   reasons: Reason[];
   risks: string[];
+  /**
+   * 이 안의 **요청(품목·날)** 에 아직 결정이 없나 (2026-09-17 · 요청 단위).
+   *
+   * 🔴 같은 요청에서 다른 안이 결정되면 이 안도 `false` 다 — 「승인 대기」 수와 요청 틀의
+   *    초록 테두리가 이 칸을 본다. 낱말(`state`)은 「후보」 그대로다.
+   */
   pending: boolean;
+  /** 이미 승인된 안인가. 화면은 `state` 를 쓰고, 이 칸은 대시보드 서버가 읽는다. */
   approved: boolean;
   /**
    * 이 안이 **실제로 어느 상태인가** — 「후보」·「승인됨」·「매입 기록됨」·「반려」.
@@ -320,6 +335,12 @@ export interface Plan {
   request_id: string | null;
   /** 그 실행의 이력 행 id. 업무 키 하나에 실행이 여럿이라 **짝으로** 들고 다닌다. */
   history_run_id: string | null;
+  /**
+   * 어느 걷기의 실행인가. 🔴 `null` 은 «못 읽었다» 가 아니라 **걷기 밖**(손 실행·축이
+   * 생기기 전)이다. 백엔드 `api/purchase/schema.py` `Plan.sim_run_id` 에 있던 칸인데
+   * 이 타입에 빠져 있었다 (2026-09-17). 지금 화면은 이 칸을 안 그린다.
+   */
+  sim_run_id: string | null;
 }
 export interface PurchaseTab {
   stats: Stat[];

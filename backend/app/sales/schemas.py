@@ -829,6 +829,7 @@ class SalesHistoryItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     sale_id: str
+    order_date: date
     sale_date: date
     customer_partner_id: str
     partner_name: str | None = None
@@ -839,6 +840,28 @@ class SalesHistoryItem(BaseModel):
     collection_due_date: date
     collection_status: str
     collection_status_label: str
+    order_status: str
+
+
+class TodayConfirmedSaleItem(BaseModel):
+    """기준일에 판매를 확정한 원장 품목 행.
+
+    ``order_date`` 는 판매 확정일이고 ``sale_date`` 는 납품 예정일이다. 두 날짜를
+    합쳐 읽으면 미래 납품 주문이 확정 목록에서 사라진다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sale_id: str
+    order_date: date
+    sale_date: date
+    customer_partner_id: str
+    partner_name: str | None = None
+    item_id: str
+    item_name: str | None = None
+    quantity_kg: Decimal
+    unit_price_krw_per_kg: Decimal
+    line_amount_krw: Decimal
     order_status: str
 
 
@@ -868,4 +891,5 @@ class SalesDashboardResponse(BaseModel):
     collection_summary: dict[str, SalesCollectionStatusSummary]
     items: list[SalesItemSummary]
     recent_sales: list[SalesHistoryItem]
+    today_confirmed_sales: list[TodayConfirmedSaleItem] = Field(default_factory=list)
     receivables: list[SalesReceivableItem]

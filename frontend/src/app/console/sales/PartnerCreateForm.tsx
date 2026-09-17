@@ -137,13 +137,13 @@ export function PartnerCreateForm({ onCreated }: { onCreated: () => void }) {
             reset();
             setOpen(true);
           }}
-          className="rounded-lg border px-3 py-2 text-[12px]"
+          className="rounded-lg border px-3 py-2 text-[16px]"
           style={{ borderColor: "var(--color-t-info)", color: "var(--color-t-info)" }}
         >
           + 거래처 추가
         </button>
         {created && (
-          <span className="text-[11.5px]" style={{ color: "var(--color-t-good)" }}>
+          <span className="text-[15.5px]" style={{ color: "var(--color-t-good)" }}>
             {created.partner_name} 이(가) 등록됐습니다.
           </span>
         )}
@@ -213,7 +213,7 @@ export function PartnerCreateForm({ onCreated }: { onCreated: () => void }) {
         />
       </div>
       <Field label="메모" value={draft.note} onChange={(v) => setDraft({ ...draft, note: v })} />
-      <label className="mt-3 flex items-center gap-2 text-[11.5px]">
+      <label className="mt-3 flex items-center gap-2 text-[15.5px]">
         <input
           type="checkbox"
           checked={draft.active}
@@ -224,7 +224,7 @@ export function PartnerCreateForm({ onCreated }: { onCreated: () => void }) {
 
       {problems.length > 0 && (
         <ul
-          className="m-0 mt-3 list-none rounded-lg px-3 py-2 text-[12px]"
+          className="m-0 mt-3 list-none rounded-lg px-3 py-2 text-[16px]"
           style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
         >
           {problems.map((problem) => (
@@ -234,7 +234,7 @@ export function PartnerCreateForm({ onCreated }: { onCreated: () => void }) {
       )}
       {created && (
         <p
-          className="mb-0 mt-3 rounded-lg px-3 py-2 text-[12px]"
+          className="mb-0 mt-3 rounded-lg px-3 py-2 text-[16px]"
           style={{ background: "var(--color-t-good-bg)", color: "var(--color-t-good)" }}
         >
           <b>{created.partner_name}</b> 이(가) 등록됐습니다. 여신 한도는 재무에서 별도로
@@ -247,7 +247,7 @@ export function PartnerCreateForm({ onCreated }: { onCreated: () => void }) {
           type="button"
           onClick={submit}
           disabled={saving}
-          className="rounded-lg border px-3 py-2 text-[12px] disabled:opacity-50"
+          className="rounded-lg border px-3 py-2 text-[16px] disabled:opacity-50"
           style={{ borderColor: "var(--color-t-info)", color: "var(--color-t-info)" }}
         >
           {saving ? "등록 중" : "등록"}
@@ -259,12 +259,12 @@ export function PartnerCreateForm({ onCreated }: { onCreated: () => void }) {
             setOpen(false);
           }}
           disabled={saving}
-          className="rounded-lg border px-3 py-2 text-[12px] disabled:opacity-50"
+          className="rounded-lg border px-3 py-2 text-[16px] disabled:opacity-50"
           style={{ borderColor: "var(--color-hair)" }}
         >
           닫기
         </button>
-        <span className="text-[11.5px] text-ink2">
+        <span className="text-[15.5px] text-ink2">
           여신 한도는 재무에서 별도로 설정됩니다 — 이 화면에서 정하지 않습니다.
         </span>
       </div>
@@ -297,7 +297,7 @@ function Field({
   hint?: string;
 }) {
   return (
-    <label className="mt-2 flex flex-col gap-1 text-[11.5px]">
+    <label className="mt-2 flex flex-col gap-1 text-[15.5px]">
       <span className="text-ink2">
         {label}
         {required && <span style={{ color: "var(--color-t-bad)" }}> *</span>}
@@ -307,10 +307,10 @@ function Field({
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
         spellCheck={false}
-        className="rounded-md border px-2 py-1 text-[12px]"
+        className="rounded-md border px-2 py-1 text-[16px]"
         style={{ borderColor: "var(--color-hair)" }}
       />
-      {hint && <span className="text-[11px] text-ink2">{hint}</span>}
+      {hint && <span className="text-[15px] text-ink2">{hint}</span>}
     </label>
   );
 }
@@ -329,7 +329,7 @@ function Select({
   required?: boolean;
 }) {
   return (
-    <label className="mt-2 flex flex-col gap-1 text-[11.5px]">
+    <label className="mt-2 flex flex-col gap-1 text-[15.5px]">
       <span className="text-ink2">
         {label}
         {required && <span style={{ color: "var(--color-t-bad)" }}> *</span>}
@@ -337,7 +337,7 @@ function Select({
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="rounded-md border px-2 py-1 text-[12px]"
+        className="rounded-md border px-2 py-1 text-[16px]"
         style={{ borderColor: "var(--color-hair)" }}
       >
         {options.map((option) => (

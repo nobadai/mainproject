@@ -14,7 +14,10 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import date
+from functools import partial
 from typing import Any
 
 from app.api import plan_state
@@ -125,36 +128,79 @@ def build(as_of: date) -> DashboardTab:
     n = len(axis.days)
     at = axis.as_of_index
 
-    fc = forecast_q.build(as_of, "배추")
-    #  ★ 매입은 축을 안 주면 모든 실행을 섞는다. 다른 네 탭과 같은 실행을 넘긴다
-    #    (`app/api/shown_run.py` 한 자리).
+    #  🔵 **여덟 조회를 동시에 보낸다** (2026-09-17). 전부 **읽기**이고 서로의 결과를
+    #     안 쓰므로 순서가 없다. 종전에는 한 줄로 세워 **왕복 시간을 그대로 더했다**
+    #     (실측 합 1.79s · DB 가 원격이라 대부분이 기다림이다).
     #
-    #  🔵 **`window_days=0` — 도착일을 안 읽는다** (2026-09-16 · `#740` 의 인자).
-    #     이 화면이 매입에서 읽는 것은 `pu.plans` · `pu.source` 둘뿐이다. 도착일
-    #     조회(`arrivals`)가 먹이는 곳은 매입 탭의 확정 매입 표 하나이고 여기서는
-    #     안 쓰는데, 그 왕복이 실측 `829.6ms` 로 이 화면의 단일 최대였다.
+    #  🔴 **커넥션을 나눠 쓰지 않는다.** 스레드가 한 커넥션을 같이 쓰면 조용히 섞인다.
+    #     여덟 갈래는 각자 자기 것을 연다 —
     #
-    #  🔴 **좁히는 것이 아니라 안 읽는 것이다.** 그래서 `12` 가 아니라 `0` 이다.
-    #     매입 탭 쪽은 그 사실을 「확정 입고 예정 —」 으로 말하는데, 이 화면은 그
-    #     칸을 안 읽으므로 표시가 달라지지 않는다 —
-    #     `tests/api/test_dashboard_purchase_window.py` 가 그 자리를 지킨다.
-    pu = purchase_q.build(as_of, sim_run_id=SHOWN_SIM_RUN_ID, window_days=0)
-    fi = finance_q.build(as_of, "base")
-    lg = logistics_q.build(as_of, "stock")
-    sl = sales_q.build(as_of)
+    #     ```text
+    #     forecast   ml/db.py        fetch_* 가 호출마다 psycopg.connect      4개
+    #     purchase   finance/db.py   〃                                       5개
+    #     finance    finance/db.py   〃                                      12개
+    #     sales      sales/db.py     〃                                       6개
+    #     cash       finance/db.py   〃                                       3개
+    #     records    finance/db.py   〃                                       1개
+    #     물류 둘     logistics/db.py `with get_connection()` — 그 호출 안에서만 산다
+    #     ```
+    #
+    #     (각 파트의 `build` 가 이제 **한 판에 한 커넥션**을 쓴다 — 위 숫자는 종전 것이고
+    #     지금은 35개가 아니라 10개다. 그 범위도 스레드마다 따로다.)
+    #
+    #  🔴 **순서 의존은 없다.** 여덟 중 앞 결과를 뒤가 쓰는 쌍이 하나도 없다. 결과를
+    #     받는 순서는 **종전 코드 순서 그대로**라, 둘이 같이 터져도 먼저 터지던 쪽이
+    #     먼저 터진다.
+    #
+    #  🔵 **물류 둘은 같은 일정 조회를 나눠 쓴다** (`read_scope`). 범위를 **스레드 밖에서**
+    #     열고 `copy_context()` 로 떠서 넘기는 이유가 이것이다 — `ContextVar` 는 새
+    #     스레드에 저절로 안 따라간다. 나눠 쓰는 것은 답(불변 튜플)뿐이고, 먼저 온 쪽이
+    #     읽는 동안 뒤 쪽은 기다렸다 그 답을 집는다. **`submit` 마다 새 사본**을 떠야
+    #     한다 — 한 `Context` 를 둘이 동시에 `run` 하면 `RuntimeError` 다.
+    with logistics_q.read_scope(), ThreadPoolExecutor(
+        max_workers=8, thread_name_prefix="dashboard"
+    ) as pool:
+        def 맡긴다(fn, *args, **kwargs):
+            return pool.submit(copy_context().run, partial(fn, *args, **kwargs))
+
+        f_fc = 맡긴다(forecast_q.build, as_of, "배추")
+        #  ★ 매입은 축을 안 주면 모든 실행을 섞는다. 다른 네 탭과 같은 실행을 넘긴다
+        #    (`app/api/shown_run.py` 한 자리).
+        #
+        #  🔵 **`window_days=0` — 도착일을 안 읽는다** (2026-09-16 · `#740` 의 인자).
+        #     이 화면이 매입에서 읽는 것은 `pu.plans` · `pu.source` 둘뿐이다. 도착일
+        #     조회(`arrivals`)가 먹이는 곳은 매입 탭의 확정 매입 표 하나이고 여기서는
+        #     안 쓰는데, 그 왕복이 실측 `829.6ms` 로 이 화면의 단일 최대였다.
+        #
+        #  🔴 **좁히는 것이 아니라 안 읽는 것이다.** 그래서 `12` 가 아니라 `0` 이다.
+        #     매입 탭 쪽은 그 사실을 「확정 입고 예정 —」 으로 말하는데, 이 화면은 그
+        #     칸을 안 읽으므로 표시가 달라지지 않는다 —
+        #     `tests/api/test_dashboard_purchase_window.py` 가 그 자리를 지킨다.
+        f_pu = 맡긴다(purchase_q.build, as_of, sim_run_id=SHOWN_SIM_RUN_ID, window_days=0)
+        f_fi = 맡긴다(finance_q.build, as_of, "base")
+        f_lg = 맡긴다(logistics_q.build, as_of, "stock")
+        f_sl = 맡긴다(sales_q.build, as_of)
+        #  ★ 두 그래프는 **주인 부서가 만듭니다.** 여기서 만들면 같은 값을 두 군데서
+        #    계산하게 되고, 실제로 갈라졌습니다 — 요약은 재고 4,550kg 인데 그래프
+        #    끝은 14,600kg 이었습니다. 이제 둘 다 물류·재무에서 나옵니다.
+        f_cash = 맡긴다(finance_q.dashboard_cash, axis)
+        f_stock = 맡긴다(logistics_q.dashboard_stock, n, at, as_of)
+        #  ★ 매입안과 **같은 실행 · 같은 날**의 실매입 기록. 열쇠는 `(품목, 안 이름)`.
+        f_records = 맡긴다(_records, as_of)
+
+        fc = f_fc.result()
+        pu = f_pu.result()
+        fi = f_fi.result()
+        lg = f_lg.result()
+        sl = f_sl.result()
+        cash = f_cash.result()
+        stock = f_stock.result()
+        records = f_records.result()
 
     cabbage = next(c for c in fc.cards if c.item == "배추")
     cards = {c.item: c for c in fc.cards}
     pending = _pending(pu.plans)
     today = axis.days[at] if 0 <= at < n else None
-
-    #  ★ 두 그래프는 **주인 부서가 만듭니다.** 여기서 만들면 같은 값을 두 군데서
-    #    계산하게 되고, 실제로 갈라졌습니다 — 요약은 재고 4,550kg 인데 그래프
-    #    끝은 14,600kg 이었습니다. 이제 둘 다 물류에서 나옵니다.
-    cash = finance_q.dashboard_cash(axis)
-    stock = logistics_q.dashboard_stock(n, at, as_of)
-    #  ★ 매입안과 **같은 실행 · 같은 날**의 실매입 기록. 열쇠는 `(품목, 안 이름)`.
-    records = _records(as_of)
 
     return DashboardTab(
         axis=axis,
@@ -177,8 +223,15 @@ def build(as_of: date) -> DashboardTab:
                  tone="info", raw=cabbage.predicted),
             *([s] if (s := _buffer_stat(fi)) is not None else []),
             _현재고(lg),
+            #  🔴 **상세는 값과 같은 것을 센다** (2026-09-18). 전에는 그날 안 **전부**의 이름과
+            #     수를 붙여, 값 1 옆에 「양파 · 공격, 배추 · 보수, … · 5안」이 섰다 — 값은 대기인
+            #     안만 세는데(`_pending`) 상세는 다른 것을 셌다 (REH-0914 08-31).
+            #  ★ 「N안 중 M건 대기」 — M 이 곧 값이다. 대기인 안 이름만 적는 쪽도 쟀는데
+            #    카드에서 두 줄이 되고(최장 50글자 · 09-10), 대기 0 인 날(안이 선 146일 중 92일)에
+            #    따로 쓸 말이 필요했다. 안 이름은 아래 매입 표가 상태와 함께 이미 보인다.
+            #  ⚠️ 값(`pending`)은 안 건드린다 — 배지 「승인 대기 N건」과 같은 수다.
             Stat(label="매입 승인 대기", value=str(pending), unit="건",
-                 detail=(", ".join(p.key for p in pu.plans) + f" · {len(pu.plans)}안"
+                 detail=(f"{len(pu.plans)}안 중 {pending}건 대기"
                          if pu.plans else "오늘 낸 안 없음"),
                  tone=("warn" if pending else "good"), raw=pending),
             sl.stats[0],

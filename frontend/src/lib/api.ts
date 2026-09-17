@@ -12,6 +12,7 @@
 import { DEFAULT_AS_OF, asOfSnapshot } from "./demo_as_of";
 import type {
   AskResponse,
+  DecisionOut,
   ExecuteResponse,
   Intent,
   PurchaseRecordIn,
@@ -137,13 +138,19 @@ export const AS_OF = DEFAULT_AS_OF;
 export const POLICY_VERSION = "v1.3";
 
 /** ① 발화문을 분류한다. **확인이 필요하면 아무것도 실행하지 않는다.** */
-export function ask(utterance: string): Promise<AskResponse> {
+export function ask(
+  utterance: string,
+  context?: { simRunId?: string; dateFrom?: string; dateTo?: string },
+): Promise<AskResponse> {
   return call<AskResponse>("/master/ask", {
     method: "POST",
     body: JSON.stringify({
       utterance,
       as_of: asOfSnapshot(),
       policy_version: POLICY_VERSION,
+      sim_run_id: context?.simRunId,
+      date_from: context?.dateFrom,
+      date_to: context?.dateTo,
     }),
   });
 }
@@ -220,6 +227,36 @@ export function postPurchaseRecord(
     // 값이 선정안과 다르면 서버가 재무 · 물류 재검증을 다시 부른다 — 읽기가 아니라 돌리는 호출이다.
     EXECUTE_TIMEOUT_MS,
   );
+}
+
+/**
+ * 사람이 한 승인을 **되돌린다** — 조건을 붙인 재요청을 한 회차 더 적는다.
+ *
+ * ★ **새 경로가 아니다.** 승인 · 전체 거절과 같은 `/decision` 한 곳이고, 무엇을
+ *   적느냐만 다르다. 결정은 지우지 않고 **회차를 쌓아 접는다** — 최신 회차가 승인이
+ *   아니게 되면 그 승인이 만든 실매입 기록은 매입 원장에 서지 않는다.
+ *
+ * 🔴 **조건(`conditionText`)이 비면 서버가 422 로 거절한다** — 조건 없는 재요청은
+ *   그냥 거절이라 다른 뜻이 된다. 부르기 전에 화면이 먼저 막는다.
+ *
+ * ★ 상한은 읽기와 같다. 승인과 달리 **재검증을 돌리지 않는** 결정이라 DB 한 번 쓰고
+ *   끝난다 — 15분 상한은 이 호출이 멈춘 것을 15분 동안 숨긴다.
+ */
+export function requestPlanChange(args: {
+  requestId: string;
+  conditionText: string;
+  decidedBy: string;
+  note?: string;
+}): Promise<DecisionOut> {
+  return call<DecisionOut>(`/master/runs/${encodeURIComponent(args.requestId)}/decision`, {
+    method: "POST",
+    body: JSON.stringify({
+      decision: "REQUEST_CHANGE",
+      condition_text: args.conditionText,
+      decided_by: args.decidedBy,
+      note: args.note ?? null,
+    }),
+  });
 }
 
 export function health(): Promise<{ status: string }> {

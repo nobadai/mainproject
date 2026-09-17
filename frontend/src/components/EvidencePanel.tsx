@@ -39,16 +39,16 @@ export function EvidencePanel({
         aria-expanded={open}
         className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left"
       >
-        <span className="text-[13px] font-semibold">
+        <span className="text-[17px] font-semibold">
           이 안의 숫자는 어디서 왔나요
           <span className="ml-2 font-normal text-muted">{count}건</span>
         </span>
-        <span className="text-[12px] text-muted">{open ? "접기" : "펼치기"}</span>
+        <span className="text-[16px] text-muted">{open ? "접기" : "펼치기"}</span>
       </button>
 
       {open && (
         <div className="overflow-x-auto border-t border-line">
-          <table className="w-full min-w-[420px] border-collapse text-[12.5px]">
+          <table className="w-full min-w-[420px] border-collapse text-[16.5px]">
             <thead>
               <tr className="text-left text-muted">
                 <th className="px-3 py-1.5 font-medium">부서</th>

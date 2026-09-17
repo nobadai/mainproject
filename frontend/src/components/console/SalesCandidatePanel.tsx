@@ -150,7 +150,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
       <Panel title="판매 후보 생성" subtitle="업무 요청만 보냅니다 — 원가·여신·판정은 각 도메인이 답합니다">
         <div className="grid gap-2 sm:grid-cols-3">
           <Select
-            label="거래처"
+            label="거래처 *"
             value={form.partner_id}
             onChange={(value) => setForm({ ...form, partner_id: value })}
             disabled={partners.loading || Boolean(partners.error)}
@@ -162,7 +162,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>판매 대상 고객사를 선택합니다.</FieldHelp>
           <Select
-            label="품목"
+            label="품목 *"
             value={form.item}
             onChange={(value) => setForm({ ...form, item: value })}
             disabled={items.loading || Boolean(items.error)}
@@ -174,7 +174,7 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>등록된 품목 원장에서 선택합니다.</FieldHelp>
           <Input
-            label="요청 수량 (kg)"
+            label="요청 수량 * (kg)"
             value={form.requested_quantity_kg}
             onChange={(v) => setForm({ ...form, requested_quantity_kg: v })}
             type="number"
@@ -183,17 +183,17 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
             step="any"
           />
           <FieldHelp>판매를 검토할 수량입니다.</FieldHelp>
-          <label className="flex flex-col gap-1 text-[11.5px]">
-            <span className="text-ink2">결제 방식</span>
-            <select value={form.preferred_payment_terms_type} onChange={(event) => setForm({ ...form, preferred_payment_terms_type: event.target.value })} className="rounded-md border px-2 py-1 text-[12px]" style={{ borderColor: "var(--color-hair)" }}>
+          <label className="flex flex-col gap-1 text-[15.5px]">
+            <span className="text-ink2">결제 방식 (선택)</span>
+            <select value={form.preferred_payment_terms_type} onChange={(event) => setForm({ ...form, preferred_payment_terms_type: event.target.value })} className="rounded-md border px-2 py-1 text-[16px]" style={{ borderColor: "var(--color-hair)" }}>
               <option value="">미지정</option><option value="SINGLE">일시 결제</option><option value="INSTALLMENT">분할 결제</option>
             </select>
           </label>
           <FieldHelp>미지정은 일시 결제로 간주하지 않습니다.</FieldHelp>
-          <Input label="요청 메모" value={form.user_request} onChange={(v) => setForm({ ...form, user_request: v })} />
+          <Input label="요청 메모 (선택)" value={form.user_request} onChange={(v) => setForm({ ...form, user_request: v })} placeholder="추가로 고려할 조건을 입력하세요" />
           <FieldHelp>수량·단가 대신 쓰는 입력이 아닙니다. 추가 상황 설명에 사용합니다.</FieldHelp>
           <Input
-            label="희망 단가 (원/kg)"
+            label="희망 단가 (선택, 원/kg)"
             value={form.preferred_unit_price_krw}
             onChange={(v) => setForm({ ...form, preferred_unit_price_krw: v })}
             type="number"
@@ -203,14 +203,14 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>미입력 시 현재 요청만으로 재무 검증을 완료하지 못할 수 있습니다.</FieldHelp>
           <Input
-            label="희망 납품일"
+            label="희망 납품일 (선택)"
             value={form.preferred_delivery_date}
             onChange={(v) => setForm({ ...form, preferred_delivery_date: v })}
             type="date"
           />
           <FieldHelp>판매를 희망하는 납품일입니다.</FieldHelp>
           <Input
-            label="결제일수"
+            label="결제일수 (선택)"
             value={form.preferred_payment_days}
             onChange={(v) => setForm({ ...form, preferred_payment_days: v })}
             placeholder="비우면 거래처 계약 결제일"
@@ -221,19 +221,19 @@ export function SalesCandidatePanel({ simRun, asOf, onCreated }: { simRun: strin
           />
           <FieldHelp>비우면 명시적인 결제일수를 요청하지 않습니다.</FieldHelp>
         </div>
-        {partners.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">거래처 조회 실패: {partners.error}</p>}
-        {items.error && <p className="mb-0 mt-2 text-[11px] text-[var(--color-t-bad)]">품목 조회 실패: {items.error}</p>}
-        {!partners.loading && !partners.error && (partners.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-2 text-[11px] text-ink2">선택 가능한 거래처가 없습니다.</p>}
-        {!items.loading && !items.error && (items.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-2 text-[11px] text-ink2">등록된 품목이 없습니다.</p>}
+        {partners.error && <p className="mb-0 mt-2 text-[15px] text-[var(--color-t-bad)]">거래처 조회 실패: {partners.error}</p>}
+        {items.error && <p className="mb-0 mt-2 text-[15px] text-[var(--color-t-bad)]">품목 조회 실패: {items.error}</p>}
+        {!partners.loading && !partners.error && (partners.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-2 text-[15px] text-ink2">선택 가능한 거래처가 없습니다.</p>}
+        {!items.loading && !items.error && (items.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-2 text-[15px] text-ink2">등록된 품목이 없습니다.</p>}
         <button
           onClick={submit}
           disabled={!ready || state.running}
-          className="mt-3 rounded-lg border px-3 py-2 text-[12px] disabled:opacity-50"
+          className="mt-3 rounded-lg border px-3 py-2 text-[16px] disabled:opacity-50"
           style={{ borderColor: "var(--color-hair)" }}
         >
           {state.running ? "후보를 만드는 중" : "판매 후보 생성"}
         </button>
-        <p className="mb-0 mt-2 text-[11px] text-ink2">
+        <p className="mb-0 mt-2 text-[15px] text-ink2">
           거래처·품목·수량은 필수입니다. 이 단계에서는 판매 후보만 생성되며 실제 판매 확정은 기존 승인 및 재검증 절차를 거쳐야 합니다.
         </p>
       </Panel>
@@ -260,13 +260,13 @@ function Select({
   disabled?: boolean;
 }) {
   return (
-    <label className="flex flex-col gap-1 text-[11.5px]">
+    <label className="flex flex-col gap-1 text-[15.5px]">
       <span className="text-ink2">{label}</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
-        className="rounded-md border px-2 py-1 text-[12px] disabled:opacity-50"
+        className="rounded-md border px-2 py-1 text-[16px] disabled:opacity-50"
         style={{ borderColor: "var(--color-hair)" }}
       >
         <option value="">{options.length === 0 && !disabled ? `${placeholder} (없음)` : placeholder}</option>
@@ -300,7 +300,7 @@ function Input({
   step?: string;
 }) {
   return (
-    <label className="flex flex-col gap-1 text-[11.5px]">
+    <label className="flex flex-col gap-1 text-[15.5px]">
       <span className="text-ink2">{label}</span>
       <input
         type={type}
@@ -311,7 +311,7 @@ function Input({
         inputMode={inputMode}
         min={min}
         step={step}
-        className={`rounded-md border px-2 py-1 text-[12px] ${mono ? "font-mono text-[11px]" : ""}`}
+        className={`rounded-md border px-2 py-1 text-[16px] ${mono ? "font-mono text-[15px]" : ""}`}
         style={{ borderColor: "var(--color-hair)" }}
       />
     </label>
@@ -319,7 +319,7 @@ function Input({
 }
 
 function FieldHelp({ children }: { children: React.ReactNode }) {
-  return <p className="-mt-1 mb-0 text-[10.5px] leading-relaxed text-ink2">{children}</p>;
+  return <p className="-mt-1 mb-0 text-[14.5px] leading-relaxed text-ink2">{children}</p>;
 }
 
 function Result({ data }: { data: SalesRunResponse }) {
@@ -330,12 +330,12 @@ function Result({ data }: { data: SalesRunResponse }) {
           <Metric label="처리 결과" value={END_CODES[data.end_code] ?? "정의되지 않은 결과"} />
           <Metric label="만들어진 후보" value={`${data.candidates.length}건`} />
         </div>
-        <p className="mb-0 mt-3 text-[12px] text-ink2">후보 {data.candidates.length}건을 생성했습니다. 아래 금일 판매안에서 검토할 수 있습니다.</p>
-        {data.reason && <p className="mb-0 mt-1 text-[12px] text-ink2">{data.reason}</p>}
+        <p className="mb-0 mt-3 text-[16px] text-ink2">후보 {data.candidates.length}건을 생성했습니다. 아래 금일 판매안에서 검토할 수 있습니다.</p>
+        {data.reason && <p className="mb-0 mt-1 text-[16px] text-ink2">{data.reason}</p>}
         <div className="mt-3">
           <TechDetails>
             {/* 🔴 코드와 뜻을 같이 보여 준다 — 뜻만 남기면 되짚을 수 없다. */}
-            <p className="m-0 font-mono text-[11px] text-ink2">
+            <p className="m-0 font-mono text-[15px] text-ink2">
               end_code {data.end_code} · request_id {data.request_id} · history_run_id{" "}
               {data.history_run_id ?? "null"}
             </p>
@@ -347,7 +347,7 @@ function Result({ data }: { data: SalesRunResponse }) {
       ))}
       {data.report_text && (
         <Panel title="AI 설명" subtitle="숫자는 위 판정에서 옵니다 — 설명이 값을 만들지 않습니다">
-          <p className="mb-0 whitespace-pre-wrap text-[12px] text-ink2">{data.report_text}</p>
+          <p className="mb-0 whitespace-pre-wrap text-[16px] text-ink2">{data.report_text}</p>
         </Panel>
       )}
     </>
@@ -378,14 +378,14 @@ function CandidateCard({ candidate }: { candidate: SalesCandidateOut }) {
         <Domain title="물류" block={logistics} />
       </div>
       {candidate.missing_terms.length > 0 && (
-        <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+        <p className="mb-0 mt-3 text-[15.5px] text-ink2">
           빠진 조건: <span className="font-mono">{candidate.missing_terms.join(", ")}</span>
         </p>
       )}
       {Array.isArray(scenario.evidence_refs) && (scenario.evidence_refs as string[]).length > 0 && (
-        <details className="mt-3 text-[11.5px]">
+        <details className="mt-3 text-[15.5px]">
           <summary className="cursor-pointer text-ink2">근거 {(scenario.evidence_refs as string[]).length}건</summary>
-          <p className="mb-0 mt-1 break-all font-mono text-[10.5px] text-ink2">
+          <p className="mb-0 mt-1 break-all font-mono text-[14.5px] text-ink2">
             {(scenario.evidence_refs as string[]).join(", ")}
           </p>
         </details>
@@ -414,12 +414,12 @@ function Domain({
 }) {
   return (
     <div className="rounded-lg border p-3" style={{ borderColor: "var(--color-hair)" }}>
-      <b className="text-[12px]">{title}</b>
+      <b className="text-[16px]">{title}</b>
       {!state.present ? (
-        <p className="mb-0 mt-1 text-[11.5px] text-ink2">이 후보에 해당 검토가 호출되지 않았습니다.</p>
+        <p className="mb-0 mt-1 text-[15.5px] text-ink2">이 후보에 해당 검토가 호출되지 않았습니다.</p>
       ) : (
         <>
-          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px]">
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[15.5px]">
             <span>
               판단 <b>{verdictText(state.verdict)}</b>
             </span>
@@ -427,11 +427,11 @@ function Domain({
           </div>
           <div className="mt-2">
             <TechDetails summary="적용된 규칙 사유">
-              <p className="m-0 font-mono text-[11px] text-ink2">
+              <p className="m-0 font-mono text-[15px] text-ink2">
                 runtime {state.runtime} · verdict {state.verdict ?? "null"}
               </p>
               {state.reasons.length > 0 && (
-                <p className="mb-0 mt-2 break-all font-mono text-[10.5px] text-ink2">
+                <p className="mb-0 mt-2 break-all font-mono text-[14.5px] text-ink2">
                   {state.reasons.join(", ")}
                 </p>
               )}

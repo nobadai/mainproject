@@ -10,6 +10,7 @@ from app.api.primitives import Card, Chart, Column, Note, Series, Source, Stat, 
 from app.api.sales.schema import SalesTab
 from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.sales.dashboard import get_sales_dashboard
+from app.sales.db import read_connection_scope
 
 _ORDER_STATUS_LABELS = {
     "CONFIRMED": "판매 확정",
@@ -19,7 +20,11 @@ _ORDER_STATUS_LABELS = {
 
 
 def build(as_of: date) -> SalesTab:
-    dash = get_sales_dashboard(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
+    #  🔵 **이 조회 안의 SELECT 들이 커넥션 하나를 나눠 쓴다** (2026-09-17). 종전에는
+    #     안쪽 `fetch_all` 이 호출마다 새로 열어 **한 판에 6개**였다 (원격 DB · 개당
+    #     14~22ms). 읽기뿐이라 되는 일이고, 규칙과 경고는 저쪽 docstring 에 있다.
+    with read_connection_scope():
+        dash = get_sales_dashboard(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
     summary = dash.summary
     quantity_detail = f"고객 {summary.customer_count}곳 · 총 {_kg(summary.total_sales_quantity_kg)}"
     receivable_detail = (

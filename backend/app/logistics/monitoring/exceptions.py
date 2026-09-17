@@ -27,13 +27,13 @@ from typing import Any
 
 from psycopg import sql
 
-from app.logistics.agent.schemas import (
+from app.logistics.db import get_db_schema
+from app.logistics.monitoring.schemas import (
     LIVE_STATUSES,
     DetectionRecord,
     ExceptionEvidence,
     ExceptionRow,
 )
-from app.logistics.db import get_db_schema
 
 __all__ = [
     "EXCEPTION_CLOSE_DATE_UNRESOLVED",

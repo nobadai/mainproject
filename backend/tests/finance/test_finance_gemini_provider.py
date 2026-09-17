@@ -238,13 +238,17 @@ def _mock_successful_pre_purchase(monkeypatch, provider, finalizer_type):
     ★ Tool 순서는 합법이어야 한다. `analyze_payment_pressure` 와
       `calculate_purchase_finance_cap` 은 `cashflow_projection` 을 선행으로 요구한다.
     """
+    #: 🔴 **Planner 가 불리는 자리만 적는다.** 고를 것이 하나뿐인 단계와 종료 단계는
+    #:    Harness 가 결정론으로 정한다. 그 자리의 답까지 적어 두면 이미 실행한 Tool 을
+    #:    다시 요청하게 되어 중복 반려가 난다.
+    #:
+    #:    실행 순서는 `assess → project → pressure → cap` 으로 예전과 같다 —
+    #:    사이의 `project_cashflow` 와 마지막 `calculate_purchase_finance_cap` 은
+    #:    그때 유일한 합법 Tool 이다.
     actions = iter(
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
             ToolAction("analyze_payment_pressure"),
-            ToolAction("calculate_purchase_finance_cap"),
-            ToolAction(finalize=True),
         ]
     )
     original_decide = LangChainFinancePlanner.decide
@@ -423,8 +427,12 @@ def test_configured_gemini_unavailable_uses_observable_ollama_provider_fallback(
     assert reply.runtime_status == "READY"
     assert metadata.llm_status == "SUCCESS"
     assert metadata.llm_fallback_used is False
-    assert metadata.llm_model == "gemma3:4b"
-    assert metadata.llm_attempts == 7
+    #  🔴 Finalizer 는 이 실행에서 불리지 않았다(설명 후보 1개). 그래서 «이번 실행에서
+    #     실제로 답한 모델» 은 Planner 쪽이고, 가용성 대체가 걸렸으므로 대체 모델 이름이다.
+    assert metadata.llm_model == "llama3.2:3b"
+    #  Planner 3회(가용성 대체로 primary 1 + fallback 2). 예전 7 에서 줄어든 4 는
+    #  고를 것이 없던 Planner 자리 둘과 Finalizer 호출 둘이다.
+    assert metadata.llm_attempts == 3
     assert controller.planner.state.active is True
     assert _provider_observation(metadata) == {
         "effective_provider": "ollama",

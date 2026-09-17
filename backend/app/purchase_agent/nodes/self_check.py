@@ -12,6 +12,7 @@ from itertools import pairwise
 from typing import Any, NamedTuple
 
 from app.purchase_agent import AGENT_VERSION
+from app.purchase_agent.allocation import cumulative_overflow
 from app.purchase_agent.config import load_constraints
 from app.purchase_agent.features import INFORMATION_REQUESTS, enabled
 from app.purchase_agent.nodes._guards import pending_value
@@ -19,12 +20,14 @@ from app.purchase_agent.nodes.collect_context import TRUNCATION_MARK
 from app.purchase_agent.nodes.draft_plan import (
     purchase_budget_krw,
     split_adjustments,
+    warehouse_cap_for,
     warehouse_cap_kg,
 )
 from app.purchase_agent.nodes.split_plan import effective_allowed_axes
 from app.purchase_agent.schemas import (
     DOCUMENT_SOURCE,
     FIXED_MARKET,
+    TIMING_AXIS,
     PurchaseProposal,
     document_ref,
     is_document_ref,
@@ -107,8 +110,13 @@ def check_max_price(scenario: dict) -> str | None:
     return None
 
 
-def check_warehouse_capacity(scenario: dict, inventory: dict) -> str | None:
-    """창고 **총량 축** — 총수량 ≤ 창고 여유 + 외부임차 한도.
+def check_warehouse_capacity(
+    scenario: dict,
+    inventory: dict,
+    state: PurchaseAgentState | None = None,
+    constraints: dict | None = None,
+) -> str | None:
+    """창고 **총량 축** — 총수량 ≤ 그 안이 도달할 수 있는 창고 여유.
 
     ⚠️ **날짜 축은 여기가 아니라** ``check_arrival_capacity`` 가 본다. 같은 자원(창고)의
     두 축이라 둘 다 있어야 하고, 둘 다 통과해야 안이 산다::
@@ -123,9 +131,31 @@ def check_warehouse_capacity(scenario: dict, inventory: dict) -> str | None:
     ⚠️ **공용화 지점.** §4-⑦은 이 검사를 공용 모듈의 ``check_warehouse_capacity()``로 두고
     매입·T3·Critic이 import하라고 규정한다 — "자체 구현 금지, 매입 통과·T3 FAIL 반복 방지".
     그 모듈이 아직 없어 여기 있다. 생기면 이 함수를 지우고 import로 바꾼다 (현서님 협의 항목).
-    상한 식 자체는 ③과 공유한다(``warehouse_cap_kg``) — 두 곳에 복제하면 한쪽만 바뀐다.
+    상한 식 자체는 ③과 공유한다 — 두 곳에 복제하면 한쪽만 바뀐다.
+
+    🔴 **상한이 날짜 축 위로 옮겨졌다** (2026-09-16 · E3-9 앞단). 전에는
+      ``warehouse_cap_kg`` (= 오늘 여유 + 임차)였는데, 그것은 ``cap_by_date[오늘]`` 과
+      같은 뜻이고 **도착일은 오늘이 아니다.** 이제 ③ 과 **같은 함수**(``warehouse_cap_for``)
+      를 불러 그 안이 실제로 도달하는 날의 여유를 본다.
+
+      ⚠️ **완화가 아니다.** 회차가 하나면 상한은 그대로 첫 도착일 여유이고, 날짜 축을
+        못 보면 예전 값으로 폴백한다. 그리고 날짜별 누적은 ``check_arrival_capacity`` 가
+        **따로, 더 엄격히** 본다 — 두 축은 그대로 둘 다 통과해야 한다.
+
+      ★ ``state`` 를 안 주면 예전 기준으로 돈다 — 이 함수를 단위로 부르는 자리가 있고,
+        그쪽은 날짜 축 입력이 없다. 🔴 그때도 **상한을 안 거는 선택은 하지 않는다.**
     """
-    cap = warehouse_cap_kg(inventory)
+    if state is None:
+        cap = warehouse_cap_kg(inventory)
+    else:
+        cap = warehouse_cap_for(
+            state,
+            constraints or load_constraints(),
+            scenario["coverage_days"],
+            # 🔴 **실린 축을 본다** — ⑥ 이 되돌린 안은 여기서 ``False`` 가 되고,
+            #   그래서 ③ 이 잡은 상한과 ⑦ 이 재는 상한이 **같은 수**가 된다.
+            splitting=scenario.get("strategy_type") == TIMING_AXIS,
+        ).cap_kg
     if scenario["total_qty_kg"] > cap:
         return f"창고 초과: {scenario['total_qty_kg']:,}kg > 여유+임차 {cap:,}kg"
     return None
@@ -360,22 +390,24 @@ def arrival_capacity(scenario: dict, state: PurchaseAgentState) -> ArrivalCapaci
         # 포기하는 것과 같은 이유다.
         return ArrivalCapacity(skipped=_unknown_reason(unknown, state))
 
-    occupied = 0
-    for item, day in zip(rounds, arrivals, strict=True):
-        occupied += item["qty_kg"]
-        # 수용량은 **상한**이라 내림한다 — ⑥·``warehouse_cap_kg`` 와 같은 방향이다.
-        cap = int(cap_by_date[day])
-        if occupied > cap:
-            # 🔴 **정도를 보지 않는다.** cap_by_date 는 물류 guaranteed 기반 하드 제약이라
-            #   넘으면 물리적으로 안 들어간다. 완화 임계를 두면 물류 값을 우리가 무르는
-            #   것이 되고, 총량 축(``check_warehouse_capacity``)이 1kg 초과도 컷하는 것과
-            #   기준이 갈린다 (#93 결정).
-            return ArrivalCapacity(
-                violation=(
-                    f"날짜별 창고 초과: {day} 도착 누적 {occupied:,}kg > 그날 여유 {cap:,}kg "
-                    f"({item['seq']}회차 {item['qty_kg']:,}kg까지 더한 값)"
-                )
+    # 🔴 **누적 산술은 ``allocation.cumulative_overflow`` 하나가 쥔다** (2026-09-16).
+    #   ⑥ 의 되돌림 판정이 같은 함수를 부른다 — 두 곳이 각자 더하면 ⑥ 이 «선다» 고 본
+    #   분할을 ⑦ 이 컷하고, 그날 안은 왜 죽었는지 설명할 수 없게 된다.
+    # 수용량은 **상한**이라 내림한다 — ⑥·``warehouse_cap_kg`` 와 같은 방향이다.
+    넘침 = cumulative_overflow([item["qty_kg"] for item in rounds], arrivals, cap_by_date)
+    if 넘침 is not None:
+        # 🔴 **정도를 보지 않는다.** cap_by_date 는 물류 guaranteed 기반 하드 제약이라
+        #   넘으면 물리적으로 안 들어간다. 완화 임계를 두면 물류 값을 우리가 무르는
+        #   것이 되고, 총량 축(``check_warehouse_capacity``)이 1kg 초과도 컷하는 것과
+        #   기준이 갈린다 (#93 결정).
+        index, occupied, cap = 넘침
+        item = rounds[index]
+        return ArrivalCapacity(
+            violation=(
+                f"날짜별 창고 초과: {arrivals[index]} 도착 누적 {occupied:,}kg > "
+                f"그날 여유 {cap:,}kg ({item['seq']}회차 {item['qty_kg']:,}kg까지 더한 값)"
             )
+        )
     return ArrivalCapacity()
 
 
@@ -779,7 +811,7 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
             or check_max_price(scenario)
             # 창고 두 축은 붙여 둔다 — **총량이 먼저다.** 총량이 이미 넘으면 날짜별
             # 사유는 부차적이고, 컷 사유는 한 안에 하나만 나간다.
-            or check_warehouse_capacity(scenario, state["inventory"])
+            or check_warehouse_capacity(scenario, state["inventory"], state, constraints)
             or arrival.violation
             or check_cash_ceiling(scenario, state, constraints)
             or check_split_dates(scenario, state["date"])
@@ -811,6 +843,19 @@ def self_check(state: PurchaseAgentState) -> dict[str, Any]:
 
     # ⑥과 **같은 목록**을 본다 — ④가 안 나눈 날의 timing 을 뺀 뒤 판정한다 (`#308`).
     effective_axes = effective_allowed_axes(state["allowed_axes"], state["split_plan"])
+    # 🔴 **⑥ 이 되돌린 날은 ④ 가 «진입했다» 여도 timing 을 쓴 안이 없다** (2026-09-16 ·
+    #   E3-9 앞단). 분할이 실제로 안 서서 일괄로 내려온 안은 ``strategy_type`` 이
+    #   ``quantity`` 이고, 그 목록을 안 맞추면 «축이 둘인데 전 안 동일» 로 **살아 있던
+    #   안이 통째로 반려된다** — `#308` 이 막으려던 바로 그 20셀 모양이다.
+    #
+    # 🔴 **「timing 안이 없다」만 보지 않는다** (2026-09-16 검토). 그 안이 현금·등급 등
+    #   **다른 검사에서 탈락**해서 없을 수도 있고, 그때 축을 빼면 *"축이 둘인데 아무도
+    #   안 썼다"* 라는 사실이 조용히 사라진다. ⑥ 이 **실제로 되돌린 라벨**을 적어 보내고,
+    #   그것이 있을 때만 좁힌다.
+    #   ⚠️ 목록을 **좁히기만** 한다. 안 쓴 축을 빼는 것이지 검사를 끄는 것이 아니다.
+    되돌린 = state.get("split_rolled_back_labels") or []
+    if 되돌린 and survivors and all(s["strategy_type"] != TIMING_AXIS for s in survivors):
+        effective_axes = [axis for axis in effective_axes if axis != TIMING_AXIS]
     diversity = check_axis_diversity(survivors, effective_axes)
     if diversity:
         rejected.extend({"label": s["label"], "reason": diversity} for s in survivors)

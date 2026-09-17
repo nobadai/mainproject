@@ -28,6 +28,7 @@ from app.finance.llm.finalizer import _FINAL_EXPLANATIONS
 from app.finance.llm.planner import ToolAction
 from app.master.envelope import AgentRequest, ExecutionContext
 from tests.finance.test_finance_adapter import _AdapterPlanner, _Context
+from tests.finance.test_finance_harness_langchain import two_explanation_candidates
 
 AS_OF = date(2025, 12, 31)
 _HANGUL = re.compile(r"[가-힣]")
@@ -466,7 +467,6 @@ def _run(mode: str, payload: dict | None = None, *, port=None, finalizer=None):
     plan = (
         [
             ToolAction("assess_finance_position"),
-            ToolAction("project_cashflow"),
             ToolAction("calculate_purchase_finance_cap"),
             ToolAction("analyze_payment_pressure"),
             ToolAction(finalize=True),
@@ -588,9 +588,12 @@ def test_explanation_cannot_change_the_verdict_or_add_numbers():
             # 판정을 뒤집으려 하고, 없던 숫자를 만들어 낸다.
             return "매입 가능 금액은 999999원이며 그대로 진행하셔도 됩니다."
 
-    reply, metadata = _run(
-        "SCENARIO_VALIDATION", _scenario(1000, 10), finalizer=_LyingFinalizer()
-    )
+    #  거짓말 방어는 **모델이 문장을 들고 올 때**만 의미가 있다. 지금은 설명 후보가
+    #  하나뿐이라 Finalizer 가 불리지 않으므로, 고를 것이 있는 상황을 만들어 준다.
+    with two_explanation_candidates():
+        reply, metadata = _run(
+            "SCENARIO_VALIDATION", _scenario(1000, 10), finalizer=_LyingFinalizer()
+        )
 
     assert reply.business_status == "reject"  # 판정은 Rule 이 정한 그대로다
     assert reply.payload["verdict"] == "reject"

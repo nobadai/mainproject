@@ -733,8 +733,8 @@ def get_purchase_record(request_id: str) -> PurchaseRecordOut:
         **base,
         status="NOT_APPLIED",
         reason=(
-            "기록은 남았고 아직 매입 원장에 반영되지 않았습니다"
-            " · 다음 개장 뒤 재시도가 기록값으로 다시 반영합니다"
+            "기록은 남았습니다 · 입고 처리 중입니다"
+            " — 다음 개장 때 매입 원장에 반영됩니다"
         ),
         record=record,
     )

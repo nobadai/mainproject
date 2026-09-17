@@ -49,13 +49,14 @@ from decimal import Decimal
 from typing import Any
 
 from app.contracts.core import Evidence, SuggestedAdjustment
-from app.logistics.agent.schemas import snapshot_observed_as_of
 from app.logistics.interpretation import (
     build_sanitized_context,
     master_interpretation_service,
     uncalled_interpretation,
 )
 from app.logistics.llm.schemas import InterpretationResult
+from app.logistics.monitoring.schemas import snapshot_observed_as_of
+from app.logistics.query.status_query import answer_status_question
 from app.logistics.repository import LogisticsRead, get_current_logistics_read
 from app.logistics.rules import (
     derive_procurement_verdict,
@@ -503,7 +504,16 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
       🔴 **신선도 넷의 모집단은 `ACTIVE` Lot 이라 위 `lot_count` 와 다르다.**
          `lot_count` 는 창고에 남아 있는 Lot 전부다 — 비-ACTIVE 도 반출 전이면 공간을
          차지하므로 Repository 가 status 로 거르지 않는다. 두 수의 합은 안 맞는다.
+
+    ★ **질문형 경로 (Issue #789 · LOG-MDS-004).** `payload={"question": ...}` 이면
+      자연어 조회다 — 기존 Overview 대신 `answer_status_question` 이 topics/scope/items 를
+      해석하고 기존 Read-only Tool 을 조합해 답한다. `payload={}` (또는 질문 없음)이면
+      아래 기존 Overview 를 **그대로** 탄다.
     """
+    question = str(request.payload.get("question") or "").strip()
+    if question:
+        return _status_question(request, question)
+
     as_of = request.context.as_of
     run_id = _run_id(request)
     tools: list[str] = [_T_LOTS]
@@ -811,6 +821,61 @@ def _status_query(request: AgentRequest) -> tuple[AgentReply, ExecutionMetadata]
         reasoning="현재 창고·재고 상태를 조회했다."
         if not missing
         else "읽어낸 상태는 답했고, 채우지 못한 값은 이름을 밝혔다.",
+    )
+    return reply, _meta(request, run_id, tools, reply)
+
+
+# ---------------------------------------------------------------------------
+# STATUS_QUERY — 질문형 (자연어 조회 · Issue #789 · LOG-MDS-004)
+# ---------------------------------------------------------------------------
+
+#: 질문형 조회가 부를 수 있는 Read-only Tool (관측용 — DeptMeta 는 조회라 안 붙는다).
+_STATUS_QUESTION_TOOLS: tuple[str, ...] = (
+    "get_item_lots",
+    "get_sales_commitments",
+    "get_capacity_context",
+    "get_inbound_schedule",
+    "get_open_exceptions",
+    "get_policy",
+)
+
+
+def _status_question(
+    request: AgentRequest, question: str
+) -> tuple[AgentReply, ExecutionMetadata]:
+    """자연어 STATUS_QUERY. 🔴 **해석·resolver·Tool 조합은 `agent.status_query` 소유다.**
+
+    ★ 어댑터는 question 을 넘기고 결과를 봉투로 감쌀 뿐이다 — 품목 파싱도 숫자 계산도
+      여기서 하지 않는다 (Master 가 question 만 넘기는 것과 같은 규율).
+    """
+    run_id = _run_id(request)
+    tools = list(_STATUS_QUESTION_TOOLS)
+    try:
+        answer = answer_status_question(
+            question=question,
+            sim_run_id=request.context.sim_run_id,
+            as_of=request.context.as_of,
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("STATUS_QUERY 질문형 조회 실패")
+        return _snapshot_error(request, run_id, tools)
+
+    reply = AgentReply(
+        request_id=request.context.request_id,
+        as_of=request.context.as_of,
+        agent=_AGENT,
+        mode=request.mode,
+        run_id=run_id,
+        runtime_status="READY",
+        business_status="ok",
+        payload=dict(answer.payload),
+        # 🔴 숫자를 한 Mapping 아래 접었으므로 최상위 근거 요구가 없다 — 판정도 없다.
+        evidences=(),
+        # 여러 Tool·여러 축의 관측일을 한 값으로 대표하지 않는다 (안 쟀다).
+        observed_at=None,
+        judgment_fields=(),
+        missing_data=answer.missing_data,
+        reasoning=answer.reasoning or "질문형 물류 상태를 조회했다.",
     )
     return reply, _meta(request, run_id, tools, reply)
 

@@ -1,7 +1,7 @@
 """입고 파이프라인 **끝까지** 실제 PostgreSQL 에서 돌린다 (3-B4-I).
 
 ```text
-Receipt ARRIVED → Inspection → Lot → Ledger IN → Receipt PUTAWAY_DONE → 일정 정리
+Receipt ARRIVED → Inspection → Lot → Ledger IN → Receipt PUTAWAY_DONE
 ```
 
 한 트랜잭션 안에서 전부 돌고, 끝나면 **통째로 롤백한다** — 공유 `haetdeul` 에는
@@ -13,7 +13,7 @@ Receipt ARRIVED → Inspection → Lot → Ledger IN → Receipt PUTAWAY_DONE �
 Lot NOT NULL 열 칸 · CHECK 넷 · FK 넷
 잔량이 원장으로만 움직이는가          Lot 은 0 으로 서고 IN 이 accepted 로 올린다
 잠금 셋이 한 트랜잭션에서 안 엉키나    도착 전역 → fixture 행 → 원장 전역 → Lot 행
-JSONB 일정에서 그 건만 빠지는가
+처리가 끝난 건만 도착 대상·미래 점유에서 빠지는가   (inbound_schedules Reader)
 ```
 
 ★ **이관판을 임시 스키마에 적용해서 돈다.** `database/logistics_inventory_lots_nullable.sql`
@@ -26,16 +26,22 @@ import ast
 import json
 import re
 from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import psycopg
 import pytest
 
-from app.logistics import inbound_stock, inspections, receipts
+from app.logistics import inbound_schedules, inbound_stock, inspections, receipts
 from app.logistics.arrival import DueInbound
 from app.logistics.db import get_connection
+from app.logistics.inbound_schedules import (
+    in_transit_at,
+    load_schedule_views,
+    pending_inbound_at,
+    receivable_at,
+)
 from app.logistics.inbound_stock import (
     LotConflict,
     LotIntegrityError,
@@ -55,7 +61,10 @@ TMP_SCHEMA = "inbound_stock_verify"
 SIM_RUN_ID = "SIM-INBOUND-TEST"
 ITEM_ID = "ITEM-BAECHU"
 PURCHASE_ITEM_ID = "PI-TEST"
+PURCHASE_ID = "PUR-THRU-20260105-BAECHU-D1-S1"
 INBOUND_ID = "INB-H1-THRU-20260105-BAECHU-1-1"
+#: 일정이 장부에 선 날 (승인일). 도착일·기준일보다 앞이다.
+CREATED_AS_OF = date(2026, 1, 5)
 ETA = date(2026, 1, 7)
 AS_OF = date(2026, 1, 7)
 USAGE_SCOPE = "AGENT_MVP_DEMO"
@@ -72,7 +81,8 @@ _STUBS = f"""
 CREATE TABLE {TMP_SCHEMA}.items (item_id text PRIMARY KEY, item_name text);
 CREATE TABLE {TMP_SCHEMA}.partners (partner_id text PRIMARY KEY);
 CREATE TABLE {TMP_SCHEMA}.sim_runs (sim_run_id text PRIMARY KEY);
-CREATE TABLE {TMP_SCHEMA}.purchase_items (purchase_item_id text PRIMARY KEY);
+CREATE TABLE {TMP_SCHEMA}.purchase_items (
+    purchase_item_id text PRIMARY KEY, purchase_id text, item_id text);
 CREATE TABLE {TMP_SCHEMA}.sales (sale_id text PRIMARY KEY);
 CREATE TABLE {TMP_SCHEMA}.sale_items (sale_item_id text PRIMARY KEY);
 """
@@ -132,13 +142,17 @@ def conn(monkeypatch: pytest.MonkeyPatch) -> Iterator[psycopg.Connection]:
 
             cur.execute(f"INSERT INTO {TMP_SCHEMA}.items VALUES (%s, %s)", (ITEM_ID, "배추"))
             cur.execute(f"INSERT INTO {TMP_SCHEMA}.sim_runs VALUES (%s)", (SIM_RUN_ID,))
-            cur.execute(f"INSERT INTO {TMP_SCHEMA}.purchase_items VALUES (%s)", (PURCHASE_ITEM_ID,))
+            cur.execute(
+                f"INSERT INTO {TMP_SCHEMA}.purchase_items VALUES (%s, %s, %s)",
+                (PURCHASE_ITEM_ID, PURCHASE_ID, ITEM_ID),
+            )
             cur.execute(
                 f"INSERT INTO {TMP_SCHEMA}.item_storage_policies"
                 " (item_id, storage_zone, operational_policy_status) VALUES (%s, %s, %s)",
                 (ITEM_ID, ZONE, "PROVISIONAL"),
             )
-        for module in (receipts, inspections, inbound_stock):
+        # ★ `inbound_schedules` 도 돌린다 — 안 돌리면 Reader 가 공유 `haetdeul` 을 읽는다.
+        for module in (receipts, inspections, inbound_stock, inbound_schedules):
             monkeypatch.setattr(module, "get_db_schema", lambda: TMP_SCHEMA)
         from app.logistics import ledger
 
@@ -156,7 +170,7 @@ def conn(monkeypatch: pytest.MonkeyPatch) -> Iterator[psycopg.Connection]:
 def _due() -> DueInbound:
     item = InTransitItem(
         inbound_id=INBOUND_ID,
-        purchase_id="PUR-THRU-20260105-BAECHU-D1-S1",
+        purchase_id=PURCHASE_ID,
         item="배추",
         quantity_kg=QTY,
         expected_arrival_date=ETA,
@@ -164,7 +178,7 @@ def _due() -> DueInbound:
     return DueInbound(
         item=item,
         inbound_id=INBOUND_ID,
-        purchase_id="PUR-THRU-20260105-BAECHU-D1-S1",
+        purchase_id=PURCHASE_ID,
         expected_arrival_date=ETA,
         overdue=False,
     )
@@ -180,7 +194,7 @@ def _detail(*, grade: str | None = None) -> PurchaseDetail:
     )
 
 
-def _일정(conn: psycopg.Connection) -> None:
+def _일정(conn: psycopg.Connection, *, as_of: date = AS_OF) -> None:
     """그날 fixture 행을 세운다 — 이번 입고 한 건이 두 칸에 짝으로 들어 있다."""
     운송 = [
         {
@@ -212,12 +226,46 @@ def _일정(conn: psycopg.Connection) -> None:
             (
                 "FIX-TEST-1",
                 SIM_RUN_ID,
-                AS_OF,
+                as_of,
                 json.dumps(운송),
                 json.dumps(확정),
                 USAGE_SCOPE,
             ),
         )
+
+
+def _입고예정(
+    conn: psycopg.Connection,
+    *,
+    inbound_id: str = INBOUND_ID,
+    purchase_item_id: str = PURCHASE_ITEM_ID,
+    quantity_kg: Decimal = QTY,
+    eta: date = ETA,
+) -> None:
+    """입고 예정의 **정본** 한 행 (`inbound_schedules`). 승인이 한 번 넣는 그 행이다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""INSERT INTO {TMP_SCHEMA}.inbound_schedules (
+                inbound_id, sim_run_id, purchase_item_id, quantity_kg,
+                expected_arrival_date, created_as_of, source_ref
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'TEST')""",
+            (inbound_id, SIM_RUN_ID, purchase_item_id, quantity_kg, eta, CREATED_AS_OF),
+        )
+
+
+def _목록(conn: psycopg.Connection, as_of: date = AS_OF) -> dict[str, list[str]]:
+    """세 Reader 가 그날 내는 `inbound_id` 목록."""
+    return {
+        "in_transit": [
+            x.inbound_id for x in in_transit_at(conn, sim_run_id=SIM_RUN_ID, as_of=as_of)
+        ],
+        "receivable": [
+            x.inbound_id for x in receivable_at(conn, sim_run_id=SIM_RUN_ID, as_of=as_of)
+        ],
+        "pending": [
+            x.inbound_id for x in pending_inbound_at(conn, sim_run_id=SIM_RUN_ID, as_of=as_of)
+        ],
+    }
 
 
 def _영수와_검수(
@@ -264,17 +312,6 @@ def _moves(conn: psycopg.Connection) -> list[dict]:
         return [
             r if isinstance(r, dict) else dict(zip(이름, r, strict=True)) for r in cur.fetchall()
         ]
-
-
-def _fixture(conn: psycopg.Connection) -> dict:
-    with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT in_transit_json, in_transit_status, confirmed_inbound_json,"
-            f" confirmed_inbound_status FROM {TMP_SCHEMA}.logistics_runtime_fixture"
-        )
-        이름 = [d.name for d in cur.description]
-        row = cur.fetchone()
-    return row if isinstance(row, dict) else dict(zip(이름, row, strict=True))
 
 
 def _영수상태(conn: psycopg.Connection) -> str:
@@ -430,7 +467,7 @@ def test_9c_보관_정책이_없으면_멈춘다(conn: psycopg.Connection) -> No
 
 
 def test_10_12_같은_입고를_다시_돌려도_Lot_도_Move_도_하나다(conn: psycopg.Connection) -> None:
-    """🔴 **전체 멱등이다.** 일정은 이미 걷혔고 Receipt 는 역행하지 않는다."""
+    """🔴 **전체 멱등이다.** Lot · Move 가 다시 서지 않고 Receipt 는 역행하지 않는다."""
     _일정(conn)
     receipt_id = _영수와_검수(conn)
 
@@ -442,7 +479,6 @@ def test_10_12_같은_입고를_다시_돌려도_Lot_도_Move_도_하나다(conn
     assert len(_lots(conn)) == 1
     assert len(_moves(conn)) == 1
     assert 두번.receipt_status == "PUTAWAY_DONE"
-    assert 두번.schedule_cleared is False, "이미 걷혔다"
     assert _lots(conn)[0]["remaining_qty_kg"] == QTY, "잔량이 두 번 늘지 않는다"
 
 
@@ -467,166 +503,195 @@ def test_11_사실이_다른_기존_Lot_이면_충돌이다(conn: psycopg.Connec
 
 
 def test_20_accepted_0_도_정상_완료된다(conn: psycopg.Connection) -> None:
-    """★ REJECT 재실행도 멱등해야 한다 — 0kg Move 를 만들지 않는다."""
+    """★ 전량 거부는 Lot · IN 없이 끝나는 **정상 완료**다 — 미래 입고로 다시 서지 않는다.
+
+    REJECT 재실행도 멱등해야 한다 — 0kg Move 를 만들지 않는다.
+    """
     _일정(conn)
+    _입고예정(conn)
     receipt_id = _영수와_검수(conn, verdict="REJECT", accepted="0", hold="0", reject=str(QTY))
 
     첫번 = _돌린다(conn, receipt_id)
     두번 = _돌린다(conn, receipt_id)
 
     assert 첫번.receipt_status == "PUTAWAY_DONE"
-    assert 첫번.schedule_cleared is True
     assert 두번.applied is False
+    assert _lots(conn) == [], "만들 재고가 없다"
     assert _moves(conn) == [], "0kg Move 를 만들지 않는다"
-    assert _fixture(conn)["in_transit_status"] == "CONFIRMED_ZERO"
-
-
-# ── 13~17. 일정 정리 ────────────────────────────────────────────────────
-
-
-def test_13_16_두_칸에서_함께_빠지고_비면_CONFIRMED_ZERO_다(conn: psycopg.Connection) -> None:
-    _일정(conn)
-    receipt_id = _영수와_검수(conn)
-
-    결과 = _돌린다(conn, receipt_id)
-
-    fx = _fixture(conn)
-    assert 결과.schedule_cleared is True
-    assert fx["in_transit_json"] == []
-    assert fx["confirmed_inbound_json"] == []
-    assert fx["in_transit_status"] == "CONFIRMED_ZERO"
-    assert fx["confirmed_inbound_status"] == "CONFIRMED_ZERO"
-
-
-def test_17_다른_일정이_남으면_CONFIRMED_를_지킨다(conn: psycopg.Connection) -> None:
-    남의것_운송 = {
-        "inbound_id": "INB-OTHER-9",
-        "item": "무",
-        "quantity_kg": "120.5",
-        "expected_arrival_date": "2026-01-09",
-    }
-    남의것_확정 = {
-        "inbound_id": "INB-OTHER-9",
-        "item": "무",
-        "quantity_kg": "120.5",
-        "date": "2026-01-09",
-    }
-    운송 = [
-        {
-            "inbound_id": INBOUND_ID,
-            "item": "배추",
-            "quantity_kg": str(QTY),
-            "expected_arrival_date": ETA.isoformat(),
-        },
-        남의것_운송,
-    ]
-    확정 = [
-        {
-            "inbound_id": INBOUND_ID,
-            "item": "배추",
-            "quantity_kg": str(QTY),
-            "date": ETA.isoformat(),
-        },
-        남의것_확정,
-    ]
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""INSERT INTO {TMP_SCHEMA}.logistics_runtime_fixture (
-                fixture_id, sim_run_id, as_of, in_transit_status, in_transit_json,
-                confirmed_inbound_status, confirmed_inbound_json,
-                confirmed_outbound_status, confirmed_outbound_json,
-                usage_scope, evidence_grade, source_ref, approved_by, is_active
-            ) VALUES (%s, %s, %s, 'CONFIRMED', %s, 'CONFIRMED', %s,
-                      'CONFIRMED_ZERO', '[]'::jsonb, %s, 'SIM_FIXED', 'TEST', 'HUMAN', TRUE)""",
-            ("FIX-TEST-1", SIM_RUN_ID, AS_OF, json.dumps(운송), json.dumps(확정), USAGE_SCOPE),
+    views = load_schedule_views(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
+    assert [(v.has_receipt, v.stock_applied, v.settled_without_stock) for v in views] == [
+        (True, False, True)
+    ], "재고가 선 것은 아니다 — 수용 0 으로 처리가 끝난 것이다"
+    for 날 in (AS_OF, AS_OF + timedelta(days=30)):
+        assert _목록(conn, 날) == {"in_transit": [], "receivable": [], "pending": []}, (
+            f"{날} 에 미래 입고로 다시 서면 안 된다"
         )
+
+
+def test_20b_Receipt_만_서고_처리_중이면_도착_대상과_미래_점유에_남는다(
+    conn: psycopg.Connection,
+) -> None:
+    """🔴 수용 0 완료 조건이 **처리 중 Receipt** 를 완료로 삼키지 않는다.
+
+    ```text
+    ARRIVED     수용 칸이 아직 없다
+    INSPECTED   수용 0 이지만 재고화(PUTAWAY_DONE) 전이다 — 다음 실행이 이어받는다
+    ```
+    """
+    _입고예정(conn)
+    receipt_id = create_arrived_receipt(
+        conn, sim_run_id=SIM_RUN_ID, inbound=_due(), purchase_detail=_detail()
+    ).receipt_id
+    남음 = {"in_transit": [], "receivable": [INBOUND_ID], "pending": [INBOUND_ID]}
+
+    assert _영수상태(conn) == "ARRIVED"
+    assert _목록(conn) == 남음
+
+    record_inspection(
+        conn,
+        receipt_id=receipt_id,
+        inspected_at=INSPECTED_AT,
+        inspector=INSPECTOR,
+        outcome=InspectionOutcome(
+            verdict="REJECT",
+            inspected_qty_kg=QTY,
+            accepted_qty_kg=Decimal(0),
+            hold_qty_kg=Decimal(0),
+            reject_qty_kg=QTY,
+        ),
+    )
+
+    assert _영수상태(conn) == "INSPECTED"
+    views = load_schedule_views(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
+    assert [(v.has_receipt, v.stock_applied, v.settled_without_stock) for v in views] == [
+        (True, False, False)
+    ]
+    assert _목록(conn) == 남음
+
+
+def test_20c_검수가_도착보다_늦으면_수용_0_완료는_검수일부터다(conn: psycopg.Connection) -> None:
+    """🔴 과거 조회에 지금 상태를 섞지 않는다 — 수용 0 완료의 날짜는 검수 `inspected_at` 이다.
+
+    ```text
+    01-07 도착 · 01-09 검수(수용 0) · 같은 날 재고화 → PUTAWAY_DONE
+    as_of 01-08   아직 끝나지 않았다   도착 대상 · 미래 점유에 남는다
+    as_of 01-09   끝났다              둘 다에서 빠진다
+    ```
+    """
+    검수일 = date(2026, 1, 9)
+    _일정(conn, as_of=검수일)
+    _입고예정(conn)
+    receipt_id = create_arrived_receipt(
+        conn, sim_run_id=SIM_RUN_ID, inbound=_due(), purchase_detail=_detail()
+    ).receipt_id
+    record_inspection(
+        conn,
+        receipt_id=receipt_id,
+        # ★ 시뮬레이션 검수 제공자와 같은 모양 (`as_of 00:00 UTC` = 그날 09:00 KST).
+        inspected_at=datetime.combine(검수일, time.min, tzinfo=UTC),
+        inspector=INSPECTOR,
+        outcome=InspectionOutcome(
+            verdict="REJECT",
+            inspected_qty_kg=QTY,
+            accepted_qty_kg=Decimal(0),
+            hold_qty_kg=Decimal(0),
+            reject_qty_kg=QTY,
+        ),
+    )
+    결과 = materialize_inspected_inbound(
+        conn,
+        as_of=검수일,
+        receipt_id=receipt_id,
+        purchase_detail=_detail(),
+        usage_scope=USAGE_SCOPE,
+    )
+    assert 결과.receipt_status == "PUTAWAY_DONE"
+
+    assert _목록(conn, date(2026, 1, 8)) == {
+        "in_transit": [],
+        "receivable": [INBOUND_ID],
+        "pending": [INBOUND_ID],
+    }, "01-08 에는 도착만 했고 검수 전이다 — 지금의 PUTAWAY_DONE 을 과거에 싣지 않는다"
+    assert _목록(conn, 검수일) == {"in_transit": [], "receivable": [], "pending": []}
+
+
+# ── 13~17. 일정 — 걷지 않고 Reader 에서 빠진다 ─────────────────────────
+
+
+def test_13_16_재고가_서면_일정은_남고_세_목록에서_빠진다(conn: psycopg.Connection) -> None:
+    """🔴 일정 행을 지우거나 취소로 바꾸지 않는다 — 완료는 Lot + 원장 IN 으로 유도된다."""
+    _일정(conn)
+    _입고예정(conn)
     receipt_id = _영수와_검수(conn)
 
     _돌린다(conn, receipt_id)
 
-    fx = _fixture(conn)
-    assert fx["in_transit_json"] == [남의것_운송], "남의 일정은 그대로 있어야 한다"
-    assert fx["confirmed_inbound_json"] == [남의것_확정]
-    assert fx["in_transit_status"] == "CONFIRMED"
-    assert fx["confirmed_inbound_status"] == "CONFIRMED"
+    views = load_schedule_views(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
+    assert [(v.inbound_id, v.has_receipt, v.stock_applied) for v in views] == [
+        (INBOUND_ID, True, True)
+    ], "일정 행은 그대로 있고, 완료는 계보가 말한다"
+    assert _목록(conn) == {"in_transit": [], "receivable": [], "pending": []}
 
 
-def test_14_한쪽_일정만_있으면_무결성_오류다(conn: psycopg.Connection) -> None:
-    """🔴 한쪽만 지우면 그 불일치를 덮는 것이 된다."""
+def test_17_다른_일정은_그대로_세_목록에_남는다(conn: psycopg.Connection) -> None:
+    남의것 = "INB-OTHER-9"
     with conn.cursor() as cur:
+        cur.execute(f"INSERT INTO {TMP_SCHEMA}.items VALUES (%s, %s)", ("ITEM-MU", "무"))
         cur.execute(
-            f"""INSERT INTO {TMP_SCHEMA}.logistics_runtime_fixture (
-                fixture_id, sim_run_id, as_of, in_transit_status, in_transit_json,
-                confirmed_inbound_status, confirmed_inbound_json,
-                confirmed_outbound_status, confirmed_outbound_json,
-                usage_scope, evidence_grade, source_ref, approved_by, is_active
-            ) VALUES (%s, %s, %s, 'CONFIRMED', %s, 'CONFIRMED_ZERO', '[]'::jsonb,
-                      'CONFIRMED_ZERO', '[]'::jsonb, %s, 'SIM_FIXED', 'TEST', 'HUMAN', TRUE)""",
-            (
-                "FIX-TEST-1",
-                SIM_RUN_ID,
-                AS_OF,
-                json.dumps(
-                    [
-                        {
-                            "inbound_id": INBOUND_ID,
-                            "item": "배추",
-                            "quantity_kg": str(QTY),
-                            "expected_arrival_date": ETA.isoformat(),
-                        }
-                    ]
-                ),
-                USAGE_SCOPE,
-            ),
+            f"INSERT INTO {TMP_SCHEMA}.purchase_items VALUES (%s, %s, %s)",
+            ("PI-OTHER", "PUR-OTHER", "ITEM-MU"),
         )
+    _일정(conn)
+    _입고예정(conn)
+    _입고예정(
+        conn,
+        inbound_id=남의것,
+        purchase_item_id="PI-OTHER",
+        quantity_kg=Decimal("120.5"),
+        eta=date(2026, 1, 9),
+    )
     receipt_id = _영수와_검수(conn)
 
-    with pytest.raises(ScheduleIntegrityError, match="짝을 이루지"):
-        _돌린다(conn, receipt_id)
+    _돌린다(conn, receipt_id)
+
+    assert _목록(conn) == {"in_transit": [남의것], "receivable": [남의것], "pending": [남의것]}, (
+        "내 입고만 빠지고 남의 일정은 그대로 남는다"
+    )
+    assert [
+        (x.item, x.quantity_kg, x.date)
+        for x in pending_inbound_at(conn, sim_run_id=SIM_RUN_ID, as_of=AS_OF)
+    ] == [("무", Decimal("120.5"), date(2026, 1, 9))]
 
 
-def test_15_B1_불일치면_무결성_오류다(conn: psycopg.Connection) -> None:
-    """🔴 어긋난 상태를 조용히 지우면 어긋나 있었다는 사실조차 안 남는다."""
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""INSERT INTO {TMP_SCHEMA}.logistics_runtime_fixture (
-                fixture_id, sim_run_id, as_of, in_transit_status, in_transit_json,
-                confirmed_inbound_status, confirmed_inbound_json,
-                confirmed_outbound_status, confirmed_outbound_json,
-                usage_scope, evidence_grade, source_ref, approved_by, is_active
-            ) VALUES (%s, %s, %s, 'CONFIRMED', %s, 'CONFIRMED', %s,
-                      'CONFIRMED_ZERO', '[]'::jsonb, %s, 'SIM_FIXED', 'TEST', 'HUMAN', TRUE)""",
-            (
-                "FIX-TEST-1",
-                SIM_RUN_ID,
-                AS_OF,
-                json.dumps(
-                    [
-                        {
-                            "inbound_id": INBOUND_ID,
-                            "item": "배추",
-                            "quantity_kg": str(QTY),
-                            "expected_arrival_date": ETA.isoformat(),
-                        }
-                    ]
-                ),
-                json.dumps(
-                    [
-                        {
-                            "inbound_id": INBOUND_ID,
-                            "item": "배추",
-                            "quantity_kg": "999",  # 🔴 수량이 다르다
-                            "date": ETA.isoformat(),
-                        }
-                    ]
-                ),
-                USAGE_SCOPE,
-            ),
-        )
+def test_14_그날_fixture_행이_없으면_무결성_오류다(conn: psycopg.Connection) -> None:
+    """🔴 도착 처리를 걸 Header 행이 없는데 재고를 세우지 않는다."""
     receipt_id = _영수와_검수(conn)
 
-    with pytest.raises(ScheduleIntegrityError, match="사실이 다르다"):
+    with pytest.raises(ScheduleIntegrityError, match="fixture 행이 없다"):
         _돌린다(conn, receipt_id)
+
+    assert _lots(conn) == []
+    assert _moves(conn) == []
+    assert _영수상태(conn) == "INSPECTED", "완료로 넘어가지 않는다"
+
+
+def test_15_Receipt_에_inbound_id_가_없으면_무결성_오류다(conn: psycopg.Connection) -> None:
+    """🔴 일정으로 되짚을 열쇠가 없는 Receipt 를 재고로 세우지 않는다."""
+    _일정(conn)
+    receipt_id = _영수와_검수(conn)
+    with conn.cursor() as cur:
+        # ★ DDL 이 이 칸을 NULL 로 허용한다 — 정상 생성 경로만 채운다.
+        cur.execute(
+            f"UPDATE {TMP_SCHEMA}.inbound_receipts SET inbound_id = NULL WHERE receipt_id = %s",
+            (receipt_id,),
+        )
+
+    with pytest.raises(ScheduleIntegrityError, match="inbound_id 가 없어"):
+        _돌린다(conn, receipt_id)
+
+    assert _lots(conn) == []
+    assert _moves(conn) == []
+    assert _영수상태(conn) == "INSPECTED", "완료로 넘어가지 않는다"
 
 
 # ── 18~21. Receipt 상태와 범위 ──────────────────────────────────────────

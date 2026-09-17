@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.master.decision import DecisionOut
 from app.master.envelope import AgentName
@@ -41,6 +41,18 @@ class AskRequest(BaseModel):
     policy_version: str = Field(min_length=1)
     request_id: str | None = None
     budget: int = Field(default=12, ge=1, le=50)
+    # Report UI가 선택한 실행/기간. 기존 발화-only 호출과 호환되도록 전부 선택값이다.
+    sim_run_id: str | None = Field(default=None, min_length=1)
+    date_from: date | None = None
+    date_to: date | None = None
+
+    @model_validator(mode="after")
+    def validate_report_dates(self) -> AskRequest:
+        if (self.date_from is None) != (self.date_to is None):
+            raise ValueError("시작일과 종료일을 모두 선택해 주세요.")
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValueError("시작일은 종료일보다 늦을 수 없습니다.")
+        return self
 
 
 class AskExecuteRequest(BaseModel):
@@ -134,16 +146,16 @@ class AnswerOut(BaseModel):
 
 
 class DomainActionAnswer(BaseModel):
-    """Finance/Sales/Partner 자연어 명령의 구조화 결과."""
+    """Finance/Sales/Logistics/Partner 자연어 명령의 구조화 결과."""
 
     model_config = ConfigDict(extra="forbid")
 
-    domain: Literal["finance", "sales", "partner"]
+    domain: Literal["finance", "sales", "logistics", "partner"]
     action: str
     text: str
     data: dict[str, Any] = Field(default_factory=dict)
     markdown: str | None = None
-    report_kind: Literal["FINANCE", "SALES"] | None = None
+    report_kind: Literal["FINANCE", "SALES", "LOGISTICS"] | None = None
 
 
 class AskResponse(BaseModel):
