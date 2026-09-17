@@ -24,7 +24,7 @@ export function TechDetails({
       className="rounded-xl border bg-panel px-4 py-3"
       style={{ borderColor: "var(--color-hair)" }}
     >
-      <summary className="cursor-pointer list-none text-[12px] text-ink2">
+      <summary className="cursor-pointer list-none text-[16px] text-ink2">
         <span className="select-none">▸ {summary}</span>
       </summary>
       <div className="mt-3">{children}</div>
@@ -35,7 +35,7 @@ export function TechDetails({
 /** 기준일과 데이터 출처 한 줄. **내부 식별자를 쓰지 않는다.** */
 export function DataBasis({ asOf, note }: { asOf: string; note: string }) {
   return (
-    <p className="m-0 flex flex-wrap items-baseline gap-x-5 gap-y-1 text-[12px] text-ink2">
+    <p className="m-0 flex flex-wrap items-baseline gap-x-5 gap-y-1 text-[16px] text-ink2">
       <span>
         기준일 <b className="text-ink tabular-nums">{asOf}</b>
       </span>
@@ -60,8 +60,8 @@ export function NoRunChosen() {
       className="rounded-xl border border-dashed bg-panel px-5 py-10 text-center"
       style={{ borderColor: "var(--color-hair)" }}
     >
-      <p className="m-0 text-[15px] font-semibold">먼저 볼 자료를 선택해 주세요</p>
-      <p className="mb-0 mt-2 text-[12px] text-ink2">
+      <p className="m-0 text-[19px] font-semibold">먼저 볼 자료를 선택해 주세요</p>
+      <p className="mb-0 mt-2 text-[16px] text-ink2">
         이 화면의 모든 숫자는 하나의 시뮬레이션 결과에 묶여 있습니다. 위의 «실행을 선택해
         주세요» 를 열어 자료를 고르면 그 자료에 저장된 사실만 보여 줍니다.
       </p>

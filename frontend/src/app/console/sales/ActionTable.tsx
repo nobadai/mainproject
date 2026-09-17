@@ -57,7 +57,7 @@ export function ActionTable<T>({
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px]">
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[16px]">
         <label className="sr-only">주문·판매 검색</label>
         <input
           value={search}
@@ -85,18 +85,18 @@ export function ActionTable<T>({
         <span className="text-ink2">검색 결과 {filtered.length}건</span>
       </div>
       {filtered.length === 0 ? (
-        <p className="m-0 rounded-lg border px-4 py-5 text-[12px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
+        <p className="m-0 rounded-lg border px-4 py-5 text-[16px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
           조건에 맞는 주문·판매 항목이 없습니다. 검색어 또는 검색 항목을 바꿔 보세요.
         </p>
       ) : <>
       <div className="thin-scroll overflow-x-auto">
-        <table className="w-full border-collapse text-[12px]">
+        <table className="w-full border-collapse text-[16px]">
         <thead>
           <tr>
             {columns.map((column) => (
               <th
                 key={column.key}
-                className={`border-b px-2 py-2 text-[11px] font-semibold text-ink2 ${
+                className={`border-b px-2 py-2 text-[15px] font-semibold text-ink2 ${
                   column.align === "right" ? "text-right" : "text-left"
                 }`}
                 style={{ borderColor: "var(--color-hair)" }}
@@ -114,7 +114,7 @@ export function ActionTable<T>({
                   key={column.key}
                   className={`border-b px-2 py-2 ${
                     column.align === "right" ? "text-right tabular-nums" : ""
-                  } ${column.mono ? "font-mono text-[11px]" : ""}`}
+                  } ${column.mono ? "font-mono text-[15px]" : ""}`}
                   style={{ borderColor: "var(--color-hair)" }}
                 >
                   {column.render(row)}
@@ -125,7 +125,7 @@ export function ActionTable<T>({
         </tbody>
       </table>
     </div>
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[12px] text-ink2">
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[16px] text-ink2">
         <span>{currentPage * pageSize + 1}–{Math.min((currentPage + 1) * pageSize, filtered.length)} / {filtered.length}건</span>
         <div className="flex items-center gap-2">
           <button type="button" onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={currentPage === 0} className="rounded-md border px-2 py-1 disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--color-hair)" }}>이전</button>

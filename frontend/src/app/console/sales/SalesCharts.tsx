@@ -58,14 +58,14 @@ export function SalesTrendChart({ data }: { data: SalesTrendResponse }) {
               dataKey="index"
               axisLine={false}
               tickLine={false}
-              tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+              tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
               tickFormatter={(index: number) => points[index]?.label ?? ""}
               minTickGap={24}
             />
             <YAxis
               axisLine={false}
               tickLine={false}
-              tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+              tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
               tickFormatter={(value: number) => manwon(value)}
               width={68}
             />
@@ -88,7 +88,7 @@ export function SalesTrendChart({ data }: { data: SalesTrendResponse }) {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <p className="mb-0 mt-2 text-[12px] leading-relaxed text-ink2">
+      <p className="mb-0 mt-2 text-[16px] leading-relaxed text-ink2">
         판매가 있었던 {points.length}일만 표시합니다 — 판 날이 없는 날을 0원으로 채우지 않습니다.
         {/* ⚠️ 가로축은 날짜가 아니라 «판매가 있었던 날» 의 차례다. 칸 간격을 실제 날짜
             간격으로 읽으면 하루 차이와 열흘 차이가 같아 보인다. */}{" "}
@@ -120,7 +120,7 @@ export function SalesItemChart({ data }: { data: SalesSummaryResponse }) {
             type="number"
             axisLine={false}
             tickLine={false}
-            tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+            tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
             tickFormatter={(value: number) => manwon(value)}
           />
           <YAxis
@@ -128,7 +128,7 @@ export function SalesItemChart({ data }: { data: SalesSummaryResponse }) {
             dataKey="name"
             axisLine={false}
             tickLine={false}
-            tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+            tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
             width={96}
           />
           <Tooltip
@@ -187,7 +187,7 @@ export function SalesPartnerChart({ rows }: { rows: PartnerRow[] }) {
             type="number"
             axisLine={false}
             tickLine={false}
-            tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+            tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
             tickFormatter={(value: number) => manwon(value)}
           />
           <YAxis
@@ -195,7 +195,7 @@ export function SalesPartnerChart({ rows }: { rows: PartnerRow[] }) {
             dataKey="name"
             axisLine={false}
             tickLine={false}
-            tick={{ fill: "var(--color-mut2)", fontSize: 11 }}
+            tick={{ fill: "var(--color-mut2)", fontSize: 15 }}
             width={110}
           />
           <Tooltip
@@ -220,7 +220,7 @@ export function SalesPartnerChart({ rows }: { rows: PartnerRow[] }) {
         </BarChart>
       </ResponsiveContainer>
       </div>
-      <p className="mb-0 mt-2 text-[12px] text-ink2">
+      <p className="mb-0 mt-2 text-[16px] text-ink2">
         {hidden > 0
           ? `매출이 있는 거래처 ${selling.length}곳 중 상위 ${points.length}곳입니다 - 나머지 ${hidden}곳은 표시하지 않았습니다.`
           : `매출이 있는 거래처 ${selling.length}곳을 모두 표시했습니다.`}
@@ -233,7 +233,7 @@ export function SalesPartnerChart({ rows }: { rows: PartnerRow[] }) {
 
 function Box({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="min-w-52 rounded-lg border border-hair bg-panel p-3 text-[12px] shadow-lg">
+    <div className="min-w-52 rounded-lg border border-hair bg-panel p-3 text-[16px] shadow-lg">
       <p className="mb-2 mt-0 font-semibold">{title}</p>
       <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">{children}</dl>
     </div>

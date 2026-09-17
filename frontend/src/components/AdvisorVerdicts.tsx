@@ -37,7 +37,7 @@ export function AdvisorVerdicts({ verdicts }: { verdicts: ProcurementRunResponse
 
   return (
     <div className="rounded-lg border border-line bg-sunk p-3">
-      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.05em] text-muted">
+      <p className="mb-2 text-[15px] font-semibold uppercase tracking-[0.05em] text-muted">
         부서 판정
       </p>
       <div className="flex flex-col gap-2">
@@ -67,30 +67,30 @@ function AdvisorRow({
   return (
     <div className="rounded-lg border border-line-soft bg-surface px-3 py-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="text-[13px] font-semibold text-ink">{name}</span>
+        <span className="text-[17px] font-semibold text-ink">{name}</span>
         {label ? (
           <span
-            className={`rounded-md border px-1.5 py-0.5 text-[11.5px] ${
+            className={`rounded-md border px-1.5 py-0.5 text-[15.5px] ${
               STATUS_TONE[verdict.business_status] ?? "border-line text-muted"
             }`}
           >
             {label}
           </span>
         ) : (
-          <span className="rounded-md border border-warn/35 px-1.5 py-0.5 text-[11.5px] text-warn">
+          <span className="rounded-md border border-warn/35 px-1.5 py-0.5 text-[15.5px] text-warn">
             판정 없음
           </span>
         )}
         {verdict.runtime_status !== "READY" && (
-          <span className="text-[11.5px] text-warn">판정을 받지 못했습니다</span>
+          <span className="text-[15.5px] text-warn">판정을 받지 못했습니다</span>
         )}
-        {verdict.needs_followup && <span className="text-[11.5px] text-warn">후속 확인 필요</span>}
+        {verdict.needs_followup && <span className="text-[15.5px] text-warn">후속 확인 필요</span>}
         {hasDetail && (
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
             aria-expanded={open}
-            className="ml-auto rounded-md border border-line px-2 py-0.5 text-[11.5px] text-muted hover:border-accent hover:text-accent-ink"
+            className="ml-auto rounded-md border border-line px-2 py-0.5 text-[15.5px] text-muted hover:border-accent hover:text-accent-ink"
           >
             {open ? "접기" : "자세히"}
           </button>
@@ -98,10 +98,10 @@ function AdvisorRow({
       </div>
 
       {verdict.reasoning && (
-        <p className="m-0 mt-1 text-[12.5px] leading-relaxed text-muted">{verdict.reasoning}</p>
+        <p className="m-0 mt-1 text-[16.5px] leading-relaxed text-muted">{verdict.reasoning}</p>
       )}
       {logistics?.conditionalNote && (
-        <p className="m-0 mt-1 text-[12.5px] leading-relaxed text-warn">
+        <p className="m-0 mt-1 text-[16.5px] leading-relaxed text-warn">
           {logistics.conditionalNote}
         </p>
       )}
@@ -114,7 +114,7 @@ function AdvisorRow({
 
 function FinanceDetail({ summary }: { summary: FinanceSummary }) {
   return (
-    <div className="mt-2 flex flex-col gap-2 border-t border-line-soft pt-2 text-[12.5px]">
+    <div className="mt-2 flex flex-col gap-2 border-t border-line-soft pt-2 text-[16.5px]">
       {summary.sharedCap && (
         <p className="m-0">
           <span className="text-muted">매입에 쓸 수 있는 한도</span>
@@ -165,7 +165,7 @@ function FinanceDetail({ summary }: { summary: FinanceSummary }) {
 
 function LogisticsDetail({ summary }: { summary: LogisticsSummary }) {
   return (
-    <dl className="m-0 mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-line-soft pt-2 text-[12.5px]">
+    <dl className="m-0 mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-line-soft pt-2 text-[16.5px]">
       {summary.scenarios.length > 0 && (
         <>
           <dt className="text-muted">안별 판정</dt>

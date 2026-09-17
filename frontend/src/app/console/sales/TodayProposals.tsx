@@ -166,7 +166,7 @@ export function TodayProposals({
       />
       {screenState && screenStateText(screenState) && (
         <p
-          className="mb-0 mt-3 rounded-lg px-3 py-2 text-[12px] leading-relaxed"
+          className="mb-0 mt-3 rounded-lg px-3 py-2 text-[16px] leading-relaxed"
           style={{ background: "var(--color-desk)", color: presentationColor(screenState === "PRESENTABLE" ? "PRESENTABLE" : screenState === "REJECTED" ? "REJECTED" : "UNRESOLVED") }}
         >
           {screenStateText(screenState)}
@@ -175,7 +175,7 @@ export function TodayProposals({
           {((unresolvedCount ?? 0) > 0 || (rejectedCount ?? 0) > 0) && "."}
         </p>
       )}
-      <p className="mb-0 mt-1 text-[12px] leading-relaxed text-ink2">
+      <p className="mb-0 mt-1 text-[16px] leading-relaxed text-ink2">
         오늘 판매가 {requestCount}건의 요청을 돌아 {rows.length}개의 안을 만들었습니다
         {items.length > 0 && ` (품목 ${items.join(" · ")})`}. 추천과 선택은 다르며, 선택은 아직 판매 확정이 아닙니다.
         {/* 🔴 지운 것이 아니라 뺀 것이다. 몇 건인지 숫자로 남긴다. */}
@@ -220,11 +220,11 @@ function ApprovalPanel({
   if (result) return <DecisionResult result={result} />;
   return (
     <section className="mt-4 rounded-xl border p-4" style={{ borderColor: "var(--color-hair)" }}>
-      <h3 className="m-0 text-[14px] font-semibold">선택한 안으로 판매 확정</h3>
+      <h3 className="m-0 text-[18px] font-semibold">선택한 안으로 판매 확정</h3>
       {!selected ? (
-        <p className="mb-0 mt-2 text-[12px] text-ink2">판매안을 하나 선택하면 최종 확인을 진행할 수 있습니다.</p>
+        <p className="mb-0 mt-2 text-[16px] text-ink2">판매안을 하나 선택하면 최종 확인을 진행할 수 있습니다.</p>
       ) : (
-        <div className="mt-2 text-[12px] leading-relaxed text-ink2">
+        <div className="mt-2 text-[16px] leading-relaxed text-ink2">
           <p className="m-0"><b className="text-ink">{label(SCENARIO_TYPES, selected.scenario_type)}</b> · {selected.quantity_kg === null ? "수량 정보 없음" : `${Number(selected.quantity_kg).toLocaleString("ko-KR")} kg`} · {moneyWon(selected.reported_sales_amount_krw)}</p>
           {selected.sale_status !== null && <p className="mb-0 mt-1 font-semibold text-[var(--color-t-good)]">판매 확정 완료</p>}
           {/* ★ 왜 못 누르는지 말하지 않으면 사용자는 버튼이 고장 난 줄 안다. */}
@@ -238,7 +238,7 @@ function ApprovalPanel({
         </div>
       )}
       {confirming && selected ? (
-        <div className="mt-3 rounded-lg bg-[var(--color-desk)] p-3 text-[12px]">
+        <div className="mt-3 rounded-lg bg-[var(--color-desk)] p-3 text-[16px]">
           <p className="m-0 font-semibold">판매 확정 전 마지막 확인</p>
           <p className="mb-0 mt-1 text-ink2">서버가 이 안만 다시 확인합니다. 통과하지 못하면 다른 안을 자동으로 선택하지 않습니다.</p>
           <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-ink2">
@@ -262,18 +262,18 @@ function ApprovalPanel({
           </div>
         </div>
       ) : (
-        <button type="button" onClick={onStart} disabled={!canApprove} className="mt-3 rounded-lg border px-3 py-2 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>
+        <button type="button" onClick={onStart} disabled={!canApprove} className="mt-3 rounded-lg border px-3 py-2 text-[16px] font-semibold disabled:cursor-not-allowed disabled:opacity-50" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>
           선택한 안으로 판매 확정
         </button>
       )}
-      {error && <p className="mb-0 mt-3 text-[12px] text-[var(--color-t-bad)]">판매 확정을 완료하지 못했습니다. {error}</p>}
+      {error && <p className="mb-0 mt-3 text-[16px] text-[var(--color-t-bad)]">판매 확정을 완료하지 못했습니다. {error}</p>}
     </section>
   );
 }
 
 function DecisionResult({ result }: { result: SalesDecisionResponse }) {
   if (result.revalidation_outcome === "PASSED" && result.sale?.status === "CONFIRMED") {
-    return <p className="mt-4 rounded-xl border p-4 text-[12px] font-semibold" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>최종 확인을 마쳐 판매가 확정되었습니다.</p>;
+    return <p className="mt-4 rounded-xl border p-4 text-[16px] font-semibold" style={{ borderColor: "var(--color-t-good)", color: "var(--color-t-good)" }}>최종 확인을 마쳐 판매가 확정되었습니다.</p>;
   }
   const text: Record<string, string> = {
     CONDITIONAL: "조건이 변경되어 다시 확인이 필요합니다.",
@@ -281,7 +281,7 @@ function DecisionResult({ result }: { result: SalesDecisionResponse }) {
     ERROR: "최종 확인을 완료하지 못했습니다.",
   };
   const detail = result.sale?.status === "BLOCKED" ? result.sale.reason ?? "판매 확정이 차단되었습니다." : null;
-  return <p className="mt-4 rounded-xl border p-4 text-[12px]" style={{ borderColor: "var(--color-t-warn)" }}>{text[result.revalidation_outcome ?? ""] ?? detail ?? "최종 확인 결과를 확인해 주세요."}{detail && ` ${detail}`}</p>;
+  return <p className="mt-4 rounded-xl border p-4 text-[16px]" style={{ borderColor: "var(--color-t-warn)" }}>{text[result.revalidation_outcome ?? ""] ?? detail ?? "최종 확인 결과를 확인해 주세요."}{detail && ` ${detail}`}</p>;
 }
 
 /**
@@ -294,7 +294,7 @@ function UnresolvedReason({ row }: { row: SalesProposal }) {
   if (row.presentation_state !== "UNRESOLVED") return null;
   if (row.unresolved_reason_codes.length === 0) return null;
   return (
-    <section className="rounded-lg px-3 py-2 text-[12px]" style={{ background: "var(--color-desk)" }}>
+    <section className="rounded-lg px-3 py-2 text-[16px]" style={{ background: "var(--color-desk)" }}>
       <p className="m-0 font-semibold">아직 판정을 받지 못했습니다</p>
       <ul className="m-0 mt-1 list-disc pl-4 text-ink2">
         {row.unresolved_reason_codes.map((code) => (
@@ -315,7 +315,7 @@ function StrategyNote({ row }: { row: SalesProposal }) {
   const lines = strategyLines(row.strategy);
   if (lines.length === 0) return null;
   return (
-    <details className="text-[12px]">
+    <details className="text-[16px]">
       <summary className="cursor-pointer text-ink2">이 안이 어떻게 만들어졌는지 보기</summary>
       <ul className="m-0 mt-1.5 list-disc pl-4 text-ink2">
         {lines.map((line) => (
@@ -356,7 +356,7 @@ export function ProposalCard({
         className="flex flex-wrap items-center gap-2 border-b px-4 py-3"
         style={{ borderColor: "var(--color-hair-soft)" }}
       >
-        <strong className="text-[14px] font-semibold">{itemText(null, row.item)}</strong>
+        <strong className="text-[18px] font-semibold">{itemText(null, row.item)}</strong>
         {kind && <Tag text={kind} color="var(--color-t-info)" />}
         {row.recommended && <Tag text="추천" color="var(--color-t-good)" />}
         {selected && <Tag text="선택됨" color="var(--color-t-info)" />}
@@ -365,14 +365,14 @@ export function ProposalCard({
         {/* 🔴 **제시 상태와 재무 판정을 한 배지에 섞지 않는다.** 앞은 «이 안으로 갈 수
             있나» 이고 뒤는 «재무가 뭐라 했나» 다 — 미판정을 탈락으로 읽게 두지 않는다. */}
         <Tag text={presentationText(row.presentation_state)} color={accent} />
-        <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+        <span className="ml-auto text-[15.5px]" style={{ color: "var(--color-mut)" }}>
           {/* ⚠️ 재무가 아직 안 본 안과 거절된 안은 다른 사실이다. */}
           재무 {row.finance_verdict === null ? "검토 전" : verdictText(row.finance_verdict)}
         </span>
       </header>
 
       <div className="flex flex-col gap-3.5 p-4">
-        <dl className="m-0 flex flex-col gap-1.5 text-[12.5px]">
+        <dl className="m-0 flex flex-col gap-1.5 text-[16.5px]">
           <Line
             label="파는 양"
             value={row.quantity_kg === null ? "데이터 없음" : `${Number(row.quantity_kg).toLocaleString("ko-KR")} kg`}
@@ -409,7 +409,7 @@ export function ProposalCard({
           type="button"
           onClick={onSelect}
           disabled={row.sale_status !== null}
-          className="rounded-lg border px-3 py-2 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-55"
+          className="rounded-lg border px-3 py-2 text-[16px] font-semibold disabled:cursor-not-allowed disabled:opacity-55"
           style={{ borderColor: "var(--color-t-info)", color: "var(--color-t-info)" }}
         >
           {row.sale_status !== null ? "이미 확정된 판매" : selected ? "선택한 판매안" : "이 판매안 선택"}
@@ -519,8 +519,8 @@ function CreditFacts({ row }: { row: SalesProposal }) {
   ];
   return (
     <li className="mt-1 flex flex-col gap-1.5 rounded-lg border px-3 py-2" style={{ borderColor: "var(--color-hair)" }}>
-      <b className="text-[12px]">거래처 여신</b>
-      <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
+      <b className="text-[16px]">거래처 여신</b>
+      <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[16px]">
         {lines.map(([name, value]) => (
           <div key={name} className="contents">
             <dt className="text-ink2">{name}</dt>
@@ -529,14 +529,14 @@ function CreditFacts({ row }: { row: SalesProposal }) {
         ))}
       </dl>
       <span
-        className="text-[12px]"
+        className="text-[16px]"
         style={{ color: required !== null && required > 0 ? "var(--color-t-warn)" : "var(--color-t-good)" }}
       >
         {required !== null && required > 0 ? "현재 조건으로는 바로 판매하기 어렵습니다. " : ""}
         {collectionNeedText(row.required_collection_before_sale_krw)}
       </span>
       {required !== null && required > 0 && (
-        <span className="text-[11.5px] text-ink2">
+        <span className="text-[15.5px] text-ink2">
           {row.expected_credit_recovery_date
             ? `예상 여신 회복일 ${longDate(row.expected_credit_recovery_date)} — 계약상 결제 예정일을 기준으로 한 예상입니다.`
             : //  ⚠️ «모이지 않는다» 로 단정하지 않는다. 이 칸이 생기기 전에 저장된 판정에는
@@ -602,7 +602,7 @@ function Evidence({ row }: { row: SalesProposal }) {
   if (facts.length === 0 && refs.length === 0) return null;
 
   return (
-    <details className="text-[11.5px]">
+    <details className="text-[15.5px]">
       <summary className="cursor-pointer list-none" style={{ color: "var(--color-mut)" }}>
         ▸ 근거 {facts.length + refs.length}건
       </summary>
@@ -635,7 +635,7 @@ function Line({ label: name, value, hero }: { label: string; value: string; hero
         {name}
       </dt>
       <dd
-        className={`m-0 text-right tabular-nums ${hero ? "text-[15px] font-semibold" : ""}`}
+        className={`m-0 text-right tabular-nums ${hero ? "text-[19px] font-semibold" : ""}`}
       >
         {value}
       </dd>
@@ -655,12 +655,12 @@ function Section({
   return (
     <section className="flex flex-col gap-2">
       <h3
-        className="m-0 text-[11.5px] font-semibold"
+        className="m-0 text-[15.5px] font-semibold"
         style={{ color: tone ?? "var(--color-mut)" }}
       >
         {title}
       </h3>
-      <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
+      <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[15.5px] leading-relaxed">
         {children}
       </ul>
     </section>
@@ -670,7 +670,7 @@ function Section({
 function Tag({ text, color }: { text: string; color: string }) {
   return (
     <span
-      className="rounded-full px-2 py-0.5 text-[10.5px] font-semibold"
+      className="rounded-full px-2 py-0.5 text-[14.5px] font-semibold"
       style={{ color, border: `1px solid ${color}` }}
     >
       {text}
@@ -705,15 +705,15 @@ export function TodayProposalsPanel({
       subtitle={`${asOf} 에 만든 판매안입니다. 금액과 판단은 저장된 결과 그대로 표시합니다.`}
     >
       {state.loading ? (
-        <p className="m-0 text-[12px] text-ink2">판매안을 읽고 있습니다.</p>
+        <p className="m-0 text-[16px] text-ink2">판매안을 읽고 있습니다.</p>
       ) : state.error ? (
-          <p className="m-0 whitespace-pre-wrap text-[11.5px] text-ink2">
+          <p className="m-0 whitespace-pre-wrap text-[15.5px] text-ink2">
           판매안을 읽지 못했습니다 - {state.error}
         </p>
       ) : !state.data ? (
-        <p className="m-0 text-[12px] text-ink2">판매안을 읽지 못했습니다.</p>
+        <p className="m-0 text-[16px] text-ink2">판매안을 읽지 못했습니다.</p>
       ) : state.data.rows.length === 0 ? (
-        <p className="m-0 text-[12px] text-ink2">
+        <p className="m-0 text-[16px] text-ink2">
           {state.data.request_count === 0
             ? "이 날짜에는 판매가 돌지 않았습니다."
             : state.data.hidden_zero_quantity > 0

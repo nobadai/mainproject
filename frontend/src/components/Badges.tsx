@@ -25,7 +25,7 @@ export function SourceBadges({ sources }: { sources: Record<string, string> }) {
 
   return (
     <div>
-      <p className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">
+      <p className="mb-1.5 text-[14.5px] font-semibold uppercase tracking-[0.12em] text-faint">
         입력 출처
       </p>
       <div className="flex flex-wrap gap-1.5">
@@ -35,7 +35,7 @@ export function SourceBadges({ sources }: { sources: Record<string, string> }) {
             <span
               key={key}
               title={`${rest.join(":")} — ${GRADE_NOTE[grade] ?? ""}`}
-              className={`rounded px-2 py-0.5 font-mono text-[11px] font-medium ${
+              className={`rounded px-2 py-0.5 font-mono text-[15px] font-medium ${
                 GRADE_STYLE[grade] ?? "bg-sunk text-muted"
               }`}
             >
@@ -68,13 +68,13 @@ export function Panel({
       }`}
     >
       <p
-        className={`mb-1.5 text-[11px] font-semibold uppercase tracking-[0.05em] ${
+        className={`mb-1.5 text-[15px] font-semibold uppercase tracking-[0.05em] ${
           attn ? "text-warn" : "text-muted"
         }`}
       >
         {title}
       </p>
-      <ul className="m-0 list-disc space-y-1 pl-4 text-[13px] text-muted">
+      <ul className="m-0 list-disc space-y-1 pl-4 text-[17px] text-muted">
         {items.map((line) => (
           <li key={line}>{line}</li>
         ))}

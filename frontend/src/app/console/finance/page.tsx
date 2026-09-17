@@ -111,7 +111,7 @@ function Body({ simRun, asOf, tab, onTab }: { simRun: string; asOf: string; tab:
   if (tab === "receivables") return <Receivables simRun={simRun} asOf={asOf} />;
   if (tab === "payables") return <Payables simRun={simRun} asOf={asOf} />;
   if (tab === "expenses") return <Expenses simRun={simRun} asOf={asOf} />;
-  if (tab === "credit") return <><Panel title="여신" subtitle="거래처별 신용 한도와 사용 상태를 확인하고 관리합니다."><p className="m-0 text-sm text-ink2">한도·현재 미수·가용 여신은 Finance read model 값을 그대로 표시합니다.</p></Panel><CreditPanel simRun={simRun} asOf={asOf} /><CreditLimitForm simRun={simRun} asOf={asOf} refreshKey={0} onSaved={() => undefined} /></>;
+  if (tab === "credit") return <><Panel title="여신" subtitle="거래처별 신용 한도와 사용 상태를 확인하고 관리합니다."><p className="m-0 text-[18px] text-ink2">한도·현재 미수·가용 여신은 Finance read model 값을 그대로 표시합니다.</p></Panel><CreditPanel simRun={simRun} asOf={asOf} /><CreditLimitForm simRun={simRun} asOf={asOf} refreshKey={0} onSaved={() => undefined} /></>;
   if (tab === "loans") return <Loans simRun={simRun} asOf={asOf} />;
   return <Runs simRun={simRun} />;
 }
@@ -173,12 +173,12 @@ function Overview({ simRun, asOf, onTab }: { simRun: string; asOf: string; onTab
                 <Metric label="대출 포함 현금" value={moneyWon(closing.loan_cash_balance_krw)} />
               </BasisGroup>
             ) : (
-              <p className="mb-0 text-[12px] text-ink2">
+              <p className="mb-0 text-[16px] text-ink2">
                 기준일까지 마감된 날이 없어 대출 제외·포함 현금을 적을 수 없습니다.
               </p>
             )}
             {closing && closing.close_date !== state.state_date && (
-              <p className="mb-0 text-[11.5px] text-ink2">
+              <p className="mb-0 text-[15.5px] text-ink2">
                 재무 상태는 {state.state_date}, 마지막 일마감은 {closing.close_date} 입니다 - 두
                 숫자는 서로 다른 날의 값입니다.
               </p>
@@ -215,7 +215,7 @@ function Overview({ simRun, asOf, onTab }: { simRun: string; asOf: string; onTab
             </Metrics>
             <div className="mt-4 grid gap-5 sm:grid-cols-2">
               <div>
-                <b className="text-[12px]">받을 돈 — 경과 구간</b>
+                <b className="text-[16px]">받을 돈 — 경과 구간</b>
                 <div className="mt-2">
                   <AgingBars
                     empty="아직 받을 돈이 없습니다."
@@ -229,7 +229,7 @@ function Overview({ simRun, asOf, onTab }: { simRun: string; asOf: string; onTab
                 </div>
               </div>
               <div>
-                <b className="text-[12px]">줄 돈 — 만기 구간</b>
+                <b className="text-[16px]">줄 돈 — 만기 구간</b>
                 <div className="mt-2">
                   <AgingBars
                     empty="아직 줄 돈이 없습니다."
@@ -277,7 +277,7 @@ function BasisGroup({
 }) {
   return (
     <div>
-      <p className="m-0 mb-2 text-[11.5px] text-ink2">
+      <p className="m-0 mb-2 text-[15.5px] text-ink2">
         {title} 기준 <b className="text-ink tabular-nums">{basis}</b>
       </p>
       <Metrics>{children}</Metrics>
@@ -305,7 +305,7 @@ function CashBufferNote({
   const short = value < 0;
   return (
     <p
-      className="mb-0 mt-3 rounded-lg px-3 py-2 text-[12px]"
+      className="mb-0 mt-3 rounded-lg px-3 py-2 text-[16px]"
       style={{
         background: short ? "var(--color-t-bad-bg)" : "var(--color-t-good-bg)",
         color: short ? "var(--color-t-bad)" : "var(--color-t-good)",
@@ -353,14 +353,14 @@ function AgentCard({
           </div>
           {/* 🔴 **화면 위의 데이터 기준일과 다른 축이다.** 이 카드는 실행 전체에서 가장
               최근 판단을 읽으므로, 날짜만 작게 붙여 두면 사용자가 같은 기준일로 읽는다. */}
-          <p className="mb-0 mt-2 text-[11.5px] text-ink2">
+          <p className="mb-0 mt-2 text-[15.5px] text-ink2">
             이 실행에서 가장 최근에 내려진 판단이며, 판단 기준일은{" "}
             <b className="text-ink tabular-nums">{state.data.as_of}</b> 입니다 - 화면 위의 데이터
             기준일과 다를 수 있습니다.
           </p>
           {/* ⚠️ 실행별 LLM 설명은 저장되지 않는다. 없으면 없다고 적고 지어내지 않는다. */}
           {state.data.interpretation && (
-            <p className="mb-0 mt-3 text-[12px] leading-relaxed text-ink2">
+            <p className="mb-0 mt-3 text-[16px] leading-relaxed text-ink2">
               {state.data.interpretation}
             </p>
           )}
@@ -371,17 +371,17 @@ function AgentCard({
                 <Metric label="verdict" value={state.data.verdict ?? "null"} />
                 <Metric label="llm_status" value={state.data.llm_status} />
               </div>
-              <p className="mb-0 mt-3 font-mono text-[11px] text-ink2">
+              <p className="mb-0 mt-3 font-mono text-[15px] text-ink2">
                 {state.data.request_id} · {state.data.mode} · {state.data.sim_run_id}
               </p>
               <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--color-hair)" }}>
-                <b className="text-[12px]">근거 참조</b>
-                <p className="mb-0 mt-1 break-all font-mono text-[11px] text-ink2">
+                <b className="text-[16px]">근거 참조</b>
+                <p className="mb-0 mt-1 break-all font-mono text-[15px] text-ink2">
                   {state.data.evidence?.length ? state.data.evidence.join(", ") : "근거 참조 없음"}
                 </p>
               </div>
               <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--color-hair)" }}>
-                <b className="text-[12px]">저장된 결정론 결과</b>
+                <b className="text-[16px]">저장된 결정론 결과</b>
                 <DeterministicRows result={state.data.deterministic_result} />
               </div>
             </TechDetails>
@@ -401,14 +401,14 @@ function AgentCard({
  */
 function DeterministicRows({ result }: { result: Record<string, unknown> | null }) {
   if (!result) {
-    return <p className="mb-0 mt-1 text-[12px] text-ink2">이 실행에는 저장된 결정론 결과가 없습니다.</p>;
+    return <p className="mb-0 mt-1 text-[16px] text-ink2">이 실행에는 저장된 결정론 결과가 없습니다.</p>;
   }
   const entries = Object.entries(result);
   if (entries.length === 0) {
-    return <p className="mb-0 mt-1 text-[12px] text-ink2">저장된 칸이 없습니다.</p>;
+    return <p className="mb-0 mt-1 text-[16px] text-ink2">저장된 칸이 없습니다.</p>;
   }
   return (
-    <dl className="m-0 mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-x-4 gap-y-1.5 text-[11.5px]">
+    <dl className="m-0 mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-x-4 gap-y-1.5 text-[15.5px]">
       {entries.map(([key, value]) => (
         <div key={key} className="contents">
           <dt className="truncate font-mono text-ink2">{key}</dt>
@@ -455,7 +455,7 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
               type="button"
               onClick={() => setDays(range.key)}
               aria-pressed={days === range.key}
-              className="rounded-full border px-3 py-1 text-[11.5px]"
+              className="rounded-full border px-3 py-1 text-[15.5px]"
               style={{
                 borderColor: days === range.key ? "var(--color-t-info)" : "var(--color-hair)",
                 opacity: days === range.key ? 1 : 0.6,
@@ -465,7 +465,7 @@ function Cashflow({ simRun, asOf }: { simRun: string; asOf: string }) {
             </button>
           ))}
           {rows.length > 0 && (
-            <span className="text-[11.5px] text-ink2">
+            <span className="text-[15.5px] text-ink2">
               {rows[0].close_date} ~ {rows[rows.length - 1].close_date} · {rows.length}일
             </span>
           )}
@@ -848,7 +848,7 @@ function Expenses({ simRun, asOf }: { simRun: string; asOf: string }) {
             ]}
           />
         )}
-        <p className="mb-0 mt-3 text-[11px] text-ink2">
+        <p className="mb-0 mt-3 text-[15px] text-ink2">
           상태 표기: {expenseStatusText("ACCRUED")} · {expenseStatusText("PAID")} · {expenseStatusText("CANCELLED")}.
           취소한 비용은 현금에 영향을 주지 않으며 앞으로 나갈 돈에서도 빠집니다.
         </p>
@@ -897,7 +897,7 @@ function Loans({ simRun, asOf }: { simRun: string; asOf: string }) {
           화면에 내부 상태 이름을 남기지 않으려고 같은 내용을 문장으로 적는다.
           공용 컴포넌트는 이번 판의 수정 범위 밖이라 고치지 않고 쓰지 않는다. */}
       <Panel title="차입 상세">
-        <p className="m-0 text-[12px] leading-relaxed text-ink2">
+        <p className="m-0 text-[16px] leading-relaxed text-ink2">
           대출 건별 이자율·실행일·만기·상환 일정은 아직 기록되지 않습니다. 없는 값을 화면이
           만들지 않으므로, 지금 답할 수 있는 것은 위의 차입잔액까지입니다.
         </p>
@@ -951,7 +951,7 @@ function Runs({ simRun }: { simRun: string }) {
         />
       )}
       {data.rows.length > 0 && (
-        <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+        <p className="mb-0 mt-3 text-[15.5px] text-ink2">
           판단 기준일은 그 판단이 어느 날짜를 두고 내려졌는지이고, 실행 시각은 시스템이 실제로
           계산한 시점입니다 - 둘 다 화면 위의 데이터 기준일과 다른 축입니다.
         </p>

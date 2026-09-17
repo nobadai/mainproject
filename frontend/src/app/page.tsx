@@ -37,35 +37,35 @@ export default function LoginPage() {
           }}
           className="rounded-xl border border-line bg-surface p-6 shadow-[0_1px_2px_rgba(21,26,22,.05),0_8px_24px_-12px_rgba(21,26,22,.18)]"
         >
-          <span className="mb-3.5 grid size-[34px] place-items-center rounded-[9px] bg-accent text-base font-bold text-white">
+          <span className="mb-3.5 grid size-[34px] place-items-center rounded-[9px] bg-accent text-[20px] font-bold text-white">
             햇
           </span>
-          <h1 className="m-0 text-[19px] font-semibold">햇들농산 운영 콘솔</h1>
-          <p className="m-0 mb-5 mt-0.5 text-[13px] text-muted">사번과 이름으로 들어갑니다.</p>
+          <h1 className="m-0 text-[23px] font-semibold">햇들농산 운영 콘솔</h1>
+          <p className="m-0 mb-5 mt-0.5 text-[17px] text-muted">사번과 이름으로 들어갑니다.</p>
 
           <label className="mb-2.5 block">
-            <span className="mb-1 block text-xs text-muted">사번</span>
+            <span className="mb-1 block text-[16px] text-muted">사번</span>
             <input
               value={employeeId}
               onChange={(e) => setEmployeeId(e.target.value)}
               placeholder="2026-0142"
-              className="w-full rounded-lg border border-line bg-surface px-3 py-2 font-mono text-sm outline-none focus:border-accent"
+              className="w-full rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[18px] outline-none focus:border-accent"
             />
           </label>
 
           <label className="mb-1 block">
-            <span className="mb-1 block text-xs text-muted">이름</span>
+            <span className="mb-1 block text-[16px] text-muted">이름</span>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="이현서"
-              className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm outline-none focus:border-accent"
+              className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-[18px] outline-none focus:border-accent"
             />
           </label>
 
           <button
             type="submit"
-            className="mt-4 w-full rounded-lg bg-accent py-2.5 text-sm font-semibold text-white"
+            className="mt-4 w-full rounded-lg bg-accent py-2.5 text-[18px] font-semibold text-white"
           >
             로그인
           </button>

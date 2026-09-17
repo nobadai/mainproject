@@ -76,9 +76,9 @@ function CurrentModels({ rows }: { rows: CurrentModel[] }) {
       className="flex flex-col gap-2 rounded-xl border bg-panel px-4 py-3.5"
       style={{ borderColor: "var(--color-hair)" }}
     >
-      <h2 className="m-0 text-[13px] font-semibold">현재 모델</h2>
+      <h2 className="m-0 text-[17px] font-semibold">현재 모델</h2>
       <div className="overflow-x-auto">
-        <table className="w-full border-collapse text-[12px]">
+        <table className="w-full border-collapse text-[16px]">
           <thead>
             <tr style={{ color: "var(--color-mut2)" }}>
               {["가격", "이름", "만든 날", "학습 끝", "최근 업데이트"].map((h) => (
@@ -135,7 +135,7 @@ function CurrentModels({ rows }: { rows: CurrentModel[] }) {
 /** 「언제 확인한 것인가」. 없으면 «아직 안 돌았다» 는 뜻입니다. */
 function Checked({ at, ran }: { at: string | null; ran: boolean }) {
   return (
-    <p className="m-0 text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
+    <p className="m-0 text-[15.5px]" style={{ color: "var(--color-mut2)" }}>
       {ran && at ? (
         <>
           마지막 확인 <span className="tabular font-mono">{at}</span> · 매일 아침 자동으로
@@ -251,7 +251,7 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
                둘은 다른 질문이고, 하나가 막혔다고 나머지를 지우지 않습니다. */}
         <CurrentModels rows={shown} />
         <p
-          className="m-0 rounded-lg px-4 py-3.5 text-[12.5px]"
+          className="m-0 rounded-lg px-4 py-3.5 text-[16.5px]"
           style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
         >
           {err}
@@ -260,7 +260,7 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
     );
   if (!rows)
     return (
-      <p className="m-0 py-10 text-center text-[12.5px]" style={{ color: "var(--color-mut2)" }}>
+      <p className="m-0 py-10 text-center text-[16.5px]" style={{ color: "var(--color-mut2)" }}>
         확인하는 중…
       </p>
     );
@@ -273,7 +273,7 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
 
       {done.length > 0 && (
         <p
-          className="m-0 rounded-lg px-3.5 py-2.5 text-[12.5px] leading-relaxed"
+          className="m-0 rounded-lg px-3.5 py-2.5 text-[16.5px] leading-relaxed"
           style={{ background: "var(--color-t-good-bg)", color: "var(--color-t-good)" }}
         >
           <b>{done.map((k) => en(KIND, k)).join(" · ")} 모델을 바꿨습니다.</b> 지금 것은 통째로
@@ -286,7 +286,7 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
           className="flex flex-col items-center gap-2.5 rounded-xl border bg-panel px-4 py-12 text-center"
           style={{ borderColor: "var(--color-hair)" }}
         >
-          <p className="m-0 text-[14px] font-semibold">
+          <p className="m-0 text-[18px] font-semibold">
             현재는 모델을 업데이트할 필요가 없습니다.
           </p>
           <Checked at={at} ran={ran} />
@@ -294,7 +294,7 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
       ) : (
         <>
           <p
-            className="m-0 rounded-lg px-3.5 py-2.5 text-[12.5px] leading-relaxed"
+            className="m-0 rounded-lg px-3.5 py-2.5 text-[16.5px] leading-relaxed"
             style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
           >
             ★ <b>새로 학습한 모델이 지금 모델보다 낫습니다.</b> 아래 숫자를 보시고 바꿀지
@@ -308,9 +308,9 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
               style={{ borderColor: "var(--color-hair)" }}
             >
               <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <h2 className="m-0 text-[13.5px] font-semibold">{en(KIND, r.kind)}</h2>
+                <h2 className="m-0 text-[17.5px] font-semibold">{en(KIND, r.kind)}</h2>
                 {r.candidate && (
-                  <span className="font-mono text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
+                  <span className="font-mono text-[15.5px]" style={{ color: "var(--color-mut2)" }}>
                     새 모델 {r.candidate}
                   </span>
                 )}
@@ -326,12 +326,12 @@ export function RetrainTab({ currentModels }: { currentModels?: CurrentModel[] }
                   type="button"
                   onClick={() => void update(r.kind)}
                   disabled={busy !== null}
-                  className="rounded-lg px-3.5 py-2 text-[13px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40"
+                  className="rounded-lg px-3.5 py-2 text-[17px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40"
                   style={{ background: "var(--color-nav)", color: "#f4f3ee" }}
                 >
                   {busy === r.kind ? "바꾸는 중…" : "모델 업데이트"}
                 </button>
-                <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+                <span className="text-[15.5px]" style={{ color: "var(--color-mut)" }}>
                   지금 것은 통째로 백업되고 되돌릴 수 있습니다 · 모델 이름은 안 바뀝니다
                 </span>
               </div>

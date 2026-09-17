@@ -99,7 +99,7 @@ export function PurchaseRecordCard({ requestId }: { requestId: string }) {
   if (load.kind === "error")
     return (
       <Shell>
-        <p className="m-0 text-[12.5px] text-warn">{load.text}</p>
+        <p className="m-0 text-[16.5px] text-warn">{load.text}</p>
       </Shell>
     );
 
@@ -116,14 +116,14 @@ export function PurchaseRecordCard({ requestId }: { requestId: string }) {
         <>
           <RecordTable data={data} />
           {data.status === "APPLIED" ? (
-            <p className="m-0 text-[12.5px] text-muted">
+            <p className="m-0 text-[16.5px] text-muted">
               <b className="text-ink">반영됐습니다.</b> 적은 값으로 매입 원장 · 매입채무 · 입고
               일정이 섰습니다.
             </p>
           ) : (
             // 원장에 아직 안 섰다는 말이다 — 진행 중이지 실패가 아니라 경고색을 쓰지 않는다.
             data.reason && (
-              <p className="m-0 rounded-lg border border-gold/25 bg-gold-wash px-3 py-2 text-[12.5px] text-gold">
+              <p className="m-0 rounded-lg border border-gold/25 bg-gold-wash px-3 py-2 text-[16.5px] text-gold">
                 {data.reason}
               </p>
             )
@@ -152,10 +152,10 @@ function Shell({
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="m-0 text-base font-semibold text-ink">실매입 기록</h3>
+        <h3 className="m-0 text-[20px] font-semibold text-ink">실매입 기록</h3>
         {status && (
           <span
-            className={`rounded px-2 py-0.5 text-[11.5px] font-medium ${STATUS_STYLE[status]}`}
+            className={`rounded px-2 py-0.5 text-[15.5px] font-medium ${STATUS_STYLE[status]}`}
           >
             {STATUS_TEXT[status]}
           </span>
@@ -288,25 +288,25 @@ function RecordForm({
     b == null ? a !== "" : a !== String(b);
 
   const inputClass = (isChanged: boolean) =>
-    `w-full rounded-md border border-line bg-surface px-2 py-1 font-mono text-[12.5px] tabular-nums ${
+    `w-full rounded-md border border-line bg-surface px-2 py-1 font-mono text-[16.5px] tabular-nums ${
       isChanged ? "font-semibold text-gold" : "text-ink"
     }`;
 
   return (
     <>
-      <p className="m-0 text-[12.5px] text-muted">
+      <p className="m-0 text-[16.5px] text-muted">
         실제로 산 값을 적어 주세요. 선정안 값을 미리 채워 두었습니다. 적는 순간 그 값으로 매입
         원장 · 매입채무 · 입고 일정이 섭니다.
       </p>
-      <p className="m-0 text-[11.5px] text-faint">
+      <p className="m-0 text-[15.5px] text-faint">
         매입일은 승인한 안에 적힌 날 그대로라 여기서 바꿀 수 없습니다. 도착일은 실제로 들어온 날로
         고쳐 주세요. 수량은 1kg, 단가는 1원 단위로 적습니다. 금액은 수량 × 단가로 자동으로 섭니다.
       </p>
 
       <div className="overflow-x-auto rounded-lg border border-line bg-surface">
-        <table className="w-full min-w-[660px] border-collapse text-[12.5px]">
+        <table className="w-full min-w-[660px] border-collapse text-[16.5px]">
           <thead>
-            <tr className="bg-sunk text-[10.5px] uppercase tracking-wide text-muted">
+            <tr className="bg-sunk text-[14.5px] uppercase tracking-wide text-muted">
               {["회차", "수량(kg)", "단가(원/kg)", "금액(원)", "매입일", "도착일"].map((h) => (
                 <th key={h} className="px-3 py-1.5 text-left font-semibold">
                   {h}
@@ -370,7 +370,7 @@ function RecordForm({
       </div>
 
       <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-[11.5px]">
+        <label className="flex flex-col gap-1 text-[15.5px]">
           <span className="text-muted">등급</span>
           <input
             value={grade}
@@ -383,11 +383,11 @@ function RecordForm({
           type="button"
           onClick={() => void submit()}
           disabled={busy || !filled || 소수회차.length > 0 || !session}
-          className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
+          className="rounded-lg bg-accent px-4 py-1.5 text-[17px] font-semibold text-white disabled:opacity-45"
         >
           {busy ? "기록하는 중" : "실매입 기록"}
         </button>
-        <span className="text-[11.5px] text-faint">
+        <span className="text-[15.5px] text-faint">
           {session ? `${session.name}님 이름으로 기록합니다` : "로그인 정보를 읽지 못해 기록할 수 없습니다"}
           {" · "}
           <b className="font-semibold text-gold">굵게</b> 표시한 칸은 선정안과 다릅니다
@@ -395,14 +395,14 @@ function RecordForm({
       </div>
 
       {소수회차.length > 0 && (
-        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
+        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[16.5px] text-warn">
           {소수회차.join(" · ")}회차의 수량과 단가에 소수점이 있습니다. 수량은 1kg, 단가는 1원
           단위로 적어 주세요.
         </p>
       )}
 
       {error && (
-        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
+        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[16.5px] text-warn">
           {error}
         </p>
       )}
@@ -424,9 +424,9 @@ function RecordTable({ data }: { data: PurchaseRecordOut }) {
   return (
     <>
       <div className="overflow-x-auto rounded-lg border border-line bg-surface">
-        <table className="w-full min-w-[480px] border-collapse text-[12.5px]">
+        <table className="w-full min-w-[480px] border-collapse text-[16.5px]">
           <thead>
-            <tr className="bg-sunk text-[10.5px] uppercase tracking-wide text-muted">
+            <tr className="bg-sunk text-[14.5px] uppercase tracking-wide text-muted">
               {["회차", "수량", "금액", "매입일", "도착일"].map((h) => (
                 <th key={h} className="px-3 py-1.5 text-left font-semibold">
                   {h}
@@ -450,7 +450,7 @@ function RecordTable({ data }: { data: PurchaseRecordOut }) {
           </tbody>
         </table>
       </div>
-      <p className="m-0 text-[11.5px] text-faint">
+      <p className="m-0 text-[15.5px] text-faint">
         등급 <span className={gradeChanged ? "font-semibold text-gold" : "text-ink"}>{record.grade}</span>
         {" · "}
         {record.recorded_by}님 기록
@@ -536,11 +536,11 @@ function ChangeRequest({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-muted"
+          className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[16.5px] font-semibold text-muted"
         >
           승인 되돌리기
         </button>
-        <span className="text-[11.5px] text-faint">
+        <span className="text-[15.5px] text-faint">
           안을 잘못 골랐거나 값을 잘못 적었으면 여기서 되돌리고 다시 고를 수 있습니다.
         </span>
       </div>
@@ -548,11 +548,11 @@ function ChangeRequest({
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-line bg-sunk p-3">
-      <p className="m-0 text-[12.5px] text-ink">
+      <p className="m-0 text-[16.5px] text-ink">
         <b className="font-semibold">이 승인을 되돌립니다.</b> 되돌리면 적은 값은 매입 원장에
         서지 않고, 안을 다시 골라야 합니다.
       </p>
-      <label className="flex flex-col gap-1 text-[11.5px]">
+      <label className="flex flex-col gap-1 text-[15.5px]">
         <span className="text-muted">무엇을 바꿔야 하나요</span>
         <textarea
           rows={2}
@@ -562,18 +562,18 @@ function ChangeRequest({
             setConfirming(false);
           }}
           placeholder="예: 단가를 잘못 적었습니다. 12,000원이 아니라 1,200원입니다."
-          className="w-full resize-y rounded-md border border-line bg-surface px-2 py-1.5 text-[12.5px] text-ink"
+          className="w-full resize-y rounded-md border border-line bg-surface px-2 py-1.5 text-[16.5px] text-ink"
         />
       </label>
 
       {confirming ? (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[12.5px] text-ink">정말 되돌릴까요?</span>
+          <span className="text-[16.5px] text-ink">정말 되돌릴까요?</span>
           <button
             type="button"
             onClick={() => void send()}
             disabled={busy || !session}
-            className="rounded-lg bg-warn px-3 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-45"
+            className="rounded-lg bg-warn px-3 py-1.5 text-[16.5px] font-semibold text-white disabled:opacity-45"
           >
             {busy ? "되돌리는 중" : "네, 되돌립니다"}
           </button>
@@ -581,7 +581,7 @@ function ChangeRequest({
             type="button"
             onClick={() => setConfirming(false)}
             disabled={busy}
-            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-muted"
+            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[16.5px] font-semibold text-muted"
           >
             아니요
           </button>
@@ -592,18 +592,18 @@ function ChangeRequest({
             type="button"
             onClick={ask}
             disabled={!session}
-            className="rounded-lg border border-warn bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-warn disabled:opacity-45"
+            className="rounded-lg border border-warn bg-surface px-3 py-1.5 text-[16.5px] font-semibold text-warn disabled:opacity-45"
           >
             되돌리기
           </button>
           <button
             type="button"
             onClick={close}
-            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-muted"
+            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[16.5px] font-semibold text-muted"
           >
             그만두기
           </button>
-          <span className="text-[11.5px] text-faint">
+          <span className="text-[15.5px] text-faint">
             {session
               ? `${session.name}님 이름으로 기록합니다`
               : "로그인 정보를 읽지 못해 되돌릴 수 없습니다"}
@@ -612,7 +612,7 @@ function ChangeRequest({
       )}
 
       {error && (
-        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
+        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[16.5px] text-warn">
           {error}
         </p>
       )}
