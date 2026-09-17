@@ -1,4 +1,4 @@
-﻿"""재고·물류 화면 계약을 잠근다 (#675 · 발표용 종합 화면).
+"""재고·물류 화면 계약을 잠근다 (#675 · 발표용 종합 화면).
 
 ```text
 한눈에 보기   기준일에 열린 · 지속되는 · 해소된 물류 문제 + 창고 여유 + 품목별
@@ -316,13 +316,9 @@ def test_기준일_뒤에_갱신된_우선도를_그날_값으로_적지_않는�
         ),
         resolved=(),
     )
-    카드_ = 카드(한눈에(result.tab.panes), "exceptions")
-    행 = 카드_.table.rows[0]
+    행 = 카드(한눈에(result.tab.panes), "exceptions").table.rows[0]
     assert "매우 높음" not in str(행["sev"])
-    #  🔴 칸에는 **결과만** 적고 구현 사정을 쓰지 않는다 (#812) — 종전 문구는
-    #     「기준일 당시 우선도 확인 불가」였다. 이유는 카드 footer 가 한 번 말한다.
-    assert 행["sev"] == "우선도 정보 없음"
-    assert "그날 값으로 쓰지 않아" in (카드_.footer or "")
+    assert "확인 불가" in str(행["sev"])
     assert 행["seen"] == "—"
 
 
@@ -353,7 +349,7 @@ def test_창고_사용량은_화면_품목_필터보다_앞선다(화면):
     """범위 밖 품목의 실물도 창고를 차지한다 — 사용량에서 빼지 않는다."""
     result = 화면(live=(), resolved=(), items=[품목(ITEM_ON_SCREEN), 품목(ITEM_OFF_SCREEN)])
     사용량 = next(
-        s for s in 카드(한눈에(result.tab.panes), "capacity").stats if s.label == "창고 사용량"
+        s for s in 카드(한눈에(result.tab.panes), "capacity").stats if s.label == "현재 사용량"
     )
     assert 사용량.raw == 450.0
 
@@ -386,30 +382,13 @@ def _resv(rid: str, *, status: str, allocated: str, unallocated: str, shipped: b
     )
 
 
-#: 그날 살아 있던 Lot 하나 (`ConsoleInventoryLot` 계약). 표시명은 이 칸들로 만든다.
-def _lot(lot_id: str = "LOT-1", *, item: str = ITEM_ON_SCREEN, 받은날=date(2026, 8, 20)) -> Any:
-    return SimpleNamespace(
-        lot_id=lot_id, item_id=item, item_name=item, grade="상",
-        remaining_qty_kg=Decimal(10), received_at=받은날,
-        remaining_freshness_days=3, disposal_candidate=False,
-    )
-
-
-_INV = SimpleNamespace(lots=[_lot()])
-
-
 def _가짜_후보(물은것: list[tuple[str, ...]]):
-    """`get_fefo_candidates_by_item` 대역 — 어느 품목을 물었는지 적고 품목마다 후보 하나.
+    """`get_fefo_candidates_by_item` 대역 — 어느 품목을 물었는지 적고 품목마다 후보 하나."""
 
-    🔴 **대역도 새 계약을 받는다** (#812). 후보는 이제 그날 Lot 목록과 그날 예약으로
-       만들어지므로 `conn` · `sim_run_id` · `as_of` 를 받지 않는다 — 날짜를 안 받는 것이
-       «두 시간축이 섞일 자리를 없앤다» 는 그 계약이다.
-    """
-
-    def 대역(*, lots: Any, reservations: Any, item_ids: Any):
+    def 대역(*, conn: Any, sim_run_id: str, item_ids: Any, as_of: date):
         품목 = sorted(set(item_ids))
         물은것.append(tuple(품목))
-        #  ★ `ConsoleFefoCandidate` 계약 그대로.
+        #  ★ `ConsoleFefoCandidate` 계약 그대로 — `received_at` 으로 Lot 표시명을 만든다.
         후보 = SimpleNamespace(
             lot_id="LOT-1",
             grade="상",
@@ -432,45 +411,31 @@ def test_FEFO_는_미할당이_남은_예약에만_그리고_끝난_예약은_�
         _resv("R-HOLD", status="ALLOCATED", allocated="100", unallocated="0", shipped=False),
         _resv("R-GONE", status="RELEASED", allocated="0", unallocated="0", shipped=False),
     ])
-    pane = logistics_query._outbound_pane(ob, _INV)
+    pane = logistics_query._outbound_pane(ob, AS_OF, conn=None, sim_run_id="SIM")
     #  🔴 품목마다 한 번 묻고(164번 묻던 자리), 표에는 미할당이 남은 예약만 오른다.
     assert 물은것 == [(ITEM_ON_SCREEN,)]
-    #  🔴 raw Reservation ID 를 싣지 않는다 — **카드 제목이 품목**이다.
-    assert [c.title for c in pane.cards] == [f"{ITEM_ON_SCREEN} 출고 후보"]
-    fefo = 카드(pane, f"fefo-{ITEM_ON_SCREEN}").table
-    assert fefo is not None and len(fefo.rows) == 1
+    fefo = 카드(pane, "fefo").table
+    #  🔴 raw Reservation ID 를 싣지 않는다 — 품목 · 납기로 읽는다.
+    assert fefo is not None and [row["resv"] for row in fefo.rows] == [
+        f"{ITEM_ON_SCREEN} · 납기 미정"
+    ]
     예약 = next(s for s in pane.stats if s.label == "예약")
     assert 예약.value == "2" and "2건은 뺐습니다" in (예약.detail or "")  # 숨기지 않고 적는다
 
 
-def test_FEFO_후보는_품목당_한_벌이고_예약마다_복제되지_않는다(monkeypatch):
-    """🔴 **같은 Lot 을 예약 수만큼 그리면 읽는 사람이 더한다** (#812).
-
-    종전에는 예약마다 그 품목의 후보 전부를 다시 적었다 — 무 예약 다섯이면 같은 후보
-    일곱 줄이 다섯 번 나와 56줄이 됐고, 실제 사실은 19개뿐이었다. 가용량은 예약마다
-    따로 있는 값이 아니라 **그 Lot 하나에 남은 몫**이라 그렇게 읽히면 안 된다.
-    """
+def test_FEFO_는_같은_품목_예약_여럿에_한_번만_묻고_예약마다_순서를_다시_센다(monkeypatch):
     물은것: list[tuple[str, ...]] = []
     monkeypatch.setattr(logistics_query, "get_fefo_candidates_by_item", _가짜_후보(물은것))
     ob = SimpleNamespace(reservations=[
         _resv("R-1", status="RESERVED", allocated="0", unallocated="100", shipped=False),
         _resv("R-2", status="RESERVED", allocated="0", unallocated="50", shipped=False),
     ])
-    pane = logistics_query._outbound_pane(ob, _INV)
+    pane = logistics_query._outbound_pane(ob, AS_OF, conn=None, sim_run_id="SIM")
     assert 물은것 == [(ITEM_ON_SCREEN,)]
-    #  ★ 카드가 품목마다 하나다 — 한 표에 몰면 품목 칸이 줄마다 되풀이된다.
-    카드하나 = 카드(pane, f"fefo-{ITEM_ON_SCREEN}")
-    fefo = 카드하나.table
+    fefo = 카드(pane, "fefo").table
     assert fefo is not None
-    #  예약 둘인데 후보는 **한 줄**이다 (대역이 품목당 후보 하나를 준다).
-    assert [row["rank"] for row in fefo.rows] == [1]
-    #  예약 축 칸도 품목 칸도 표에 없다 — 있으면 그 자리에서 복제가 생긴다.
-    칸 = [c.key for c in fefo.columns]
-    assert "resv" not in 칸 and "need" not in 칸 and "item" not in 칸
-    #  배정해야 할 양은 **카드 머리에** 한 번 적는다 (100 + 50).
-    assert "Lot 미배정 150 kg" in (카드하나.subtitle or "")
-    #  🔴 «자동 배정» 처럼 보이면 안 된다 — 카드가 여럿이라 pane 통계가 한 번 말한다.
-    assert "자동으로 배정되지 않습니다" in (통계(pane, "출고 후보 Lot").detail or "")
+    이름 = f"{ITEM_ON_SCREEN} · 납기 미정"
+    assert [(row["resv"], row["rank"]) for row in fefo.rows] == [(이름, 1), (이름, 1)]
 
 
 def test_그릴_예약이_없으면_FEFO_를_묻지도_않는다(monkeypatch):
@@ -479,125 +444,9 @@ def test_그릴_예약이_없으면_FEFO_를_묻지도_않는다(monkeypatch):
     ob = SimpleNamespace(reservations=[
         _resv("R-HOLD", status="ALLOCATED", allocated="100", unallocated="0", shipped=False),
     ])
-    pane = logistics_query._outbound_pane(ob, _INV)
+    pane = logistics_query._outbound_pane(ob, AS_OF, conn=None, sim_run_id="SIM")
     assert 물은것 == []
-    assert 통계(pane, "출고 후보 Lot").value == "0"
-    assert 카드(pane, "fefo").lead is None
-
-
-#  ── #812: 화면에서 뺀 것들 ───────────────────────────────────────────────
-
-
-def test_입고_탭에_운송_칸이_없다(화면):
-    """🔴 **보여 줄 수 없는 칸을 «0 건» 이라고 적지 않는다** (#812).
-
-    걷기가 일정 행을 도착일에 만들어(`created_as_of == expected_arrival_date`)
-    Receipt 없는 일정이 하루도 없다 — 「입고 예정」 목록은 어느 기준일에도 비어 있다.
-    빈 표에 «이 기준일에 들어올 예정인 입고가 없습니다» 라고 적으면 **0 건을
-    확인했다는 주장**이 되는데, 사실은 «이 실행은 도착 전 상태를 안 남긴다» 이다.
-    """
-    result = 화면(live=(), resolved=())
-    입고 = next(p for p in result.tab.panes if p.key == "inbound")
-    #  ★ 남는 것은 실제로 도착한 물량의 표 하나다. 「입고 예정」 카드도, 그 단계를
-    #    그리던 「입고 처리 흐름」 소개 카드도 없앴다.
-    assert [c.key for c in 입고.cards] == ["by_item", "receipt"]
-    #  요약 탭에도 남지 않는다.
-    진행 = 카드(한눈에(result.tab.panes), "progress")
-    assert all(s.label != "입고 예정" for s in 진행.stats)
-
-
-def test_입고_요약은_항상_0_인_칸을_세우지_않는다(화면):
-    """🔴 **자리만 차지하는 0 을 안 그린다** (#812).
-
-    종전 넷(도착 예정 · 도착 지연 · 처리 보류 · 확인 필요)은 도착 전 상태 목록에서
-    세는데 그 목록이 늘 비어 있어 어느 날을 열어도 `0건` 넷이었다. 대신 그날 실제로
-    도착한 건을 아래 표와 **같은 판정**으로 센다.
-    """
-    result = 화면(live=(), resolved=())
-    입고 = next(p for p in result.tab.panes if p.key == "inbound")
-    이름 = [s.label for s in 입고.stats]
-    assert "도착 예정" not in 이름 and "도착 지연" not in 이름
-    #  경보 둘은 값이 0 이면 안 뜬다 (대역 요약이 전부 0 이다).
-    assert "처리 보류" not in 이름 and "확인 필요" not in 이름
-    assert "이 달 도착" in 이름 and "처리 중" in 이름
-
-
-def test_입고는_이_달만_세고_기간을_적는다(화면):
-    """🔴 **누계를 «도착 건수» 라고 적지 않는다** (#812).
-
-    `receipt_state_at` 은 아래쪽 경계가 없어 실행 첫날부터 다 실어 준다 — 실측
-    291건 · 151,921kg 가 2026-01-06~09-01 8개월 누계였다. 화면은 그 달 1일부터만 세고,
-    **언제부터인지 숫자 옆에 적는다.**
-    """
-    지난달 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    지난달.arrived_at = date(2026, 2, 20)
-    이달 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    이달.arrived_at = date(2026, 3, 5)
-    inb = SimpleNamespace(
-        in_transit=[], in_transit_status="CONFIRMED_ZERO",
-        receipts=[이달, 지난달], arrival_summary=_도착요약(),
-    )
-    pane = logistics_query._inbound_pane(inb, AS_OF)  # AS_OF = 2026-03-10
-    도착 = 통계(pane, "이 달 도착")
-    assert 도착.value == "1"  # 지난달 건은 안 센다
-    assert 도착.detail == "03-01 ~ 03-10"
-    #  표도 같은 모집단이다 — 요약과 표가 갈리지 않는다.
-    assert len(카드(pane, "receipt").table.rows) == 1
-
-
-def test_이_달에_입고가_없어도_마지막_입고는_말한다(화면):
-    """★ 「0건」만 남으면 화면이 «왜 비었는지» 를 안 말한다 — 기간 밖에서 찾아 적는다."""
-    지난달 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    지난달.arrived_at = date(2026, 2, 25)
-    inb = SimpleNamespace(
-        in_transit=[], in_transit_status="CONFIRMED_ZERO",
-        receipts=[지난달], arrival_summary=_도착요약(),
-    )
-    pane = logistics_query._inbound_pane(inb, AS_OF)
-    assert 통계(pane, "이 달 도착").value == "0"
-    마지막 = 통계(pane, "마지막 입고")
-    assert 마지막.value == "02-25" and 마지막.detail == "13일 전"
-    assert 마지막.tone == "warn"  # 7일 넘게 입고가 없다
-
-
-def test_재고_탭에_회전_칸이_없다(화면):
-    """🔴 **회전은 화면에 안 적는다** (#812) — 계산·정책·Agent 판단은 그대로다.
-
-    신선도 잔여 옆에 비슷한 숫자를 하나 더 세우면 사용자는 둘 중 무엇을 봐야 하는지
-    알 수 없다. 회전에서 나온 **업무 신호**(우선 출고 · 폐기 검토)는 남는다.
-    """
-    result = 화면(live=(), resolved=())
-    재고탭 = next(p for p in result.tab.panes if p.key == "stock")
-    표 = 카드(재고탭, "lots").table
-    칸 = [c.label for c in 표.columns]
-    assert "회전 잔여" not in 칸 and "회전 상태" not in 칸
-    assert "신선도 잔여" in 칸 and "필요한 조치" in 칸
-    #  ★ 회전에서 나온 업무 신호는 살아 있다 — 지운 것은 회전 «어휘» 뿐이다.
-    assert 표.rows[0]["action"] == "우선 출고 대상"
-    #  설명 카드를 통째로 없앴다 — 표가 스스로 읽혀야 한다.
-    assert all(c.key != "principle" for c in 재고탭.cards)
-
-
-def test_FEFO_에는_그날_예약을_전부_넘긴다(monkeypatch):
-    """🔴 **화면이 그리는 예약만 넘기면 남의 할당이 안 빠져 가용량이 부푼다** (#812).
-
-    후보의 가용량은 «이 Lot 에서 아직 아무 할당에도 안 묶인 몫» 이라, 끝난 예약이
-    잡고 있는 할당도 빼야 한다 — 그 예약은 표에 안 그려도 재고는 잡고 있다.
-    """
-    받은예약: list[Any] = []
-
-    def 대역(*, lots: Any, reservations: Any, item_ids: Any):
-        받은예약.extend(reservations)
-        return {}
-
-    monkeypatch.setattr(logistics_query, "get_fefo_candidates_by_item", 대역)
-    ob = SimpleNamespace(reservations=[
-        _resv("R-WAIT", status="RESERVED", allocated="0", unallocated="100", shipped=False),
-        _resv("R-HOLD", status="ALLOCATED", allocated="100", unallocated="0", shipped=False),
-    ])
-    logistics_query._outbound_pane(ob, _INV)
-    #  표에 오르는 것은 R-WAIT 하나지만, 넘기는 것은 둘 다여야 한다.
-    assert [r.reservation_id for r in 받은예약] == ["R-WAIT", "R-HOLD"]
+    assert next(s for s in pane.stats if s.label == "출고 후보").value == "0"
 
 
 def test_화면_한_판은_커넥션_하나로_읽는다(화면, monkeypatch):
@@ -729,63 +578,6 @@ def _입고_카드(rows: list[Any]) -> Any:
         receipts=rows, arrival_summary=_도착요약(),
     )
     return 카드(logistics_query._inbound_pane(inb, AS_OF), "receipt").table
-
-
-#  ── #812: 전 줄이 같은 값인 칸은 세우지 않는다 ───────────────────────────
-
-
-def test_보류도_거절도_없으면_그_칸을_세우지_않는다():
-    """🔴 전 줄 `0 kg` 인 칸은 아무것도 안 가른다 — 실측 아홉 칸 중 다섯이 상수였다."""
-    표 = _입고_카드([_입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)])
-    칸 = [c.label for c in 표.columns]
-    assert "보류" not in 칸 and "거절" not in 칸
-    #  주문 == 수용 이면 같은 숫자를 두 번 적지 않는다.
-    assert "주문" not in 칸
-    #  전 줄 「합격」·「처리 완료」면 그 둘도 안 가른다 — 재고 처리만 남는다.
-    assert "검수 결과" not in 칸 and "처리 상태" not in 칸
-    assert 칸 == ["도착일", "품목", "수용", "재고 처리"]
-
-
-def test_보류가_한_줄이라도_있으면_칸이_선다():
-    """🔴 **숨기는 것이 아니다.** 값이 생기면 그날 칸이 그대로 돌아온다."""
-    보류행 = _입고행(state="INSPECTED", stock_applied=False, settled=False, verdict="HOLD")
-    보류행.hold_qty_kg = Decimal(30)
-    보류행.accepted_qty_kg = Decimal(70)
-    표 = _입고_카드([보류행])
-    칸 = [c.label for c in 표.columns]
-    assert "보류" in 칸 and "검수 결과" in 칸 and "처리 상태" in 칸
-    #  주문(100) != 수용(70) 이라 주문 칸도 선다.
-    assert "주문" in 칸
-
-
-def test_품목별_입고는_수용량을_더한다():
-    """★ 새 판정이 아니라 **합계**다 — 아래 표의 수용량을 품목 축으로 묶기만 한다."""
-    배추 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    양파 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    양파.item_name = "양파"
-    양파.accepted_qty_kg = Decimal(30)
-    rows = logistics_query._receipt_by_item([배추, 양파, 배추])
-    #  많이 들어온 품목이 위에 온다.
-    assert [r["item"] for r in rows] == [ITEM_ON_SCREEN, "양파"]
-    assert [r["count"] for r in rows] == [2, 1]
-    assert [r["acc"] for r in rows] == ["200 kg", "30 kg"]
-
-
-def test_품목별_입고는_못_읽은_건이_섞이면_합계를_안_낸다():
-    """🔴 아는 것만 더해서 아는 척하지 않는다 — `None` 은 0 이 아니다."""
-    아는것 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    모름 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    모름.accepted_qty_kg = None
-    rows = logistics_query._receipt_by_item([아는것, 모름])
-    assert rows[0]["acc"] is None
-
-
-def test_못_읽은_수량은_0_으로_접지_않는다():
-    """🔴 `None` 은 0 이 아니다 — 모르는 값이 있으면 그 칸을 세워 보이게 둔다."""
-    모름행 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    모름행.rejected_qty_kg = None
-    표 = _입고_카드([모름행])
-    assert "거절" in [c.label for c in 표.columns]
 
 
 def test_재고가_선_입고는_처리도_재고도_완료로_적는다():

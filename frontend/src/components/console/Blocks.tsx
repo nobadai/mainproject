@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 /**
  * 화면 부품 — 백엔드가 내려준 조각을 그린다.
@@ -16,6 +16,7 @@ import type {
   Card as TCard,
   Cell,
   Chart as TChart,
+  Column,
   Day,
   Note as TNote,
   Stat as TStat,
@@ -154,57 +155,10 @@ function cellText(v: Cell): { text: string; blank: boolean } {
   return { text: typeof v === "number" ? v.toLocaleString("ko-KR") : String(v), blank: false };
 }
 
-/**
- * 칸 안에서 글자를 어디에 붙일까.
- *
- * 🔴 **우측정렬을 쓰지 않는다** (`#812`).
- *
- *   칸 폭이 같은 표(`table-fixed`)에서 우측정렬 값은 **제 칸의 오른쪽 끝**에 서고 다음
- *   값은 **제 칸의 왼쪽 끝**에 선다. 그래서 둘이 서로 들러붙고, 그 앞은 그만큼 벌어진다.
- *   실측(Lot 별 신선도 · 1,400px):
- *
- *   ```text
- *   품목 → 등급          186px
- *   등급 → 잔량          350px
- *   잔량 ↔ 입고일         14px   ← 붙는다
- *   입고일 → 신선도 잔여  356px
- *   신선도 ↔ 필요한 조치  14px   ← 붙는다
- *   ```
- *
- *   전부 왼쪽에 붙이면 값이 **칸 폭만큼 일정한 간격**으로 선다 — 판매 탭 표가 그렇게
- *   서 있고, 이 화면도 같은 모양이어야 한다.
- *
- * ★ `align` 계약은 그대로 둔다 — 백엔드가 칸의 뜻을 계속 말하게 두고, **그리는 쪽에서만**
- *   전부 왼쪽에 붙인다. 숫자 칸은 `mono`(고정폭)라 자릿수는 여전히 맞는다.
- */
-const CELL_ALIGN = "text-left";
+function align(c: Column) {
+  return c.align === "right" ? "text-right" : c.align === "center" ? "text-center" : "text-left";
+}
 
-/**
- * 표 하나.
- *
- * 🔴 **칸 폭은 균등하고(`table-fixed`) 값은 전부 왼쪽에 붙인다** (`CELL_ALIGN` · `#812`).
- *
- *   둘이 같이 있어야 값이 **일정한 간격**으로 선다. 하나만 해서는 안 된다 — 균등 폭인데
- *   우측정렬이 섞이면 칸 안에서 값이 양끝으로 갈려 앞은 벌어지고 뒤는 붙는다.
- *
- *   여기 오기까지 네 번 헛짚었고 전부 **«남는 폭을 어떻게 나눌까»** 를 풀고 있었다.
- *   문제는 배분이 아니라 **칸 안에서 값이 어디에 서는가** 였다.
- *
- *   ```text
- *   w-full · 내용 비례      우측정렬 칸이 다음 칸에 들러붙는다        🔴
- *   w-full · width:1%       값 전부 왼쪽 · 오른쪽에 빈 띠             🔴
- *   w-auto                  표가 안 늘어나 왼쪽으로 쏠린다            🔴
- *   table-fixed · 정렬 혼재  붙는 자리와 벌어지는 자리가 그대로 남는다 🔴
- *   table-fixed · 전부 왼쪽  간격이 일정하다 (실측 182·185·183·187)   ✅
- *   ```
- *
- * ★ 카드가 화면 끝까지 늘어나던 것은 별개 원인이고 따로 잡았다 — 재고 탭에만 없던
- *   `max-w-[1400px]` 래퍼(`console/inventory/page.tsx`)다. 둘이 같이 있어야 한다.
- *
- * ⚠️ **`table-fixed` 와 `text-[16px]` 는 서로 다른 판의 결정이다** (2026-09-17 병합).
- *    앞은 `#812`(칸 간격), 뒤는 `style/frontend-font-plus4_jh`(글자 +4px) — 같은 줄에서
- *    충돌했을 뿐 고치는 것이 달라 **둘 다 남긴다.**
- */
 export function DataTable({ table }: { table: TTable }) {
   return (
     <div className="flex flex-col gap-2.5">
@@ -217,20 +171,15 @@ export function DataTable({ table }: { table: TTable }) {
             {table.empty_text}
           </p>
         ) : (
-          <table className="w-full table-fixed border-collapse text-[16px]">
+          <table className="w-full border-collapse text-[16px]">
             <thead>
               <tr>
                 {table.columns.map((c) => (
                   <th
                     key={c.key}
                     scope="col"
-                    className={`border-b px-2.5 py-2 font-medium ${CELL_ALIGN}`}
-                    style={{
-                      borderColor: "var(--color-hair)",
-                      color: "var(--color-mut)",
-                      //  ★ 이 표가 정한 너비. 안 주면 `table-fixed` 가 균등 배분한다.
-                      width: c.width ?? undefined,
-                    }}
+                    className={`whitespace-nowrap border-b px-2.5 py-2 font-medium ${align(c)}`}
+                    style={{ borderColor: "var(--color-hair)", color: "var(--color-mut)" }}
                   >
                     {c.label}
                   </th>
@@ -245,7 +194,7 @@ export function DataTable({ table }: { table: TTable }) {
                     return (
                       <td
                         key={c.key}
-                        className={`border-b px-2.5 py-2 ${CELL_ALIGN} ${
+                        className={`whitespace-nowrap border-b px-2.5 py-2 ${align(c)} ${
                           c.mono ? "tabular font-mono" : ""
                         }`}
                         style={{
@@ -591,24 +540,21 @@ export function Flow({ steps }: { steps: string[] }) {
   );
 }
 
-/**
- * 백엔드가 목록으로 준 카드 하나. 채워진 것만 그린다.
- *
- * 🔴 **`source_ref` 를 그리지 않는다** (`#812`). 그 값은 «어느 표를 읽었나» 라서
- *    `inventory_reservations · inventory_lots` 같은 **DB 표 이름**이 그대로 들어 있다.
- *    카드 여섯 개면 첫 화면이 통째로 DB 스키마가 된다.
- *
- * ★ **응답에서 지운 것이 아니다.** 값은 `/api/logistics` 본문에 그대로 있어 값이
- *   틀렸을 때 «어디서 왔나» 를 여전히 물을 수 있다 — 안 그릴 뿐이다. 접는 상자로
- *   옮기는 것도 답이 아니었다. 카드마다 상자가 하나씩 더 생길 뿐이다.
- *
- * ⚠️ **`dev` 병합 때 되살리지 않는다** (2026-09-17). `style/frontend-font-plus4_jh` 가
- *    이 자리의 `source_ref` **글자 크기만** 올려(+4px) 충돌이 났다 — 글자를 키운 DB 표
- *    이름은 여전히 DB 표 이름이라, 지운 쪽을 남겼다.
- */
+/** 백엔드가 목록으로 준 카드 하나. 채워진 것만 그린다. */
 export function CardBlock({ card }: { card: TCard }) {
   return (
-    <Panel title={card.title} subtitle={card.subtitle} footer={card.footer}>
+    <Panel
+      title={card.title}
+      subtitle={card.subtitle}
+      footer={card.footer}
+      right={
+        card.source_ref ? (
+          <span className="font-mono text-[14.5px]" style={{ color: "var(--color-mut2)" }}>
+            {card.source_ref}
+          </span>
+        ) : undefined
+      }
+    >
       <Note note={card.lead} />
       <Flow steps={card.flow} />
       <StatRow items={card.stats} />

@@ -402,21 +402,6 @@ def _available_lots(
     ★ **`status='ACTIVE'` 와 `remaining > 0` 로 거른다** — `repository` 가 가용 재고를
       보는 눈과 같다 (비-ACTIVE 는 물리 점유만 하고 가용에서 빠진다).
 
-    🔴 **`received_at <= as_of` 인 Lot 만 본다 (#812).** 아직 안 들어온 물건에서는
-       뺄 수 없다. 종전에는 이 조건이 없어 **기준일보다 뒤에 입고된 Lot 이 후보로
-       올라왔고**, 신선도는 `as_of` 기준이라 경과일이 음수가 되어
-       `보관한계 + |경과|` (배추 10일 한계에 **잔여 188일**)이 화면에 떴다 —
-       공식이 아니라 **모집단**이 틀린 것이다. 값을 `max(0, …)` 로 깎지 않는다.
-
-       ★ **`repository` 와 같은 술어다** — `load_inventory_snapshot` 도
-         `historical_repository.lot_state_at` 도 이미 `l.received_at <= %(as_of)s`
-         로 «그날 존재한 Lot» 을 정한다. 위 문단이 *"보는 눈이 같다"* 고 적어 두고
-         실제로는 이 한 줄만 빠져 있었다.
-
-       ⚠️ **쓰기 경로에는 아무 영향이 없다.** 걷기(`outbound_flow.ship_due_sales`)는
-          `as_of` 가 걷는 그날이고 판매 확정(`sales_approval`)은 납품일(D+1)이라,
-          둘 다 이미 실재하는 Lot 의 `received_at` 이상이다 (실측 전수 · #812).
-
     🔴 **신선도가 소진된 Lot(`remaining_freshness_days <= 0`)도 뺀다.** 그 Lot 은
        `tools.build_inventory_by_item` 이 이미 판매 가용에서 빼고 있고,
        `turnover.is_disposal_candidate` 가 폐기대기로 표시하는 바로 그 재고다.
@@ -449,7 +434,6 @@ def _available_lots(
         JOIN {schema}.item_storage_policies p ON p.item_id = l.item_id
         WHERE l.sim_run_id = %s
           AND l.item_id = %s
-          AND l.received_at <= %s
           AND l.status = 'ACTIVE'
           AND l.remaining_qty_kg > 0
         ORDER BY l.lot_id

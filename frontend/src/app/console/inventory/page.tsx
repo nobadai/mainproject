@@ -19,8 +19,6 @@ import {
   TabButtons,
 } from "@/components/console/Blocks";
 import { useTab } from "@/components/console/useTab";
-//  ★ 기준일 한 줄은 재무·판매 탭이 쓰는 부품 그대로다 — 새로 만들지 않는다.
-import { DataBasis } from "@/app/console/finance/TechDetails";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄과 아래 `asOf` 를 지우고
 //     `useTab` 의 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
@@ -38,33 +36,24 @@ export default function InventoryPage() {
   const { data, error } = useTab<LogisticsTab>(asOf, () => logistics(asOf, pane));
 
   if (error) return <ErrorBox message={error} />;
-  if (!data) return <Loading what="재고" />;
+  if (!data) return <Loading what="재고 · 물류" />;
 
   //  ★ 고른 탭은 화면 상태다. `data.selected` 는 첫 요청 때 값이라 그 뒤로는 안 본다.
   const current = data.panes.find((p) => p.key === pane) ?? data.panes[0];
 
   return (
-    //  ★ **재무 · 판매와 같은 폭으로 묶는다** (`#812`). 저 둘은
-    //    `mx-auto … max-w-[1400px]` 로 감싸는데 이 탭만 맨몸이라, 넓은 화면에서 카드가
-    //    화면 끝까지 늘어나고 표 칸 사이가 그만큼 벌어졌다. 새 규칙이 아니라 이미
-    //    있는 관습을 안 따르고 있던 것이다.
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
+    <>
       <TabButtons
         items={data.panes.map((p) => ({ key: p.key, label: p.label }))}
         value={current.key}
         onChange={setPane}
       />
       <SourceTag sources={[data.source]} />
-      {/*  ★ **기준일은 화면 맨 위에서 한 번만 말한다** (`#812`). 종전에는 카드마다
-              «기준일 시점 값입니다» 가 되풀이됐고, 정작 «어느 날을 보고 있나» 는
-              화면 어디에도 없어 사용자가 날짜 고르개를 열어야 알 수 있었다.
-              값은 이 화면이 이미 들고 있는 `asOf` 그대로다 — 새로 계산하지 않는다. */}
-      <DataBasis asOf={asOf} note="저장된 시뮬레이션 결과" />
       <Note note={data.principle} />
       <StatRow items={current.stats} />
       {current.cards.map((c) => (
         <CardBlock key={c.key} card={c} />
       ))}
-    </div>
+    </>
   );
 }

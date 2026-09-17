@@ -116,8 +116,6 @@ export interface Column {
   label: string;
   align: Align;
   mono: boolean;
-  /** 칸 너비(CSS `12%` · `120px`). `null` 이면 균등 배분. **표마다 따로 정한다** (`#812`). */
-  width: string | null;
 }
 export type Cell = string | number | null;
 export interface Table {

@@ -70,7 +70,7 @@ from typing import Any, cast
 
 from psycopg import sql
 
-from app.logistics import arrival, historical_repository
+from app.logistics import arrival, historical_repository, outbound
 from app.logistics.db import get_db_schema
 from app.logistics.historical_repository import (
     HistoricalAllocation,
@@ -105,12 +105,6 @@ from app.logistics.schemas import (
     OutboundCommitment,
 )
 from app.logistics.tools import build_inventory_by_item
-
-#  🔴 **FEFO 정렬 키는 빌려 쓴다 — 여기서 다시 적지 않는다.** 자동 할당
-#     (`outbound.recommend_fefo_candidates`) 과 PRE_SALES 원가 배부
-#     (`tools.fefo_inventory_cost_basis`) 가 쓰는 바로 그 키다. 두 벌로 적으면
-#     «나갈 Lot» 과 «화면이 추천한 Lot» 이 갈린다.
-from app.logistics.turnover import fefo_sort_key
 
 #: 🔴 **화면(`app/api/logistics/query.py`)이 부르는 넷뿐이다** (2026-09-15).
 #:
@@ -742,114 +736,42 @@ def get_outbound_console(
     )
 
 
-def _held_qty_by_lot(reservations: Sequence[ConsoleReservation]) -> dict[str, Decimal]:
-    """Lot 마다 **그날 아직 묶여 있던** 할당량 합.
-
-    🔴 **`ALLOCATED` 만 센다.** 그날 축의 할당 상태는 셋뿐이고
-       (`historical_repository.HistoricalAllocationState`), 나머지 둘은 빼면 안 된다.
-
-    ```text
-    ALLOCATED   아직 창고에서 안 나갔다      → 뺀다
-    SHIPPED     원장 OUT 이 잔량에서 이미 뺐다 → 또 빼면 같은 수량을 두 번 깎는다
-    CANCELLED   그 예약이 놓아준 몫           → 돌아와야 한다
-    ```
-
-    ★ `outbound._available_lots` 의 `held_qty_kg` 서브쿼리와 **같은 뜻**이다. 저쪽은
-      지금 행의 `status = ANY(ALLOCATED, PICKED)` 와 살아 있는 예약으로 세고, 이쪽은
-      그날로 유도된 상태 하나로 센다 — `PICKED` 는 그날 축에 없는 어휘이고(유도가
-      `ALLOCATED` 로 낸다) 놓아준 예약의 할당은 유도 단계에서 이미 `CANCELLED` 다.
-
-    ★ **화면 품목 필터보다 앞선다.** 남의 예약이 잡아 둔 몫은 그 예약이 화면에
-      안 그려져도 이 Lot 에서 빠져 있다 — 그리는 예약만 세면 가용량이 부풀어 오른다.
-    """
-    held: dict[str, Decimal] = {}
-    for reservation in reservations:
-        for allocation in reservation.allocations:
-            if allocation.status != "ALLOCATED":
-                continue
-            held[allocation.lot_id] = (
-                held.get(allocation.lot_id, Decimal(0)) + allocation.allocated_qty_kg
-            )
-    return held
-
-
 def get_fefo_candidates_by_item(
-    *,
-    lots: Sequence[ConsoleInventoryLot],
-    reservations: Sequence[ConsoleReservation],
-    item_ids: Iterable[str],
+    *, conn: Any, sim_run_id: str, item_ids: Iterable[str], as_of: date
 ) -> dict[str, list[ConsoleFefoCandidate]]:
     """품목별 FEFO 후보. 🔴 **추천만 한다 — 고르지도 쓰지도 않는다.**
 
-    🔴 **기준일 축이다 (#812).** 종전에는 `outbound.recommend_fefo_candidates` 를 불러
-       **«지금» 재고**(`inventory_lots.remaining_qty_kg` · Current Cache)로 후보를
-       세웠다. 그래서 과거 기준일을 열면 두 방향으로 다 틀렸다.
-
     ```text
-    기준일 뒤에 입고된 Lot     후보로 올라왔다 → 경과일이 음수라 「보관한계 10일 ·
-                              신선도 잔여 188일」 (실측 03-18 화면에 09-12 입고 Lot)
-    그날 있었는데 지금 빈 Lot   후보에서 빠졌다 → 그날 팔 수 있던 재고가 안 보인다
+    후보 = outbound.recommend_fefo_candidates(conn, sim_run_id, item_id, as_of)   품목당 1회
     ```
 
-       물류 문서 28(L206~209)이 이 누출을 이미 실측해 적어 뒀고, Historical 계약
-       (`05_Historical조회.md` H-10)은 FEFO 후보를 **그날 축 재료**로 싣고 있었다 —
-       계약과 구현이 갈려 있던 자리다.
+    🔴 **예약마다 묻지 않는다** (2026-09-15). 후보는 예약과 무관한 함수다 — Lot 잔량에서
+       살아 있는 할당을 뺀 «물리 후보» 를 `(sim_run_id, item_id, as_of)` 만으로 내고, 정렬도
+       `turnover.fefo_sort_key` 하나다 (`outbound.recommend_fefo_candidates` · 잠금 없음 ·
+       쓰기 없음). 같은 품목의 예약 N 건에 N 번 물으면 같은 답을 N 번 받는다 — 종전에는
+       그 호출마다 커넥션까지 새로 열어 예약 164건에 8.6초가 걸렸다 (마스터 실측).
+       품목은 계약상 셋(`contracts.core.ITEMS`)이라 많아야 세 번이다.
 
-    🔴 **새 계산기를 만들지 않았다.** 모집단도 판정도 정렬도 전부 기존 정본이고,
-       바뀐 것은 **어느 시간축의 사실을 먹이는가** 하나뿐이다.
+    ★ **`sim_run_id` 는 호출자가 지어내지 않는다.** 화면은 `get_outbound_console` 이
+      `reservation_state_at` 으로 이미 `r.sim_run_id = %(sim)s` 로 자른 그 축을 넘긴다 —
+      종전 `_reservation_axis` 가 예약 행에서 읽어 주던 값과 같은 값이다.
 
-    ```text
-    그날 존재한 Lot · 그날 잔량   historical_repository.lot_state_at   received_at <= as_of
-                                                                       moved_at    <= as_of
-    그날 살아 있던 할당           reservation_state_at → 유도 상태      decided_at  <  cutoff
-    폐기 후보 제외                turnover.is_disposal_candidate        (lot.disposal_candidate)
-    정렬                          turnover.fefo_sort_key                ← 자동 할당과 같은 키
-    ```
-
-    ⚠️ **날짜를 받지 않는다.** `as_of` 가 필요한 판정은 이미 `lot_state_at` 이 그날로
-       내려 준 값(`remaining_freshness_days` · `disposal_candidate`)에 들어 있다.
-       여기서 날짜를 다시 받으면 **두 축이 섞일 자리**가 한 곳 더 생긴다.
-
-    :param lots: 그날 살아 있던 Lot (`get_inventory_console` 의 `lots` — 이미
-        `remaining_qty_kg > 0` 로 걸러진 그날 모집단이다).
-    :param reservations: 그날 예약 **전부**. 🔴 화면이 그리는 예약만 넘기면 남의
-        예약이 잡아 둔 몫이 안 빠져 가용량이 부풀어 오른다.
-    :param item_ids: 후보를 물을 품목. 순서는 `item_id` 정렬이라 부른 순서가 결과를
-        바꾸지 않는다.
+    ★ 순서는 `item_id` 정렬이다 — 호출 순서가 결과를 바꾸지 않게.
     """
-    held = _held_qty_by_lot(reservations)
-    wanted = sorted(set(item_ids))
-    out: dict[str, list[ConsoleFefoCandidate]] = {item_id: [] for item_id in wanted}
-    for lot in lots:
-        if lot.item_id not in out:
-            continue
-        # 🔴 판매 가용에서 이미 빠진 Lot 은 후보에도 안 오른다. 판정의 주인은
-        #    `turnover.is_disposal_candidate` 이고 그 결과가 이 칸이다 — 화면도
-        #    이 파일도 신선도 숫자를 보고 다시 정하지 않는다.
-        if lot.disposal_candidate:
-            continue
-        가용 = lot.remaining_qty_kg - held.get(lot.lot_id, Decimal(0))
-        if 가용 <= 0:
-            continue
-        out[lot.item_id].append(
+    return {
+        item_id: [
             ConsoleFefoCandidate(
-                lot_id=lot.lot_id,
-                available_qty_kg=가용,
-                remaining_freshness_days=lot.remaining_freshness_days,
-                received_at=lot.received_at,
-                grade=lot.grade,
+                lot_id=candidate.lot_id,
+                available_qty_kg=candidate.available_qty_kg,
+                remaining_freshness_days=candidate.remaining_freshness_days,
+                received_at=candidate.received_at,
+                grade=candidate.grade,
             )
-        )
-    # 🔴 **정렬 규칙을 여기 적지 않는다.** 키의 주인은 `turnover.fefo_sort_key` 하나이고
-    #    자동 할당(`recommend_fefo_candidates`)도 PRE_SALES 원가 배부도 같은 것을 쓴다.
-    for candidates in out.values():
-        candidates.sort(
-            key=lambda c: fefo_sort_key(
-                remaining_freshness_days=c.remaining_freshness_days,
-                received_at=c.received_at,
-                lot_id=c.lot_id,
+            for candidate in outbound.recommend_fefo_candidates(
+                conn, sim_run_id=sim_run_id, item_id=item_id, as_of=as_of
             )
-        )
-    return out
+        ]
+        for item_id in sorted(set(item_ids))
+    }
 
 
