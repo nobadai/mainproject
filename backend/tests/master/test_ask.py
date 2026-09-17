@@ -703,6 +703,540 @@ def test_sales_report_domain_action_returns_structured_facts_without_markdown(mo
     assert result.report_kind == "SALES"
 
 
+def test_logistics_report_domain_action_returns_structured_facts_without_markdown(monkeypatch):
+    from datetime import date
+
+    from app.master import ask_service
+    from app.master.llm.schemas import Intent
+
+    facts = {"kind": "LOGISTICS", "sim_run_id": "SIM-1", "start_date": "2026-09-01"}
+    monkeypatch.setattr(ask_service, "render_logistics_chat_report", lambda **_kwargs: facts)
+    result = ask_service._domain_read(
+        Intent(
+            action="DOMAIN_ACTION",
+            agents=[],
+            item=None,
+            confidence="HIGH",
+            domain_action="LOGISTICS_REPORT_GENERATE",
+        ),
+        as_of=date(2026, 9, 1),
+    )
+    assert result.domain == "logistics"
+    assert result.data == facts
+    assert result.markdown is None
+    assert result.report_kind == "LOGISTICS"
+
+
+def test_logistics_report_passes_existing_period_to_renderer(monkeypatch):
+    """기간은 **기존 `_period()`** 가 만든다 — 보고서가 날짜 파서를 새로 두지 않는다."""
+    from datetime import date
+
+    from app.master import ask_service
+    from app.master.llm.schemas import DomainSlots, Intent
+
+    seen: dict[str, object] = {}
+
+    def _record(**kwargs):
+        seen.update(kwargs)
+        return {"kind": "LOGISTICS"}
+
+    monkeypatch.setattr(ask_service, "render_logistics_chat_report", _record)
+    as_of = date(2026, 9, 17)  # 목요일
+    ask_service._domain_read(
+        Intent(
+            action="DOMAIN_ACTION",
+            agents=[],
+            item=None,
+            confidence="HIGH",
+            domain_action="LOGISTICS_REPORT_GENERATE",
+            slots=DomainSlots(period="THIS_WEEK"),
+        ),
+        as_of=as_of,
+    )
+    assert (seen["start_date"], seen["end_date"]) == ask_service._period(
+        Intent(
+            action="DOMAIN_ACTION",
+            agents=[],
+            item=None,
+            confidence="HIGH",
+            domain_action="LOGISTICS_REPORT_GENERATE",
+            slots=DomainSlots(period="THIS_WEEK"),
+        ),
+        as_of=as_of,
+    )
+    assert seen["start_date"] == date(2026, 9, 14)  # 그 주 월요일
+    assert seen["end_date"] == as_of
+    assert seen["as_of"] == as_of
+
+
+def test_logistics_report_is_a_read_action_not_a_write():
+    """보고서 생성은 조회다. 쓰기 목록에 들어가면 확인 절차가 붙는다."""
+    from app.master import ask_service
+
+    assert "LOGISTICS_REPORT_GENERATE" in ask_service._DOMAIN_READ_ACTIONS
+    assert "LOGISTICS_REPORT_GENERATE" not in ask_service._DOMAIN_WRITE_ACTIONS
+
+
+def _logistics_item(item_id, name, *, on_hand, available, reserved, unallocated=0):
+    from decimal import Decimal
+
+    from app.logistics.schemas import ConsoleInventoryItem
+
+    return ConsoleInventoryItem(
+        item_id=item_id,
+        item_name=name,
+        on_hand_qty_kg=Decimal(on_hand),
+        available_qty_kg=None if available is None else Decimal(available),
+        reserved_qty_kg=Decimal(reserved),
+        allocated_qty_kg=Decimal(0),
+        unallocated_reserved_qty_kg=Decimal(unallocated),
+        active_reservation_count=0,
+        sell_priority_lot_count=0,
+        expired_lot_count=0,
+        expired_qty_kg=Decimal(0),
+        disposal_candidate_lot_count=0,
+    )
+
+
+def _logistics_receipt(receipt_id, item, arrived, *, ordered, accepted=None, verdict="PASS"):
+    from datetime import date
+    from decimal import Decimal
+
+    from app.logistics.schemas import ConsoleInboundReceipt
+
+    return ConsoleInboundReceipt(
+        inbound_id=f"INB-{receipt_id}",
+        receipt_id=receipt_id,
+        item_id=f"ITEM-{item}",
+        item_name=item,
+        arrived_at=date.fromisoformat(arrived),
+        ordered_qty_kg=None if ordered is None else Decimal(ordered),
+        accepted_qty_kg=None if accepted is None else Decimal(accepted),
+        hold_qty_kg=Decimal(0),
+        rejected_qty_kg=Decimal(0),
+        receipt_status="PUTAWAY_DONE",
+        fact_source="inbound_receipts",
+        inspection_id=f"INSP-{receipt_id}",
+        inspection_verdict=verdict,
+        inspected_qty_kg=None if accepted is None else Decimal(accepted),
+        lot_id=f"LOT-{receipt_id}",
+        in_move_id=f"MOVE-{receipt_id}",
+        stock_applied=True,
+    )
+
+
+def _logistics_reservation(reservation_id, item, *, status, unallocated, due=None, shipped=False):
+    from datetime import UTC, date, datetime
+    from decimal import Decimal
+
+    from app.logistics.schemas import ConsoleAllocation, ConsoleReservation
+
+    allocations = ()
+    if shipped:
+        allocations = (
+            ConsoleAllocation(
+                allocation_id=f"ALC-{reservation_id}",
+                lot_id=f"LOT-{reservation_id}",
+                pallet_id=None,
+                allocated_qty_kg=Decimal(10),
+                allocation_basis="FEFO_AUTO_SELECTED",
+                decided_by="tester",
+                decided_at=datetime(2026, 9, 1, tzinfo=UTC),
+                status="SHIPPED",
+                note=None,
+            ),
+        )
+    return ConsoleReservation(
+        reservation_id=reservation_id,
+        item_id=f"ITEM-{item}",
+        item_name=item,
+        sale_id=f"SALE-{reservation_id}",
+        required_qty_kg=Decimal(10),
+        reserved_qty_kg=Decimal(10),
+        allocated_qty_kg=Decimal(0),
+        unallocated_qty_kg=Decimal(unallocated),
+        due_date=None if due is None else date.fromisoformat(due),
+        status=status,
+        allocations=list(allocations),
+    )
+
+
+def _logistics_lot(lot_id, item, received, *, fresh, sell_priority=False, disposal=False):
+    from datetime import date
+    from decimal import Decimal
+
+    from app.logistics.schemas import ConsoleInventoryLot
+
+    return ConsoleInventoryLot(
+        lot_id=lot_id,
+        item_id=f"ITEM-{item}",
+        item_name=item,
+        grade="특",
+        remaining_qty_kg=Decimal(50),
+        received_at=date.fromisoformat(received),
+        status="ACTIVE",
+        storage_zone="COLD_DRY_0_1",
+        remaining_freshness_days=fresh,
+        remaining_turnover_days=fresh,
+        turnover_status="SELL_PRIORITY" if sell_priority else "NORMAL",
+        sell_priority=sell_priority,
+        disposal_candidate=disposal,
+    )
+
+
+@pytest.fixture
+def logistics_report_stubs(monkeypatch):
+    """물류 read model 을 대역으로 세운다. **DB 도 SQL 도 타지 않는다.**"""
+    from datetime import date
+    from decimal import Decimal
+
+    from app.logistics import console_service, db, historical_repository
+    from app.logistics.schemas import (
+        ConsoleArrivalSummary,
+        ConsoleCapacity,
+        ConsoleInboundResponse,
+        ConsoleInventoryResponse,
+        ConsoleOutboundResponse,
+    )
+
+    calls: dict[str, int] = {"connection": 0, "reservations": 0}
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def _connect():
+        calls["connection"] += 1
+        return _Conn()
+
+    def _reservations(_conn, **_kwargs):
+        calls["reservations"] += 1
+        return ()
+
+    monkeypatch.setattr(db, "get_connection", _connect)
+    monkeypatch.setattr(historical_repository, "reservation_state_at", _reservations)
+    monkeypatch.setattr(console_service, "load_console_runtime", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        console_service,
+        "get_inventory_console",
+        lambda **_kwargs: ConsoleInventoryResponse(
+            sim_run_id="SIM-1",
+            as_of=date(2026, 9, 3),
+            items=[
+                # 🔴 배추는 판매가능량을 못 읽었다 — 전체 합도 못 읽은 것이어야 한다.
+                _logistics_item("ITEM-BAECHU", "배추", on_hand=10, available=None, reserved=3),
+                _logistics_item("ITEM-MU", "무", on_hand=20, available=5, reserved=0),
+                # 계약 밖 품목. **이름을 코드에 적지 않고** ITEMS 로만 걸러진다.
+                _logistics_item("ITEM-PIMANUL", "피마늘", on_hand=999, available=999, reserved=0),
+            ],
+            lots=[
+                # 같은 품목·같은 입고일 둘 → 표시 순번이 붙어야 한다.
+                _logistics_lot("LOT-B", "무", "2026-09-01", fresh=9),
+                _logistics_lot("LOT-A", "무", "2026-09-01", fresh=9),
+                _logistics_lot("LOT-URGENT", "배추", "2026-08-20", fresh=1, sell_priority=True),
+                _logistics_lot("LOT-TRASH", "배추", "2026-08-10", fresh=0, disposal=True),
+                _logistics_lot("LOT-PIMANUL", "피마늘", "2026-09-01", fresh=5),
+            ],
+            capacity=ConsoleCapacity(
+                used_capacity_kg=Decimal(1234),
+                guaranteed_capacity_kg=Decimal(8000),
+                burst_capacity_kg=Decimal(9600),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        console_service,
+        "get_inbound_console",
+        lambda **_kwargs: ConsoleInboundResponse(
+            sim_run_id="SIM-1",
+            as_of=date(2026, 9, 3),
+            in_transit_status="UNRESOLVED",
+            in_transit=None,
+            receipts=[
+                # 기간(9/1~9/3) 안. 같은 날 같은 품목 둘 → 한 줄로 접힌다.
+                _logistics_receipt("RCPT-IN-1", "무", "2026-09-02", ordered=100, accepted=100),
+                _logistics_receipt("RCPT-IN-2", "무", "2026-09-02", ordered=50, accepted=50),
+                _logistics_receipt("RCPT-IN-3", "배추", "2026-09-03", ordered=70, accepted=None),
+                # 🔴 기간 밖 — 하루짜리 보고서에 1월 입고가 딸려 나오던 자리다.
+                _logistics_receipt("RCPT-OLD", "배추", "2026-01-15", ordered=900, accepted=900),
+                # 경계 밖(하루 뒤)도 빠져야 한다.
+                _logistics_receipt("RCPT-FUTURE", "무", "2026-09-04", ordered=11, accepted=11),
+            ],
+            arrival_summary=ConsoleArrivalSummary(
+                source_status="UNRESOLVED",
+                due_count=0,
+                blocked_count=0,
+                not_due_count=0,
+                unresolved_count=0,
+                overdue_count=0,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        console_service,
+        "get_outbound_console",
+        lambda **_kwargs: ConsoleOutboundResponse(
+            sim_run_id="SIM-1",
+            as_of=date(2026, 9, 3),
+            reservations=[
+                # 아직 일이 남은 것 — 본문에 실린다. 납기일 없는 것은 뒤로 간다.
+                _logistics_reservation("RSV-NODUE", "무", status="RESERVED", unallocated=10),
+                _logistics_reservation(
+                    "RSV-SOON",
+                    "배추",
+                    status="PARTIALLY_ALLOCATED",
+                    unallocated=4,
+                    due="2026-09-05",
+                ),
+                # 🔴 전량 출고가 끝난 과거 예약 — 본문에서 빠지고 건수로만 남는다.
+                _logistics_reservation(
+                    "RSV-DONE", "무", status="ALLOCATED", unallocated=0, shipped=True
+                ),
+                # 놓아준 예약도 끝난 것이다.
+                _logistics_reservation("RSV-GONE", "배추", status="CANCELLED", unallocated=0),
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        historical_repository,
+        "onhand_total_by_day",
+        lambda _conn, **_kwargs: {
+            date(2026, 9, 1): Decimal(30),
+            date(2026, 9, 2): Decimal(0),
+            date(2026, 9, 3): Decimal(30),
+        },
+    )
+    # 9/2 는 이 실행이 **열지 않은 날**이다 — 원장 누계 0 을 재고 0kg 으로 그리면 안 된다.
+    monkeypatch.setattr(
+        historical_repository,
+        "snapshot_days_between",
+        lambda _conn, **_kwargs: frozenset({date(2026, 9, 1), date(2026, 9, 3)}),
+    )
+    return calls
+
+
+def test_logistics_report_facts_keep_none_and_unopened_days(logistics_report_stubs):
+    from datetime import date
+
+    from app.master.report import render_logistics_chat_report
+
+    facts = render_logistics_chat_report(
+        sim_run_id="SIM-1",
+        as_of=date(2026, 9, 3),
+        start_date=date(2026, 9, 1),
+        end_date=date(2026, 9, 3),
+    )
+
+    summary = facts["summary"]
+    # 🔴 아는 값만 더해 숫자를 만들지 않는다. 5 도 1004 도 아니고 None 이다.
+    assert summary["total_available_qty_kg"] is None
+    # 계약 밖 품목(999kg)은 표시 합계에서 빠진다.
+    assert summary["total_on_hand_qty_kg"] == "30"
+    assert summary["total_reserved_qty_kg"] == "3"
+    assert summary["item_count"] == 2
+    # 🔴 창고 사용량은 read model 값 그대로다 — 표시 품목 합(30)이 아니다.
+    assert summary["used_capacity_kg"] == "1234"
+    assert summary["guaranteed_capacity_kg"] == "8000"
+
+    assert [row["item_name"] for row in facts["inventory"]["items"]] == ["배추", "무"]
+    # ★ 안 연 날은 `null` 이다 — 0kg 이 아니다.
+    assert facts["trend"] == [
+        {"date": "2026-09-01", "on_hand_qty_kg": 30.0},
+        {"date": "2026-09-02", "on_hand_qty_kg": None},
+        {"date": "2026-09-03", "on_hand_qty_kg": 30.0},
+    ]
+    # ★ 운송 중 미확인은 `None` 이다 — 0건 확인(`[]`)과 섞지 않는다.
+    assert facts["inbound"]["in_transit"] is None
+    assert facts["kind"] == "LOGISTICS"
+
+
+def test_logistics_report_uses_one_connection_and_one_reservation_read(logistics_report_stubs):
+    """한 보고서 = 커넥션 1개 · `reservation_state_at` 1회 (화면과 같은 조립)."""
+    from datetime import date
+
+    from app.master.report import render_logistics_chat_report
+
+    render_logistics_chat_report(
+        sim_run_id="SIM-1",
+        as_of=date(2026, 9, 3),
+        start_date=date(2026, 9, 1),
+        end_date=date(2026, 9, 3),
+    )
+    assert logistics_report_stubs == {"connection": 1, "reservations": 1}
+
+
+def _logistics_facts(start="2026-09-01", end="2026-09-03"):
+    from datetime import date
+
+    from app.master.report import render_logistics_chat_report
+
+    return render_logistics_chat_report(
+        sim_run_id="SIM-1",
+        as_of=date(2026, 9, 3),
+        start_date=date.fromisoformat(start),
+        end_date=date.fromisoformat(end),
+    )
+
+
+def test_logistics_report_receipts_are_period_activity_not_all_history(logistics_report_stubs):
+    """🔴 기준일 Snapshot 이 아니라 **기간에 도착한 것**만 본문 대상이다."""
+    facts = _logistics_facts()
+    inbound = facts["inbound"]
+
+    assert inbound["period_receipt_count"] == 3
+    # 1월 입고와 하루 뒤 입고는 기간 밖이라 빠진다.
+    assert [row["receipt_id"] for row in inbound["period_receipts"]] == [
+        "RCPT-IN-1",
+        "RCPT-IN-2",
+        "RCPT-IN-3",
+    ]
+    # 「입고일 + 품목」 실적으로 접힌다. 최신 입고일 먼저 (지시 §27).
+    rollup = inbound["period_receipt_rollup"]
+    assert [(row["arrived_at"], row["item"], row["receipt_count"]) for row in rollup] == [
+        ("2026-09-03", "배추", 1),
+        ("2026-09-02", "무", 2),
+    ]
+    # 같은 날 같은 품목 두 건이 합쳐진다 — 단순 합산이다.
+    assert rollup[1]["ordered_qty_kg"] == "150"
+    assert rollup[1]["accepted_qty_kg"] == "150"
+    assert rollup[1]["inspection_verdicts"] == ["PASS"]
+
+
+def test_logistics_report_receipt_rollup_keeps_none_total(logistics_report_stubs):
+    """🔴 한 칸이라도 `None` 이면 합계도 `None` 이다 — 0 으로 메우지 않는다."""
+    rollup = _logistics_facts()["inbound"]["period_receipt_rollup"]
+    baechu = next(row for row in rollup if row["item"] == "배추")
+    assert baechu["ordered_qty_kg"] == "70"
+    # 합격 수량을 못 읽은 건이 있으므로 합계도 못 읽은 것이다 (0 이 아니다).
+    assert baechu["accepted_qty_kg"] is None
+
+
+def test_logistics_report_empty_period_is_a_normal_answer(logistics_report_stubs):
+    """기간에 입고가 없으면 **빈 배열이 정상값**이다 — 과거로 기간을 넓히지 않는다."""
+    facts = _logistics_facts(start="2026-09-03", end="2026-09-03")
+    assert facts["inbound"]["period_receipt_count"] == 1
+    facts = _logistics_facts(start="2026-09-01", end="2026-09-01")
+    assert facts["inbound"]["period_receipt_rollup"] == []
+    assert facts["inbound"]["period_receipt_count"] == 0
+    # 하루짜리 보고서는 화면이 추이 선을 그리지 않도록 표시한다.
+    assert facts["summary"]["trend_is_single_day"] is True
+
+
+def test_logistics_report_shows_only_reservations_still_working(logistics_report_stubs):
+    """🔴 전량 출고가 끝난 과거 예약을 본문에 늘어놓지 않는다 (`_still_working` 기준)."""
+    facts = _logistics_facts()
+    outbound = facts["outbound"]
+
+    # 납기일 있는 것 먼저, 납기일 없는 것은 뒤로 (지시 §27).
+    assert [row["reservation_id"] for row in outbound["working_reservations"]] == [
+        "RSV-SOON",
+        "RSV-NODUE",
+    ]
+    assert outbound["working_reservation_count"] == 2
+    # 🔴 숨긴 것이 아니라 **건수로 남긴다.**
+    assert outbound["settled_reservation_count"] == 2
+    assert facts["summary"]["working_reservation_count"] == 2
+    # 할당 Lot 수는 `allocated_qty_kg` 와 같은 모집단(아직 안 나간 할당)이다.
+    assert all(row["allocation_lot_count"] == 0 for row in outbound["working_reservations"])
+
+
+def test_logistics_report_lots_are_ordered_and_numbered_for_people(logistics_report_stubs):
+    """급한 Lot 이 위로 오고, 같은 품목·입고일 Lot 에는 안정된 표시 순번이 붙는다."""
+    lots = _logistics_facts()["inventory"]["lots"]
+
+    # 폐기 검토 → 우선 출고 → 신선도 잔여 적은 순 → 입고일 오래된 순.
+    assert [row["lot_id"] for row in lots] == ["LOT-TRASH", "LOT-URGENT", "LOT-A", "LOT-B"]
+    # 계약 밖 품목 Lot 은 빠진다.
+    assert all(row["item_name"] != "피마늘" for row in lots)
+    # 같은 품목·같은 입고일 둘 → `lot_id` 정렬로 #1 · #2.
+    numbered = {row["lot_id"]: (row["display_index"], row["display_group_size"]) for row in lots}
+    assert numbered["LOT-A"] == (1, 2)
+    assert numbered["LOT-B"] == (2, 2)
+    # 혼자인 Lot 은 그룹 크기가 1이라 화면이 순번을 안 붙인다.
+    assert numbered["LOT-URGENT"] == (1, 1)
+    # 🔴 판정값은 read model 것 그대로다 — 표시 순서를 바꿨다고 상태가 바뀌지 않는다.
+    #    폐기 검토 Lot 이 맨 위로 왔지만 회전 상태는 대역이 준 값 그대로 `NORMAL` 이다.
+    assert lots[0]["disposal_candidate"] is True
+    assert lots[0]["turnover_status"] == "NORMAL"
+
+
+def test_logistics_arrival_display_state_only_reads_the_promised_date():
+    """🔴 도착 «자격» 판정을 흉내 내지 않는다 — 예정일이 지났나 하나만 본다."""
+    from datetime import date
+
+    from app.master.report import _logistics_arrival_display_state
+
+    as_of = date(2026, 9, 3)
+    assert _logistics_arrival_display_state(date(2026, 9, 5), as_of) == "SCHEDULED"
+    assert _logistics_arrival_display_state(date(2026, 9, 1), as_of) == "OVERDUE"
+    # 예정일 당일은 아직 안 온 것이므로 지연이다 (`arrival` 의 `eta > as_of` 경계와 같다).
+    assert _logistics_arrival_display_state(as_of, as_of) == "OVERDUE"
+    # 🔴 날짜를 모르면 지어내지 않는다 — 화면이 「—」로 둔다.
+    assert _logistics_arrival_display_state(None, as_of) is None
+
+
+def test_logistics_report_marks_pending_arrivals_for_display(logistics_report_stubs, monkeypatch):
+    """도착 전 물량 각 줄에 화면용 도착 상태가 붙는다. 내부 이름 `in_transit` 은 그대로."""
+    from datetime import date
+    from decimal import Decimal
+
+    from app.logistics import console_service
+    from app.logistics.schemas import (
+        ConsoleArrivalSummary,
+        ConsoleInboundResponse,
+        ConsoleInTransitItem,
+    )
+
+    def _row(item, eta):
+        return ConsoleInTransitItem(
+            inbound_id=f"INB-{item}-{eta or 'NA'}",
+            purchase_id=None,
+            item=item,
+            quantity_kg=Decimal(100),
+            expected_arrival_date=None if eta is None else date.fromisoformat(eta),
+        )
+
+    monkeypatch.setattr(
+        console_service,
+        "get_inbound_console",
+        lambda **_kwargs: ConsoleInboundResponse(
+            sim_run_id="SIM-1",
+            as_of=date(2026, 9, 3),
+            in_transit_status="CONFIRMED",
+            in_transit=[_row("무", "2026-09-05"), _row("배추", "2026-09-01"), _row("무", None)],
+            receipts=[],
+            arrival_summary=ConsoleArrivalSummary(
+                source_status="CONFIRMED",
+                due_count=0,
+                blocked_count=0,
+                not_due_count=1,
+                unresolved_count=1,
+                overdue_count=1,
+            ),
+        ),
+    )
+
+    rows = _logistics_facts()["inbound"]["in_transit"]
+    assert [row["arrival_display_state"] for row in rows] == ["SCHEDULED", "OVERDUE", None]
+    # ★ 내부 계약 이름과 칸은 그대로다 — 바꾼 것은 화면 표시명뿐이다.
+    assert rows[0]["inbound_id"] == "INB-무-2026-09-05"
+    assert rows[0]["expected_arrival_date"] == "2026-09-05"
+
+
+def test_logistics_report_summary_carries_unallocated_comparison(logistics_report_stubs):
+    """미할당 예약량 대 현재고 비교는 **단순 사실**이다 — 새 등급을 만들지 않는다."""
+    facts = _logistics_facts()
+    summary = facts["summary"]
+    # 품목 카드의 미할당 합(배추 25 + 무 0) > 현재고 합(30) 은 아니다.
+    assert summary["total_unallocated_reserved_qty_kg"] == "0"
+    assert summary["unallocated_exceeds_on_hand"] is False
+    assert summary["lot_count"] == 4
+    assert "severity" not in summary
+
+
 def test_finance_report_facts_keep_null_operating_expense(monkeypatch):
     from datetime import date
     from types import SimpleNamespace

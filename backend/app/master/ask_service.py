@@ -88,7 +88,11 @@ from app.master.envelope import ExecutionContext
 from app.master.llm.answer_runtime import NarrativeService, get_narrative_service
 from app.master.llm.runtime import IntentService, get_intent_service
 from app.master.llm.schemas import DomainSlots, Intent, IntentResult
-from app.master.report import render_finance_chat_report, render_sales_chat_report
+from app.master.report import (
+    render_finance_chat_report,
+    render_logistics_chat_report,
+    render_sales_chat_report,
+)
 from app.master.runner import MasterRunner
 from app.master.schemas import ProcurementRunRequest, ProcurementRunResponse, SalesRunRequest
 from app.master.service import get_run_history, make_request_id, run_procurement, run_sales
@@ -112,6 +116,8 @@ _DOMAIN_READ_ACTIONS = frozenset(
         "SALES_PROPOSALS_TODAY",
         "SALES_CONFIRMED_TODAY",
         "SALES_REPORT_GENERATE",
+        #: 보고서 생성은 **조회다.** 쓰기 목록에 넣지 않는다.
+        "LOGISTICS_REPORT_GENERATE",
         "PARTNER_LIST",
         "PARTNER_DETAIL_GET",
     }
@@ -623,6 +629,19 @@ def _domain_read(intent: Intent, *, as_of: date) -> DomainActionAnswer:
             text=f"{start} ~ {end} 판매 보고서를 만들었습니다.",
             data=report,
             report_kind="SALES",
+        )
+
+    if action == "LOGISTICS_REPORT_GENERATE":
+        start, end = _period(intent, as_of=as_of)
+        report = render_logistics_chat_report(
+            sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, start_date=start, end_date=end
+        )
+        return DomainActionAnswer(
+            domain="logistics",
+            action=action,
+            text=f"{start} ~ {end} 재고·물류 보고서를 만들었습니다.",
+            data=report,
+            report_kind="LOGISTICS",
         )
 
     if action == "PARTNER_LIST":

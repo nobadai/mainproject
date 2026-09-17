@@ -34,6 +34,7 @@ export type DomainAction =
   | "SALES_PROPOSALS_TODAY"
   | "SALES_CONFIRMED_TODAY"
   | "SALES_REPORT_GENERATE"
+  | "LOGISTICS_REPORT_GENERATE"
   | "PARTNER_LIST"
   | "PARTNER_CREATE"
   | "PARTNER_DETAIL_GET"
@@ -93,13 +94,13 @@ export interface DecisionOut {
 }
 
 export interface DomainActionAnswer {
-  domain: "finance" | "sales" | "partner";
+  domain: "finance" | "sales" | "logistics" | "partner";
   action: string;
   text: string;
   data: Record<string, unknown>;
   /** 기존 Markdown은 debug/fallback 용이며 domain report의 본문은 data facts다. */
   markdown?: string | null;
-  report_kind?: "FINANCE" | "SALES" | null;
+  report_kind?: "FINANCE" | "SALES" | "LOGISTICS" | null;
 }
 
 export interface AskResponse {

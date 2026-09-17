@@ -134,16 +134,16 @@ class AnswerOut(BaseModel):
 
 
 class DomainActionAnswer(BaseModel):
-    """Finance/Sales/Partner 자연어 명령의 구조화 결과."""
+    """Finance/Sales/Logistics/Partner 자연어 명령의 구조화 결과."""
 
     model_config = ConfigDict(extra="forbid")
 
-    domain: Literal["finance", "sales", "partner"]
+    domain: Literal["finance", "sales", "logistics", "partner"]
     action: str
     text: str
     data: dict[str, Any] = Field(default_factory=dict)
     markdown: str | None = None
-    report_kind: Literal["FINANCE", "SALES"] | None = None
+    report_kind: Literal["FINANCE", "SALES", "LOGISTICS"] | None = None
 
 
 class AskResponse(BaseModel):

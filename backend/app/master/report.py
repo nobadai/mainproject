@@ -875,3 +875,355 @@ def render_sales_chat_report(*, sim_run_id: str, as_of, start_date, end_date) ->
             1 for row in proposals.rows if row.sale_status in {"CONFIRMED", "DELIVERED"}
         ),
     }
+
+
+# ─── 재고·물류 chat report (deterministic, LLM 0회) ────────────────────────
+
+
+def _logistics_in_scope(name: Any, items: tuple[str, ...]) -> bool:
+    """이 행을 보고서 품목 칸에 싣는가. **계약 `ITEMS` 하나가 기준이다.**
+
+    🔴 **제외 품목 이름을 여기 적지 않는다.** 피마늘·건고추는 «현재 프로젝트 범위 밖»
+       이라는 업무 결정이고, 그 결정의 주인은 `contracts.core.ITEMS` 다. 여기에 이름을
+       또 적으면 범위가 바뀔 때 두 곳이 갈린다.
+
+    ★ **이름을 못 읽은 행(`None`)은 남긴다.** 이름 미상과 범위 밖은 다른 사실이다 —
+      물류 화면이 지키는 원칙 그대로다.
+    """
+    return name is None or str(name) in items
+
+
+def _logistics_qty(value: Any) -> str | None:
+    """수량 한 칸. 🔴 **`None` 을 0 으로 메우지 않는다.**
+
+    못 읽은 것과 0 kg 은 다른 사실이다. 자릿수를 잃지 않게 `Decimal` 문자열 그대로 둔다 —
+    화면 `reportFormat.kg()` 가 `Number()` 로 읽는다 (Finance/Sales facts 와 같은 모양).
+    """
+    return None if value is None else str(value)
+
+
+def _logistics_sum(values: list[Any]) -> Any:
+    """수량 합. 🔴 **한 칸이라도 `None` 이면 합계도 `None` 이다.**
+
+    아는 값만 더해 숫자를 만들면 «모르는 값이 0 이었다» 고 말하는 것과 같다.
+    판매가능량 합계가 지키는 규율을 입고 실적 집계에도 그대로 쓴다.
+    """
+    from decimal import Decimal
+
+    if any(value is None for value in values):
+        return None
+    return sum(values, start=Decimal(0))
+
+
+def _logistics_arrival_display_state(expected_arrival_date: Any, as_of: Any) -> str | None:
+    """도착 전 물량 한 줄의 **화면 표기용** 도착 상태. 🔴 업무 판정이 아니다.
+
+    ```text
+    None            예정일을 모른다        → 화면은 「—」
+    SCHEDULED       예정일이 아직 안 왔다
+    OVERDUE         예정일이 지났는데 아직 안 왔다
+    ```
+
+    🔴 **`arrival.select_due_inbound` 의 네 갈래(due · blocked · not_due · unresolved)를
+       여기서 흉내 내지 않는다.** 그 판정의 주인은 물류이고, 결과는 이미
+       `arrival_summary` 카드로 나간다. 그 함수를 이 목록에 다시 돌리면
+       **아직 안 켜진 `purchase_id` 참조** 때문에 정상 건이 전부 「막힘」으로 찍힌다
+       (`schemas.InTransitItem` · `arrival.select_due_inbound` 주석).
+
+    ★ 그래서 여기서 보는 것은 **예정일이 지났나** 하나뿐이다. 「아직 Receipt 가 없다」는
+      사실은 이 목록의 모집단 자체가 이미 보장한다 — 새 상태를 만드는 것이 아니다.
+    """
+    if expected_arrival_date is None:
+        return None
+    return "SCHEDULED" if expected_arrival_date > as_of else "OVERDUE"
+
+
+def _logistics_receipt_rollup(receipts: list[Any]) -> list[dict[str, Any]]:
+    """Receipt 원장을 **「입고일 + 품목」 기간 실적**으로 접는다.
+
+    ★ **단순 합산이지 업무 판정이 아니다.** 상태를 새로 매기지 않고, 검수 결과는
+      그 묶음에 실제로 있던 값들을 **그대로 나열**한다 — 섞여 있으면 하나로
+      뭉뚱그리지 않는다.
+
+    🔴 **`None` 수량을 0 으로 세지 않는다** (`_logistics_sum`).
+
+    ★ 정렬은 최신 입고일 먼저, 같은 날은 품목 이름순이다 (지시 §27).
+    """
+    groups: dict[tuple[Any, str], list[Any]] = {}
+    for receipt in receipts:
+        key = (receipt.arrived_at, receipt.item_name or receipt.item_id)
+        groups.setdefault(key, []).append(receipt)
+
+    out: list[dict[str, Any]] = []
+    for (arrived_at, item), rows_in_group in groups.items():
+        verdicts = sorted({r.inspection_verdict for r in rows_in_group if r.inspection_verdict})
+        out.append(
+            {
+                "arrived_at": arrived_at.isoformat(),
+                "item": item,
+                "receipt_count": len(rows_in_group),
+                "ordered_qty_kg": _logistics_qty(
+                    _logistics_sum([r.ordered_qty_kg for r in rows_in_group])
+                ),
+                "accepted_qty_kg": _logistics_qty(
+                    _logistics_sum([r.accepted_qty_kg for r in rows_in_group])
+                ),
+                "hold_qty_kg": _logistics_qty(
+                    _logistics_sum([r.hold_qty_kg for r in rows_in_group])
+                ),
+                "rejected_qty_kg": _logistics_qty(
+                    _logistics_sum([r.rejected_qty_kg for r in rows_in_group])
+                ),
+                #: 그 묶음에 있던 검수 결과들. 판정을 지어내지 않는다.
+                "inspection_verdicts": verdicts,
+                #: 아직 검수 결과가 없는 건수. 「0건」과 「모름」을 가른다.
+                "inspection_unknown_count": sum(
+                    1 for r in rows_in_group if not r.inspection_verdict
+                ),
+                "stock_applied_count": sum(1 for r in rows_in_group if r.stock_applied),
+            }
+        )
+    out.sort(key=lambda row: (row["arrived_at"], row["item"]), reverse=True)
+    return out
+
+
+def _logistics_lot_rows(lots: list[Any]) -> list[dict[str, Any]]:
+    """Lot 을 **사용자 표시 순서**로 늘어놓고 표시용 순번을 붙인다.
+
+    ★ **raw `lot_id` 를 쪼개 뜻을 캐내지 않는다.** 표시명은 `item_name` 과
+      `received_at` 구조화 칸으로 화면이 만든다. 같은 품목·같은 입고일 Lot 이 여럿이면
+      `lot_id` 정렬로 **안정된 순번**(`display_index`)만 여기서 매긴다.
+
+    ★ 순서는 폐기 검토 → 우선 출고 → 신선도 잔여 적은 순 → 입고일 오래된 순이다
+      (지시 §27). **표시 순서일 뿐 업무 판정이 아니다** — 값은 read model 것 그대로다.
+    """
+    groups: dict[tuple[Any, Any], list[Any]] = {}
+    for lot in lots:
+        groups.setdefault((lot.item_name or lot.item_id, lot.received_at), []).append(lot)
+    seq: dict[str, tuple[int, int]] = {}
+    for members in groups.values():
+        ordered = sorted(members, key=lambda lot: lot.lot_id)
+        for index, lot in enumerate(ordered, start=1):
+            seq[lot.lot_id] = (index, len(ordered))
+
+    def _order(lot: Any) -> tuple[Any, ...]:
+        fresh = lot.remaining_freshness_days
+        return (
+            not lot.disposal_candidate,
+            not lot.sell_priority,
+            # 🔴 `None` 은 0 이 아니다 — 모르는 값을 «가장 급한 것» 으로 올리지 않는다.
+            (1, 0) if fresh is None else (0, fresh),
+            lot.received_at,
+            lot.lot_id,
+        )
+
+    out: list[dict[str, Any]] = []
+    for lot in sorted(lots, key=_order):
+        index, size = seq[lot.lot_id]
+        row = lot.model_dump(mode="json")
+        row["display_index"] = index
+        row["display_group_size"] = size
+        out.append(row)
+    return out
+
+
+def render_logistics_chat_report(
+    *,
+    sim_run_id: str,
+    as_of,
+    start_date,
+    end_date,
+) -> dict[str, Any]:
+    """기존 재고·물류 read model 만으로 만드는 보고서. **LLM·새 계산·새 SQL 0.**
+
+    ```text
+    기준일 재고 · 창고 사용량   get_inventory_console                        ← as_of 원장
+    입고 · 검수                 get_inbound_console
+    예약 · 출고                 get_outbound_console                         ← 같은 예약 한 벌
+    기간 재고 추이              onhand_total_by_day + snapshot_days_between
+    ```
+
+    🔴 **여기서 업무를 새로 판정하지 않는다.** 신선도·회전·예약 상태·Receipt 상태는
+       전부 read model 이 `as_of` 축에서 낸 값을 받아 적기만 한다. 보고서가 판정을
+       시작하면 화면과 문서가 **다른 상태**를 말하게 된다.
+
+    🔴 **커넥션은 한 보고서에 하나다.** `reservation_state_at` 도 한 번만 읽어 재고
+       콘솔과 출고 콘솔이 나눠 쓴다 — 화면(`api/logistics/query.build_result`)과 같은
+       조립 순서다.
+
+    🔴 **창고 사용량을 표시 품목 합으로 다시 만들지 않는다.** 실제 창고 점유는 계약 밖
+       품목까지 포함한 «그날 실재한 모든 Lot» 의 합이라 표시 품목 합과 다를 수 있다.
+    """
+    from datetime import timedelta
+    from decimal import Decimal
+
+    # 🔴 **«아직 일이 남은 예약» 판정을 여기서 다시 적지 않는다.** 그 규칙의 주인은
+    #    화면이고(#675 §10), 두 벌로 적으면 한쪽만 고쳐지는 날이 온다.
+    from app.api.logistics.query import _still_working
+    from app.contracts.core import ITEMS
+    from app.logistics.console_service import (
+        get_inbound_console,
+        get_inventory_console,
+        get_outbound_console,
+        load_console_runtime,
+    )
+    from app.logistics.db import get_connection
+    from app.logistics.historical_repository import (
+        onhand_total_by_day,
+        reservation_state_at,
+        snapshot_days_between,
+    )
+
+    with get_connection() as conn:
+        runtime = load_console_runtime(conn=conn, sim_run_id=sim_run_id, as_of=as_of)
+        reservations = reservation_state_at(conn, sim_run_id=sim_run_id, as_of=as_of)
+        inventory = get_inventory_console(
+            conn=conn,
+            sim_run_id=sim_run_id,
+            as_of=as_of,
+            runtime=runtime,
+            reservations=reservations,
+        )
+        inbound = get_inbound_console(
+            conn=conn, sim_run_id=sim_run_id, as_of=as_of, runtime=runtime
+        )
+        outbound = get_outbound_console(
+            conn=conn, sim_run_id=sim_run_id, as_of=as_of, reservations=reservations
+        )
+        series = onhand_total_by_day(conn, sim_run_id=sim_run_id, start=start_date, end=end_date)
+        opened = snapshot_days_between(conn, sim_run_id=sim_run_id, start=start_date, end=end_date)
+
+    items = [row for row in inventory.items if _logistics_in_scope(row.item_name, ITEMS)]
+    lots = [row for row in inventory.lots if _logistics_in_scope(row.item_name, ITEMS)]
+    # ★ 내부 이름 `in_transit` 은 **차량 위치 추적이 아니다.** 「입고 일정에 올라 있고 아직
+    #   Receipt 가 안 선 건」 = 도착 전 물량이다 (`get_inbound_console` 머리말).
+    #   `None`(그날 목록을 확인 못 했다)과 `[]`(0건 확인)은 다른 값이라 그대로 가른다.
+    in_transit = (
+        None
+        if inbound.in_transit is None
+        else [row for row in inbound.in_transit if _logistics_in_scope(row.item, ITEMS)]
+    )
+
+    # 🔴 **Receipt 는 기간 발생 내역이다 — 기준일 Snapshot 이 아니다.**
+    #    `receipt_state_at` 은 그날까지 도착한 **전체 이력**을 낸다(실측 289건). 하루짜리
+    #    보고서에 1월 입고가 딸려 나오던 자리라, 보고 기간 안에 도착한 것만 남긴다.
+    receipts = [
+        row
+        for row in inbound.receipts
+        if _logistics_in_scope(row.item_name, ITEMS) and start_date <= row.arrived_at <= end_date
+    ]
+
+    # 🔴 **예약은 «그날 아직 일이 남은 것» 만 본문에 싣는다.** 모집단 정의의 주인은
+    #    화면(`api/logistics/query._still_working`)이고 여기서 새로 적지 않는다 —
+    #    전량 출고가 끝난 과거 예약과 SHIPPED 할당 이력을 수개월치 늘어놓지 않는다.
+    scoped_reservations = [
+        row for row in outbound.reservations if _logistics_in_scope(row.item_name, ITEMS)
+    ]
+    working = [row for row in scoped_reservations if _still_working(row)]
+    # ★ 납기일 빠른 순. 납기일이 없는 예약은 뒤로 둔다 (지시 §27).
+    working.sort(key=lambda row: (row.due_date is None, row.due_date, row.reservation_id))
+    settled_count = len(scoped_reservations) - len(working)
+
+    # ★ 화면 표시용 단순 합계까지만 한다 — 업무 공식을 새로 만들지 않는다.
+    #   🔴 판매가능량은 한 칸이라도 못 읽었으면 전체도 못 읽은 것이다. 아는 값만 더해
+    #      숫자를 만들면 «모르는 값이 0 이었다» 고 말하는 것과 같다.
+    total_available = _logistics_sum([row.available_qty_kg for row in items])
+    total_on_hand = sum((row.on_hand_qty_kg for row in items), start=Decimal(0))
+    total_unallocated = sum((row.unallocated_reserved_qty_kg for row in items), start=Decimal(0))
+
+    # 🔴 기간 추이: **시뮬레이션이 안 연 날은 `null` 이다 — 0kg 이 아니다.**
+    #    원장 누계는 어떤 날짜에도 숫자를 내고 첫 사실 이전 구간에서 그 값이 0 인데,
+    #    그 0 은 «재고가 없다» 가 아니라 «그날을 모른다» 다 (`query._onhand_series` 와 같은 규칙).
+    trend: list[dict[str, Any]] = []
+    for offset in range((end_date - start_date).days + 1):
+        day = start_date + timedelta(days=offset)
+        known = day in opened and day in series
+        trend.append(
+            {"date": day.isoformat(), "on_hand_qty_kg": float(series[day]) if known else None}
+        )
+
+    capacity = inventory.capacity
+    return {
+        "kind": "LOGISTICS",
+        "sim_run_id": sim_run_id,
+        "as_of": as_of.isoformat(),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        #: ★ **기준일 Snapshot 인가 기간 발생 내역인가를 칸 이름으로 가른다.**
+        #:   `summary` · `inventory` · `outbound` 는 `as_of` 상태이고,
+        #:   `inbound.period_*` 와 `trend` 는 `start_date~end_date` 에 일어난 일이다.
+        "summary": {
+            "item_count": len(items),
+            "total_on_hand_qty_kg": _logistics_qty(total_on_hand),
+            "total_available_qty_kg": _logistics_qty(total_available),
+            "total_reserved_qty_kg": _logistics_qty(
+                sum((row.reserved_qty_kg for row in items), start=Decimal(0))
+            ),
+            "total_unallocated_reserved_qty_kg": _logistics_qty(total_unallocated),
+            #: 판매가능량이 `None` 인 이유. read model 이 낸 값을 그대로 옮긴다.
+            "available_qty_unresolved_reason": inventory.available_qty_unresolved_reason,
+            #: 🔴 창고 Capacity 는 read model 값 그대로다 — 품목 카드 합이 아니다.
+            "used_capacity_kg": _logistics_qty(capacity.used_capacity_kg),
+            "guaranteed_capacity_kg": _logistics_qty(capacity.guaranteed_capacity_kg),
+            "burst_capacity_kg": _logistics_qty(capacity.burst_capacity_kg),
+            "capacity_basis": capacity.capacity_basis,
+            "lot_count": len(lots),
+            #: Lot 건수는 품목 카드가 이미 센 값을 더한 것이다 — 여기서 다시 판정하지 않는다.
+            #: ⚠️ 이 read model 에서 «만료 Lot» 과 «폐기 검토 Lot» 은 **같은 모집단**이라
+            #:    (`console_service`: `disposal_candidate and remaining > 0`) 한 칸만 낸다.
+            "sell_priority_lot_count": sum(row.sell_priority_lot_count for row in items),
+            "disposal_candidate_lot_count": sum(row.disposal_candidate_lot_count for row in items),
+            "working_reservation_count": len(working),
+            "settled_reservation_count": settled_count,
+            #: 🔴 단순 사실 비교다 — 새 KPI 도 severity 도 아니다 (지시 §30).
+            #:    `Decimal` 로 재서 문자열 비교의 오차를 남기지 않는다.
+            "unallocated_exceeds_on_hand": bool(total_unallocated > total_on_hand),
+            "trend_is_single_day": start_date == end_date,
+        },
+        "inventory": {
+            "items": [row.model_dump(mode="json") for row in items],
+            #: 🔴 표시 순서와 표시용 순번만 붙인 Lot. 값은 read model 것 그대로다.
+            "lots": _logistics_lot_rows(lots),
+            "capacity": capacity.model_dump(mode="json"),
+            "available_qty_unresolved_reason": inventory.available_qty_unresolved_reason,
+        },
+        "inbound": {
+            "arrival_summary": inbound.arrival_summary.model_dump(mode="json"),
+            "in_transit_status": inbound.in_transit_status,
+            #: 도착 전 물량. 내부 이름은 계약대로 `in_transit` 이고 화면 표시명만 「입고 예정」이다.
+            "in_transit": (
+                None
+                if in_transit is None
+                else [
+                    dict(
+                        row.model_dump(mode="json"),
+                        arrival_display_state=_logistics_arrival_display_state(
+                            row.expected_arrival_date, as_of
+                        ),
+                    )
+                    for row in in_transit
+                ]
+            ),
+            #: 보고 기간에 도착한 Receipt 를 「입고일 + 품목」으로 접은 실적. **본문용.**
+            "period_receipt_rollup": _logistics_receipt_rollup(receipts),
+            "period_receipt_count": len(receipts),
+            #: 🔴 추적용 원장은 facts 에 **남긴다.** 화면이 안 그릴 뿐이다 (지시 §10).
+            "period_receipts": [row.model_dump(mode="json") for row in receipts],
+        },
+        "outbound": {
+            #: 🔴 «그날 아직 일이 남은» 예약만. 전량 출고가 끝난 과거 예약은 건수로만 남긴다.
+            "working_reservations": [
+                dict(
+                    row.model_dump(mode="json"),
+                    #: 할당 Lot 수 = `allocated_qty_kg` 와 **같은 모집단**(아직 안 나간 할당)이다.
+                    allocation_lot_count=len(
+                        {a.lot_id for a in row.allocations if a.status == "ALLOCATED"}
+                    ),
+                )
+                for row in working
+            ],
+            "working_reservation_count": len(working),
+            "settled_reservation_count": settled_count,
+        },
+        "trend": trend,
+    }
