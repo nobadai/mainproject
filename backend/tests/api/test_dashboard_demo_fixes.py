@@ -130,8 +130,32 @@ def test_승인_대기_칸에_두_안_고정_꼬리가_없다(stub):
     tab = dashboard_query.build(AS_OF)
     stat = next(s for s in tab.stats if s.label == "매입 승인 대기")
     assert "두 안" not in stat.detail
-    assert stat.detail.endswith(f"· {len(stub.plans)}안")
+    #  🔴 상세 모양이 바뀌었다 (2026-09-18) — 「안 이름들 · N안」 → 「N안 중 M건 대기」.
+    #     이 검사가 보는 것(고정 꼬리가 아니라 **실제 개수**가 붙는다)은 그대로다.
+    assert stat.detail.startswith(f"{len(stub.plans)}안 중 ")
     assert "두 안" not in _QUERY.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("대기", [0, 1, 3, 4])
+def test_승인_대기_상세가_값과_같은_수를_센다(stub, 대기):
+    """🔴 상세의 M 이 **값**이다 — 전에는 값(대기인 안)과 상세(안 전부)가 다른 것을 셌다.
+
+    ★ 규칙 8 — 상수와 대 보지 않는다. **대기인 안의 수를 바꿔** 값과 상세가 같이 움직이는지 본다.
+    """
+    for i, plan in enumerate(stub.plans):
+        plan.pending = i < 대기
+    stat = next(s for s in dashboard_query.build(AS_OF).stats if s.label == "매입 승인 대기")
+
+    assert stat.raw == 대기
+    assert stat.detail == f"{len(stub.plans)}안 중 {대기}건 대기"
+    #  ★ 안 이름은 싣지 않는다 — 아래 매입 표가 상태와 함께 보인다
+    assert not any(p.key in stat.detail for p in stub.plans)
+
+
+def test_안이_없는_날은_상세가_그대로다(stub):
+    stub.plans.clear()
+    stat = next(s for s in dashboard_query.build(AS_OF).stats if s.label == "매입 승인 대기")
+    assert (stat.raw, stat.detail) == (0, "오늘 낸 안 없음")
 
 
 def test_지어낸_배지_문구가_없다(stub):

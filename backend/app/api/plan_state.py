@@ -85,8 +85,18 @@ def state_of(*, approved: bool, recorded: RecordedTotals | None) -> str:
           무   403 × 196   78,988   "후보"   🔴 승인 + 실매입 기록 완료
         같은 응답의 「이번 주 확정 매입액」 353,988 은 그 둘의 **기록값**이었다
 
-    ★ **`pending` 이 아니라 `approved` 로 가른다.** 지금 둘은 서로 반대지만(승인만 안
-      이름을 든다) 이 칸이 말하려는 것은 **승인 여부**다.
+    ★ **`pending` 이 아니라 `approved` 로 가른다.** 🔴 둘은 **서로 반대가 아니다**
+      (2026-09-17 · `#813`) — `pending` 은 **요청** 단위(같은 요청에 결정이 없나)이고
+      `approved` 는 **안** 단위(이 안이 승인됐나)다. 같은 요청에서 다른 안이 승인되면
+      고르지 않은 형제 안은 **둘 다 거짓**이다. 이 칸이 말하려는 것은 **이 안의 승인 여부**다.
+
+    .. code-block:: text
+
+        결정 없는 요청의 안            pending 참     approved 거짓   → 후보
+        승인된 안                      pending 거짓   approved 참     → 승인됨 · 매입 기록됨
+        같은 요청에서 고르지 않은 안    pending 거짓   approved 거짓   → 후보
+
+        실측  REH-0914 08-31 · 배추 · 기본 (보수가 승인된 요청)   pending 거짓 · approved 거짓
 
     ⚠️ **「반려」를 지금은 아무도 안 낸다.** 거절(`REJECT_ALL`)은 `scenario_label` 이 NULL
       이라(`master_decisions` CHECK) 안 하나에 붙지 않고, 매입 탭이 주는 `Plan` 에는 그
