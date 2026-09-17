@@ -218,11 +218,9 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
                 label="받을 돈"
                 value={moneyWon(receivables.data?.summary.total_outstanding_krw)}
               />
-              <Metric
-                label="그중 연체"
-                value={moneyWon(overdueReceivable(receivables.data))}
-                hint="만기가 지난 금액"
-              />
+              <Metric label="1–7일 연체" value={moneyWon(receivables.data.summary.days_1_7_krw)} />
+              <Metric label="8–30일 연체" value={moneyWon(receivables.data.summary.days_8_30_krw)} />
+              <Metric label="30일 초과" value={moneyWon(receivables.data.summary.days_30_plus_krw)} />
               <Metric label="줄 돈" value={moneyWon(payables.data?.summary.total_outstanding_krw)} />
               <Metric label="그중 연체" value={moneyWon(payables.data?.summary.overdue_krw)} />
             </Metrics>
@@ -271,24 +269,6 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
       <AgentCard state={latest} />
     </>
   );
-}
-
-/**
- * 연체된 받을 돈. **한 구간이 아니라 만기가 지난 구간 전부다.**
- *
- * ⚠️ 전에는 `1–7일` 한 칸만 «그중 연체» 로 적어, 8일 넘게 밀린 돈이 연체에서 빠졌다.
- *   합치는 것은 표시용이고, 구간 금액 자체는 백엔드가 나눈 값 그대로다.
- */
-function overdueReceivable(data: ReceivablesResponse | null): number | null {
-  if (!data) return null;
-  const parts = [
-    data.summary.days_1_7_krw,
-    data.summary.days_8_30_krw,
-    data.summary.days_30_plus_krw,
-  ].map(toNumber);
-  //  🔴 한 구간이라도 값이 없으면 합을 만들지 않는다 — 없는 것을 0 으로 읽지 않는다.
-  if (parts.some((value) => value === null)) return null;
-  return parts.reduce<number>((sum, value) => sum + (value ?? 0), 0);
 }
 
 /**

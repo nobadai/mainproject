@@ -44,7 +44,8 @@ const OUTFLOW = [
 ];
 
 export function FinanceFlowChart({ rows }: { rows: ClosingItem[] }) {
-  const points: FlowPoint[] = rows.map((row, index) => ({
+  const orderedRows = [...rows].sort((left, right) => left.close_date.localeCompare(right.close_date));
+  const points: FlowPoint[] = orderedRows.map((row, index) => ({
     index,
     label: shortDate(row.close_date),
     //  유출은 아래로 — 부호를 뒤집어 «방향» 만 표현한다.
