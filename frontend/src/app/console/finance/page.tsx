@@ -28,7 +28,6 @@ import {
   useConsoleData,
 } from "@/components/console/ConsoleData";
 import { DomainHeader } from "@/components/console/DomainShell";
-import { RunPicker, useSimRun } from "@/components/console/RunPicker";
 import {
   AGING_LABELS,
   financeConsole,
@@ -42,6 +41,7 @@ import {
   type ReceivablesResponse,
 } from "@/lib/console_api";
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { FINANCE_SALES_SIM_RUN_ID } from "@/lib/run_context";
 
 import { AgingBars } from "./AgingBars";
 import { CreditPanel } from "./CreditPanel";
@@ -51,7 +51,7 @@ import { ExpenseActions, ExpenseCreateForm, paidDateText } from "./ExpenseOps";
 import { ReceivableCollectionForm } from "./ReceivableCollectionForm";
 import { FinanceCashChart } from "./FinanceCashChart";
 import { FinanceFlowChart } from "./FinanceFlowChart";
-import { DataBasis, NoRunChosen, TechDetails } from "./TechDetails";
+import { DataBasis, TechDetails } from "./TechDetails";
 import {
   DATA_SOURCE_NOTE,
   financingModeText,
@@ -74,19 +74,13 @@ const TABS: { key: Tab; label: string }[] = [
 
 export default function FinancePage() {
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
-  const simRun = useSimRun();
+  const simRun = FINANCE_SALES_SIM_RUN_ID;
   const [tab, setTab] = useState<Tab>("overview");
   return (
     <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
       <DomainHeader title="재무" tabs={TABS} active={tab} onChange={setTab} />
       <DataBasis asOf={asOf} note={DATA_SOURCE_NOTE} />
-      {/* 🔴 실행 축은 내부 식별자다. 고르는 자리는 남기되 기본 화면에서 내린다 —
-          공용 `RunPicker` 는 고치지 않고 **위치만** 옮겼다. 아무것도 안 골랐으면
-          열어 둔다. 닫아 두면 사용자가 고를 자리를 못 찾는다. */}
-      <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
-        <RunPicker asOf={asOf} />
-      </TechDetails>
-      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} onTab={setTab} />}
+      <Body simRun={simRun} asOf={asOf} tab={tab} onTab={setTab} />
     </div>
   );
 }

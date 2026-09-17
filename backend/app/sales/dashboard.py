@@ -15,6 +15,7 @@ from app.sales.schemas import (
     SalesHistoryItem,
     SalesItemSummary,
     SalesReceivableItem,
+    TodayConfirmedSaleItem,
 )
 
 
@@ -121,6 +122,7 @@ def load_recent_sales(*, sim_run_id: str, as_of: date, limit: int) -> list[dict[
         """
         SELECT
             s.sale_id,
+            s.order_date,
             s.sale_date,
             s.customer_partner_id,
             p.partner_name,
@@ -140,6 +142,49 @@ def load_recent_sales(*, sim_run_id: str, as_of: date, limit: int) -> list[dict[
         """
     ).format(sql.Identifier(schema), sql.Identifier(schema))
     return fetch_all(query, [sim_run_id, as_of, limit])
+
+
+def load_today_confirmed_sales(*, sim_run_id: str, as_of: date) -> list[dict[str, object]]:
+    """기준일에 확정된 판매 원장 품목 행을 읽는다.
+
+    판매 확정일(``order_date``)과 납품일(``sale_date``)은 다른 사실이다. 이 목록은
+    오늘 판매하기로 확정한 주문을 보여 주므로 미래 납품 건도 포함한다. 납품/실적 기준
+    dashboard 집계는 ``load_recent_sales`` 등 기존 read model이 계속 소유한다.
+    """
+    schema = get_db_schema()
+    query = sql.SQL(
+        """
+        SELECT
+            s.sale_id,
+            s.order_date,
+            s.sale_date,
+            s.customer_partner_id,
+            p.partner_name,
+            si.item_id,
+            i.item_name,
+            si.quantity_kg,
+            si.unit_price_krw_per_kg,
+            si.line_amount_krw,
+            s.order_status
+        FROM {}.sales AS s
+        JOIN {}.sale_items AS si
+          ON si.sale_id = s.sale_id
+        LEFT JOIN {}.items AS i
+          ON i.item_id = si.item_id
+        LEFT JOIN {}.partners AS p
+          ON p.partner_id = s.customer_partner_id
+        WHERE s.sim_run_id = %s
+          AND s.order_date = %s
+          AND s.order_status IN ('CONFIRMED', 'DELIVERED')
+        ORDER BY s.sale_id DESC, si.item_id
+        """
+    ).format(
+        sql.Identifier(schema),
+        sql.Identifier(schema),
+        sql.Identifier(schema),
+        sql.Identifier(schema),
+    )
+    return fetch_all(query, [sim_run_id, as_of])
 
 
 def load_sales_receivables(*, sim_run_id: str, as_of: date) -> list[dict[str, object]]:
@@ -224,6 +269,9 @@ def get_sales_dashboard(
                 sim_run_id=sim_run_id, as_of=as_of, limit=recent_limit
             )
         ),
+        today_confirmed_sales=_today_confirmed_sales(
+            load_today_confirmed_sales(sim_run_id=sim_run_id, as_of=as_of)
+        ),
         receivables=_receivables(
             load_sales_receivables(sim_run_id=sim_run_id, as_of=as_of),
             as_of=as_of,
@@ -274,6 +322,7 @@ def _recent_sales(rows: list[dict[str, object]]) -> list[SalesHistoryItem]:
         result.append(
             SalesHistoryItem(
                 sale_id=str(row["sale_id"]),
+                order_date=row["order_date"],
                 sale_date=row["sale_date"],
                 customer_partner_id=str(row["customer_partner_id"]),
                 partner_name=None if row.get("partner_name") is None else str(row["partner_name"]),
@@ -288,6 +337,25 @@ def _recent_sales(rows: list[dict[str, object]]) -> list[SalesHistoryItem]:
             )
         )
     return result
+
+
+def _today_confirmed_sales(rows: list[dict[str, object]]) -> list[TodayConfirmedSaleItem]:
+    return [
+        TodayConfirmedSaleItem(
+            sale_id=str(row["sale_id"]),
+            order_date=row["order_date"],
+            sale_date=row["sale_date"],
+            customer_partner_id=str(row["customer_partner_id"]),
+            partner_name=None if row.get("partner_name") is None else str(row["partner_name"]),
+            item_id=str(row["item_id"]),
+            item_name=None if row.get("item_name") is None else str(row["item_name"]),
+            quantity_kg=_decimal(row["quantity_kg"]),
+            unit_price_krw_per_kg=_decimal(row["unit_price_krw_per_kg"]),
+            line_amount_krw=_decimal(row["line_amount_krw"]),
+            order_status=str(row["order_status"]),
+        )
+        for row in rows
+    ]
 
 
 def _receivables(rows: list[dict[str, object]], *, as_of: date) -> list[SalesReceivableItem]:

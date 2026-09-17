@@ -415,6 +415,7 @@ def _sales_dashboard_stub(sim_run_id: str, as_of: date) -> SalesDashboardRespons
         recent_sales=[
             SalesHistoryItem(
                 sale_id="SALE-002",
+                order_date=date(2025, 12, 31),
                 sale_date=date(2025, 12, 31),
                 customer_partner_id="PARTNER-1",
                 partner_name="거래처",
@@ -429,6 +430,7 @@ def _sales_dashboard_stub(sim_run_id: str, as_of: date) -> SalesDashboardRespons
             ),
             SalesHistoryItem(
                 sale_id="SALE-001",
+                order_date=date(2025, 12, 30),
                 sale_date=date(2025, 12, 30),
                 customer_partner_id="PARTNER-1",
                 partner_name="거래처",

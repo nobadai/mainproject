@@ -92,8 +92,9 @@ export interface SalesSummaryResponse {
     received_amount_krw: Money;
     outstanding_receivables_krw: Money;
   };
-recent_sales: {
+  recent_sales: {
     sale_id: string;
+    order_date: string;
     sale_date: string;
     customer_partner_id: string;
     partner_name: string | null;
@@ -102,6 +103,19 @@ recent_sales: {
     collection_due_date: string;
     collection_status: string;
     collection_status_label: string;
+    order_status: string;
+  }[];
+  today_confirmed_sales: {
+    sale_id: string;
+    order_date: string;
+    sale_date: string;
+    customer_partner_id: string;
+    partner_name: string | null;
+    item_id: string;
+    item_name: string | null;
+    quantity_kg: Money;
+    unit_price_krw_per_kg: Money;
+    line_amount_krw: Money;
     order_status: string;
   }[];
   items: {

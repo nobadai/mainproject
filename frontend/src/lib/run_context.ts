@@ -21,6 +21,14 @@
 
 const KEY = "haetdeul.sim_run_id";
 
+/**
+ * 재무·판매 운영 화면이 읽는 확정 실행 축.
+ *
+ * 이 두 화면은 실행 비교 도구가 아니라 최종 운영 결과를 보는 자리라, 사용자가 임의
+ * 실행을 선택하지 않는다. 다른 콘솔과 Master Chat은 기존 선택 상태를 계속 사용한다.
+ */
+export const FINANCE_SALES_SIM_RUN_ID = "SIM-CHAIN-FINAL-0918";
+
 /** 환경이 주면 그 값으로 시작한다. 없으면 **빈 값** — 아무 실행도 고르지 않은 상태다. */
 const SEED = process.env.NEXT_PUBLIC_SIM_RUN_ID ?? "";
 

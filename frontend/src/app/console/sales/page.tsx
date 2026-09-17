@@ -28,7 +28,6 @@ import {
   useConsoleData,
 } from "@/components/console/ConsoleData";
 import { DomainHeader } from "@/components/console/DomainShell";
-import { RunPicker, useSimRun } from "@/components/console/RunPicker";
 import { PartnerProfileForm } from "@/components/console/PartnerProfileForm";
 import { SalesCandidatePanel } from "@/components/console/SalesCandidatePanel";
 import {
@@ -45,9 +44,10 @@ import {
   STAGE_LABELS,
 } from "@/lib/console_api";
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
+import { FINANCE_SALES_SIM_RUN_ID } from "@/lib/run_context";
 
 import { AgingBars } from "../finance/AgingBars";
-import { DataBasis, NoRunChosen, TechDetails } from "../finance/TechDetails";
+import { DataBasis, TechDetails } from "../finance/TechDetails";
 import {
   DATA_SOURCE_NOTE,
   itemText,
@@ -86,24 +86,33 @@ const TABS: { key: Tab; label: string }[] = [
 
 export default function SalesPage() {
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
-  const simRun = useSimRun();
+  const simRun = FINANCE_SALES_SIM_RUN_ID;
   const [tab, setTab] = useState<Tab>("overview");
+  const [salesRefresh, setSalesRefresh] = useState(0);
   return (
     <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
       <DomainHeader title="판매" tabs={TABS} active={tab} onChange={setTab} />
       <DataBasis asOf={asOf} note={DATA_SOURCE_NOTE} />
-      {/* 🔴 실행 축은 내부 식별자다. 고르는 자리는 남기되 기본 화면에서 내린다. */}
-      <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
-        <RunPicker asOf={asOf} />
-      </TechDetails>
-      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
+      <Body simRun={simRun} asOf={asOf} tab={tab} salesRefresh={salesRefresh} onSalesConfirmed={() => setSalesRefresh((value) => value + 1)} />
     </div>
   );
 }
 
-function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab }) {
-  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} />;
-  if (tab === "candidates") return <Candidates simRun={simRun} asOf={asOf} />;
+function Body({
+  simRun,
+  asOf,
+  tab,
+  salesRefresh,
+  onSalesConfirmed,
+}: {
+  simRun: string;
+  asOf: string;
+  tab: Tab;
+  salesRefresh: number;
+  onSalesConfirmed: () => void;
+}) {
+  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} salesRefresh={salesRefresh} />;
+  if (tab === "candidates") return <Candidates simRun={simRun} asOf={asOf} onSalesConfirmed={onSalesConfirmed} />;
   if (tab === "partners") return <Partners simRun={simRun} asOf={asOf} />;
   if (tab === "collections") return <Collections simRun={simRun} asOf={asOf} />;
   if (tab === "orders") return <Orders simRun={simRun} asOf={asOf} />;
@@ -112,7 +121,15 @@ function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab })
 }
 
 
-function Candidates({ simRun, asOf }: { simRun: string; asOf: string }) {
+function Candidates({
+  simRun,
+  asOf,
+  onSalesConfirmed,
+}: {
+  simRun: string;
+  asOf: string;
+  onSalesConfirmed: () => void;
+}) {
   const [proposalRefresh, setProposalRefresh] = useState(0);
   const proposals = useConsoleData<SalesProposalsResponse>(
     `sales-proposals:${simRun}:${asOf}:${proposalRefresh}`,
@@ -120,22 +137,26 @@ function Candidates({ simRun, asOf }: { simRun: string; asOf: string }) {
     true,
   );
   const refreshProposals = () => setProposalRefresh((value) => value + 1);
+  const refreshAfterConfirmation = () => {
+    refreshProposals();
+    onSalesConfirmed();
+  };
   return (
     <>
       <SalesCandidatePanel simRun={simRun} asOf={asOf} onCreated={refreshProposals} />
-      <TodayProposalsPanel asOf={asOf} state={proposals} onConfirmed={refreshProposals} />
+      <TodayProposalsPanel asOf={asOf} state={proposals} onConfirmed={refreshAfterConfirmation} />
     </>
   );
 }
 
 /* ── 판매 현황 ─────────────────────────────────────────────────────────── */
 
-function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
+function Overview({ simRun, asOf, salesRefresh }: { simRun: string; asOf: string; salesRefresh: number }) {
   const [trendFrom, setTrendFrom] = useState("");
   const [trendTo, setTrendTo] = useState("");
   const [appliedTrendRange, setAppliedTrendRange] = useState({ from: "", to: "" });
   const summary = useConsoleData<SalesSummaryResponse>(
-    `sales-summary:${simRun}:${asOf}`,
+    `sales-summary:${simRun}:${asOf}:${salesRefresh}`,
     () => salesOverview.summary(simRun, asOf),
     true,
   );
@@ -156,7 +177,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
     true,
   );
 
-  const todayConfirmedSales = summary.data?.recent_sales.filter((sale) => sale.sale_date === asOf) ?? [];
+  const todayConfirmedSales = summary.data?.today_confirmed_sales ?? [];
 
   return (
     <>
@@ -189,7 +210,7 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
         )}
       </Panel>
 
-      <Panel title="금일 확정 판매안" subtitle="후보가 아닌, 이 기준일에 실제 판매 원장으로 확정된 건만 보여줍니다">
+      <Panel title="금일 확정 판매안" subtitle="후보가 아닌, 이 기준일에 실제 판매를 확정한 원장만 보여줍니다. 납품 예정일은 별도입니다.">
         {summary.loading ? (
           <Skeleton what="금일 확정 판매" />
         ) : summary.error ? (
@@ -201,9 +222,12 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
             rows={todayConfirmedSales}
             columns={[
               { key: "partner", label: "거래처", render: (row) => partnerText(row.partner_name, row.customer_partner_id) },
-              { key: "amount", label: "판매 금액", align: "right", render: (row) => moneyWon(row.total_amount_krw) },
-              { key: "quantity", label: "판매량", align: "right", render: (row) => quantity(row.total_quantity_kg) },
+              { key: "item", label: "품목", render: (row) => itemText(row.item_name, row.item_id) },
+              { key: "quantity", label: "확정 수량", align: "right", render: (row) => quantity(row.quantity_kg) },
+              { key: "price", label: "확정 단가", align: "right", render: (row) => `${moneyWon(row.unit_price_krw_per_kg)}/kg` },
+              { key: "amount", label: "판매 금액", align: "right", render: (row) => moneyWon(row.line_amount_krw) },
               { key: "status", label: "판매 상태", render: (row) => row.order_status },
+              { key: "delivery", label: "납품 예정일", mono: true, render: (row) => row.sale_date },
             ]}
           />
         )}
