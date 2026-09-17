@@ -46,7 +46,7 @@ from psycopg import sql
 
 from app.finance.closing_adapter import FinanceClosingAdapter
 from app.finance.db import get_connection, get_db_schema
-from app.finance.expenses import ExpenseSettlement, settle_due_expenses, settle_expense
+from app.finance.expenses import ExpenseSettlement, settle_due_expenses
 from app.master import backtest_runner
 from app.master import closing as master_closing
 from app.master.backtest_runner import WalkResult, format_summary, walk
@@ -627,9 +627,15 @@ def test_그날_지급한_운영비가_마감행의_운영비_칸에_잡힌다()
     ★ **커밋하지 않는다.** 넣고 돌리고 되돌린다 — 공유 DB 에 시연용 실행을 남기면
       그것이 나중에 사실로 읽힌다 (`test_collection_events` 와 같은 규율).
 
-    ⚠️ **지급 대역이 실 `settle_expense` 를 부른다.** `settle_due_expenses` 는 아직
-      껍데기라(재무 몫) 그 속으로는 한 건도 안 나간다 — 이 판이 재는 것은 **마스터가
-      건 배선**(커넥션 · 커밋 · 마감보다 앞)이고, 속이 채워져도 그 배선은 그대로다.
+    🔴 **대역이 하나도 없다. 사슬 전체가 실물이다** (2026-09-17 · `#799` 가 속을 채운 뒤).
+
+      ```text
+      run_scheduled_day  →  settle_due_expenses  →  settle_expense  →  close_day
+         (마스터 배선)        (재무 선택·순서)       (재무 지급·차감)     (재무 마감)
+      ```
+
+      ★ 이 판만 그 넷이 **한 번에** 돈다. 어느 한 칸이 계약을 어기면 여기서 빨간불이
+        나고, 다른 판들은 대역을 쓰므로 그것을 못 본다 — 그래서 이 판이 db 표식이다.
 
     🔴 **`base_net_cash_krw` 를 여기서 다시 계산하지 않는다.** 주인은
       `_ClosingFacts.base_net_cash_krw` 이고, 이 판은 *"두 번 빠지지 않았나"* 만 본다.
@@ -663,17 +669,6 @@ def test_그날_지급한_운영비가_마감행의_운영비_칸에_잡힌다()
 
     비용 = f"EXP-{uuid.uuid4().hex[:8]}"
 
-    def 지급하기(c: Any, *, sim_run_id: str, as_of: date):
-        """실 `settle_expense` 를 그날 지급일이 된 한 건에 태운다."""
-        return (
-            settle_expense(
-                c,
-                expense_id=비용,
-                sim_run_id=sim_run_id,
-                financing_mode="LOAN_BASELINE",
-                paid_date=as_of,
-            ),
-        )
 
     master_closing.register_closing("finance", FinanceClosingAdapter())
     try:
@@ -722,7 +717,7 @@ def test_그날_지급한_운영비가_마감행의_운영비_칸에_잡힌다()
         순서: list[str] = []
         인자 = _인자(
             순서,
-            settle_expenses_fn=지급하기,
+            settle_expenses_fn=settle_due_expenses,
             connect=_연결하기,
             close_fn=lambda as_of, **kw: close_day(as_of, connect=_연결하기, **kw),
             sim_run_id=축,
