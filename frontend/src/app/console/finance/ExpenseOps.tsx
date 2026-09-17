@@ -93,7 +93,7 @@ export function ExpenseCreateForm({ simRun, asOf, onSaved }: { simRun: string; a
 
   return (
     <Panel title="비용 등록" subtitle="등록한 비용은 «지급 예정» 으로 기록됩니다 — 현금은 지급할 때 빠집니다">
-      <form className="grid gap-3 sm:grid-cols-2" onSubmit={submit}>
+      <form className="finance-form grid gap-3 sm:grid-cols-2" onSubmit={submit}>
         <label>비용 분류 *
           <select required value={category} onChange={(e) => setCategory(e.target.value)}>
             {categories.map((name) => <option key={name} value={name}>{categoryLabel(name)}</option>)}

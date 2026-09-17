@@ -62,7 +62,7 @@ export function CreditLimitForm({ simRun, asOf, refreshKey, onSaved }: { simRun:
   return (
     <Panel title="여신한도 등록·변경" subtitle="기존 금액을 덮어쓰지 않고 새 적용일의 이력을 추가합니다">
       {partners.loading ? <Skeleton what="거래처" /> : partners.error ? <Failed what="거래처" message={partners.error} /> : <>
-        <form className="grid gap-3 sm:grid-cols-2" onSubmit={submit}>
+        <form className="finance-form grid gap-3 sm:grid-cols-2" onSubmit={submit}>
           <label>거래처 *
             <select required value={partner} onChange={(event) => requestPartnerChange(event.target.value)} disabled={saving}>
               <option value="">거래처 선택</option>

@@ -29,7 +29,7 @@ export function ReceivableCollectionForm({ simRun, asOf, rows, states, onSaved }
     } catch (error) { setMessage(error instanceof Error ? error.message : "수금을 기록하지 못했습니다."); } finally { setSaving(false); }
   };
   return <Panel title="수금 기록" subtitle="실제 입금만 기록합니다. 전액 또는 이번에 받은 금액을 선택할 수 있습니다.">
-    {open.length === 0 ? <p className="m-0 text-[12px] text-ink2">기준일에 기록할 미수금이 없습니다.</p> : <form className="grid gap-3 sm:grid-cols-2" onSubmit={submit}>
+    {open.length === 0 ? <p className="m-0 text-[12px] text-ink2">기준일에 기록할 미수금이 없습니다.</p> : <form className="finance-form grid gap-3 sm:grid-cols-2" onSubmit={submit}>
       <label className="sm:col-span-2">받을 돈<select required value={receivableId} onChange={(e) => setReceivableId(e.target.value)}><option value="">받을 돈 선택</option>{open.map((row) => <option key={row.receivable_id} value={row.receivable_id}>{partnerText(row.partner_name, row.partner_id)} · 잔액 {moneyWon(row.outstanding_amount_krw)} · 만기 {row.due_date}</option>)}</select></label>
       <label>재무 축<select required value={mode} onChange={(e) => setMode(e.target.value)}>{states.map((state) => <option key={state.financing_mode} value={state.financing_mode}>{state.financing_mode}</option>)}</select></label>
       <label>수금 방식<select value={collectAll ? "ALL" : "PARTIAL"} onChange={(e) => setCollectAll(e.target.value === "ALL")}><option value="ALL">남은 금액 전액 수금</option><option value="PARTIAL">일부 금액 수금</option></select></label>

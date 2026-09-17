@@ -55,7 +55,7 @@ export function CashAdjustmentForm({ simRun, asOf, states, onSaved }: { simRun: 
 
   return (
     <Panel title="자금 입금 · 출금" subtitle={`${asOf} 기준일 장부에 실제 자금 변동을 기록합니다`}>
-      <form className="grid gap-4 sm:grid-cols-2" onSubmit={requestConfirmation}>
+      <form className="finance-form grid gap-4 sm:grid-cols-2" onSubmit={requestConfirmation}>
         {states.length > 1 ? (
           <label className="sm:col-span-2">장부 기준
             <select required value={mode} onChange={(event) => setMode(event.target.value)}>{states.map((state) => <option key={state.financing_mode} value={state.financing_mode}>{financingModeText(state.financing_mode)}</option>)}</select>
