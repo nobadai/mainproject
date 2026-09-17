@@ -253,14 +253,59 @@ function RequestFrame({ group }: { group: RequestGroup }) {
       {/*
         ★ `auto-fill` 이다 — `auto-fit` 이면 안이 하나뿐인 요청의 카드가 틀 너비 전체로
           늘어나, 틀마다 카드 폭이 달라진다. 칸 폭을 틀끼리 맞춘다.
+        🔴 카드 최소 폭 **440px** (2026-09-17 · 전 340px) — 회차 · 지급 표가 한 줄로 서는 폭이다.
+           근거와 잰 값은 `SMALL_TABLE_WIDTH` 주석. 340px 이면 1400px 창에서 카드가 350px 로
+           한 줄에 셋 서는데, 그 폭에서는 칸 너비를 어떻게 나눠도 날짜가 꺾인다.
+        ⚠️ `min(100%, …)` — 틀이 440px 보다 좁은 화면에서 카드가 틀 밖으로 안 넘친다.
       */}
-      <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
+      <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(min(100%,440px),1fr))]">
         {group.plans.map((p) => (
           <PlanCard key={p.key} plan={p} />
         ))}
       </div>
     </section>
   );
+}
+
+/**
+ * 카드 안 작은 표(회차 · 지급)의 칸 너비. **화면에서만** 정한다 (2026-09-17).
+ *
+ * 🔴 **왜 꺾였나** — 공용 표(`Blocks.DataTable`)가 칸을 **균등**하게 나누고(`#819` · `#817` 재적용) 글자가
+ *    16px 고정폭이 됐다(`#815`). 1400px 창에서 카드 350px · 표 316px · 칸 79px 인데 날짜
+ *    「2026-09-11」은 **116px**(여백 20px 포함)가 있어야 한 줄로 선다.
+ *
+ * 잰 값 (헤드리스 · 계산된 폭 · 숫자 고정폭 `tabular-nums` 포함)
+ *
+ *   날짜 116 · 회차 머리 「회차」 49 · 수량 「1,638 kg」 97 · 지급 금액 「700,000 원」 111
+ *   ★ 세 실행 회차 줄 전수 — 날짜는 늘 10글자 · 수량은 최대 8글자 · 회차는 늘 「1」
+ *
+ * ★ 칸 너비만으로는 못 푼다 — 표 316px 에 날짜 둘(232)과 회차 머리(49)를 세우면 수량에
+ *   35px 가 남는다. 그래서 **카드 최소 폭을 같이** 올렸다(`RequestFrame` 340 → 440px).
+ *
+ *   회차 표   회차 52 + 사는 날 120 + 수량 110 + 도착 116  = 398  → 카드 ≥ 432
+ *   지급 표   회차 52 + 사는 날 120 + 내는 날 120 + 금액 111 = 403  → 카드 ≥ 437   ⇒ 440px
+ *   (카드 = 표 + 34px · 카드 안쪽 여백)
+ *
+ *   날짜 칸에 120px(4px 여유)를 준다. **마지막 칸(도착 · 금액)은 비워 남는 폭을 받는다** —
+ *   가운데 칸이 받으면 값 사이가 벌어진다(1400px 에서 수량 칸이 207px 가 됐다).
+ *
+ * 🔴 공용 `Blocks.tsx` 는 안 건드린다 — 대시보드 · 물류가 쓴다. `#819` 가 연 칸 `width`
+ *    자리를 이 화면이 채울 뿐이다. ★ API 가 너비를 실어 오면 **그쪽이 이긴다**(`c.width ??`).
+ */
+const DATE_COL_WIDTH = "120px";
+const SMALL_TABLE_WIDTH: Record<string, string> = {
+  leg: "52px",
+  buy: DATE_COL_WIDTH,
+  qty: "110px",
+  pay: DATE_COL_WIDTH,
+  //  `arrive` · `amount` 는 비운다 — 마지막 칸이 남는 폭을 받는다
+};
+
+function withWidths(table: ScreenTable): ScreenTable {
+  return {
+    ...table,
+    columns: table.columns.map((c) => ({ ...c, width: c.width ?? SMALL_TABLE_WIDTH[c.key] ?? null })),
+  };
 }
 
 function PlanCard({ plan }: { plan: Plan }) {
@@ -323,7 +368,7 @@ function PlanCard({ plan }: { plan: Plan }) {
           <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             회차
           </h3>
-          <DataTable table={plan.legs} />
+          <DataTable table={withWidths(plan.legs)} />
         </section>
 
         {/*
@@ -343,7 +388,7 @@ function PlanCard({ plan }: { plan: Plan }) {
             <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
               지급
             </h3>
-            <DataTable table={plan.payments} />
+            <DataTable table={withWidths(plan.payments)} />
           </section>
         )}
 
