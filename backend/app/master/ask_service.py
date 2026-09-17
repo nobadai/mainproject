@@ -351,6 +351,22 @@ def _period(intent: Intent, *, as_of: date) -> tuple[date, date]:
         return this_monday - timedelta(days=7), this_monday - timedelta(days=1)
     if period == "THIS_MONTH":
         return as_of.replace(day=1), as_of
+    if period == "LAST_7_DAYS":
+        return as_of - timedelta(days=6), as_of
+    if period == "LAST_30_DAYS":
+        return as_of - timedelta(days=29), as_of
+    if period == "LAST_3_MONTHS":
+        month = as_of.month - 2
+        year = as_of.year
+        if month <= 0:
+            month += 12
+            year -= 1
+        return as_of.replace(year=year, month=month, day=1), as_of
+    if period == "LAST_YEAR":
+        try:
+            return as_of.replace(year=as_of.year - 1), as_of
+        except ValueError:  # 2월 29일의 전년은 2월 28일
+            return as_of.replace(year=as_of.year - 1, day=28), as_of
     raise _DomainClarification("기간을 확인해 주세요.")
 
 

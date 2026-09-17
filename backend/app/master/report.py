@@ -661,6 +661,8 @@ def render_finance_chat_report(*, sim_run_id: str, as_of, start_date, end_date) 
     credit = get_console_credit(sim_run_id=sim_run_id, as_of=as_of)
     days = max(1, min(400, (end_date - start_date).days + 1))
     cashflow = get_finance_cashflow(sim_run_id=sim_run_id, as_of=end_date, days=days)
+    cashflow_dates = [row.close_date for row in getattr(cashflow, "cashflow", [])]
+    dashboard_meta = getattr(dashboard, "meta", None)
 
     # Finance report 화면·PDF의 정본은 아래 read-model facts다. Markdown 조립은
     # 더 이상 생성 경로가 아니며, 보고서가 표시값을 다시 계산하지 않는다.
@@ -670,6 +672,11 @@ def render_finance_chat_report(*, sim_run_id: str, as_of, start_date, end_date) 
         "as_of": as_of.isoformat(),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
+        # 요청한 기간과 실제로 읽힌 원장 기간은 다른 사실이다. 데이터가 부족해도
+        # 요청 기간을 조용히 바꾸지 않고, 화면이 둘 다 설명할 수 있게 싣는다.
+        "available_start_date": min(cashflow_dates).isoformat() if cashflow_dates else None,
+        "available_end_date": max(cashflow_dates).isoformat() if cashflow_dates else None,
+        "data_mode": getattr(dashboard_meta, "data_type", None),
         "summary": dashboard.model_dump(mode="json"),
         "cashflow": cashflow.model_dump(mode="json"),
         "closings": [row.model_dump(mode="json") for row in dashboard.recent_closings],
@@ -778,6 +785,8 @@ def render_sales_chat_report(*, sim_run_id: str, as_of, start_date, end_date) ->
         to_date=end_date,
     )
     partners = get_console_partners(sim_run_id=sim_run_id, as_of=as_of)
+    trend_dates = [row.sale_date for row in trend.rows]
+    dashboard_meta = getattr(dashboard, "meta", None)
 
     # 판매 보고서도 저장된 sales/read-model facts만 전달한다. 확정 여부는
     # sale_status가 실제 CONFIRMED·DELIVERED인 행만으로 제한한다.
@@ -787,6 +796,9 @@ def render_sales_chat_report(*, sim_run_id: str, as_of, start_date, end_date) ->
         "as_of": as_of.isoformat(),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
+        "available_start_date": min(trend_dates).isoformat() if trend_dates else None,
+        "available_end_date": max(trend_dates).isoformat() if trend_dates else None,
+        "data_mode": getattr(dashboard_meta, "data_type", None),
         "summary": dashboard.model_dump(mode="json"),
         "proposals": proposals.model_dump(mode="json"),
         "trend": trend.model_dump(mode="json"),
