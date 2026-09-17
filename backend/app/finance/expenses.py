@@ -327,8 +327,82 @@ def settle_due_expenses(
     :param as_of: 이 날짜까지 지급일이 된 것을 지급하고, `paid_date` 로 적는다.
     :returns: 지급한 건들. 없으면 빈 튜플.
     """
-    #  🔴 재무가 채운다 (2026-09-17). 마스터는 여기에 로직을 넣지 않는다.
-    return ()
+    #  ★ **축을 먼저 확인한다.** 지급할 것이 없어도 실행 축은 실재해야 한다. 순서를
+    #    뒤집어 «대상 0건이면 그냥 빈 튜플» 로 끝내면, 없는 실행을 물어도 «지급할 것이
+    #    없었다» 로 답한다 — 축이 틀렸다는 사실이 조용히 사라진다.
+    financing_mode = _run_financing_mode(conn, sim_run_id=sim_run_id)
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        #  🔴 **이 실행의 `ACCRUED` 만, 지급일이 지난 것만.** `PAID` 를 다시 집으면 두 번
+        #     나가고, 다른 축을 집으면 남의 현금이 준다.
+        #
+        #  ★ 정렬은 계약이다(`ORDER BY due_date, expense_id`). 현금이 모자라 중간에서
+        #    막히는 날, **어느 것까지 나갔는가가 실행마다 달라지면** 같은 입력이 다른
+        #    장부를 만든다.
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT expense_id
+                FROM {}.expenses
+                WHERE sim_run_id = %s
+                  AND status = 'ACCRUED'
+                  AND due_date <= %s
+                ORDER BY due_date, expense_id
+                """
+            ).format(schema),
+            [sim_run_id, as_of],
+        )
+        due = [str(row["expense_id"]) for row in cursor.fetchall()]
+
+    #  ★ **지급 로직을 다시 쓰지 않는다.** 상태 잠금 · 중복 지급 방어 · 현금 차감 ·
+    #    부족 검사는 모두 `settle_expense()` 가 주인이다. 여기서 한 벌 더 만들면 둘이
+    #    언젠가 어긋나고, 그때 어느 쪽이 정본인지 아무도 말할 수 없다.
+    #
+    #  ★ `paid_date` 는 **실제로 지급한 날**(`as_of`)이다. 지급일(`due_date`)을 그대로
+    #    쓰면 늦게 나간 돈이 제 날짜에 나간 것처럼 적힌다.
+    settled: list[ExpenseSettlement] = []
+    for expense_id in due:
+        settled.append(
+            settle_expense(
+                conn,
+                expense_id=expense_id,
+                sim_run_id=sim_run_id,
+                financing_mode=financing_mode,
+                paid_date=as_of,
+            )
+        )
+    return tuple(settled)
+
+
+def _run_financing_mode(conn: Any, *, sim_run_id: str) -> str:
+    """이 실행의 **조달 축**. 부르는 쪽이 넘기지 않고 여기서 읽는다.
+
+    🔴 **없으면 막는다.** 실행을 못 찾거나 축이 비어 있으면 기본값을 고르지 않는다 —
+       `LOAN_BASELINE` 같은 값을 코드가 정하면, 대출 없는 실행의 현금을 대출 장부에서
+       빼게 된다. 어느 장부가 줄었는지 아무도 모르는 편이 더 나쁘다.
+
+    ★ 같은 커넥션으로 읽는다. 지급과 축 조회가 다른 거래에서 일어나면, 되돌아간 지급이
+      읽은 축과 달라질 수 있다.
+    """
+    schema = sql.Identifier(get_db_schema())
+    with conn.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                SELECT financing_mode
+                FROM {}.sim_runs
+                WHERE sim_run_id = %s
+                """
+            ).format(schema),
+            [sim_run_id],
+        )
+        rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise FinanceDataNotReady("sim_run")
+    financing_mode = rows[0]["financing_mode"]
+    if not isinstance(financing_mode, str) or not financing_mode.strip():
+        raise FinanceDataNotReady("sim_run_financing_mode")
+    return financing_mode.strip()
 
 
 def cancel_expense(conn: Any, *, expense_id: str, sim_run_id: str) -> str:
