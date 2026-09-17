@@ -1057,6 +1057,7 @@ def _schedule_rows(*items: InTransitItem) -> list[dict[str, Any]]:
             "created_as_of": AS_OF,
             "has_receipt": False,
             "stock_applied": False,
+            "settled_without_stock": False,
         }
         for item in items
     ]

@@ -84,6 +84,9 @@ from app.logistics.historical_repository import (
     runtime_coverage_at,
     snapshot_days_between,
 )
+from app.logistics.inbound_schedules import (  # noqa: F401  아래 주석대로 밖에 여는 이름이다
+    schedule_view_scope as read_scope,
+)
 from app.logistics.monitoring.exceptions import live_exceptions_at, resolved_exceptions_on
 from app.logistics.monitoring.schemas import DetectionRecord, ExceptionRow
 from app.logistics.schemas import (
@@ -94,6 +97,15 @@ from app.logistics.schemas import (
 )
 
 log = logging.getLogger(__name__)
+
+#  🔵 **`read_scope()` — 한 화면이 물류를 두 갈래로 읽을 때 감싸는 범위** (2026-09-17).
+#
+#     `build()` 와 `dashboard_stock()` 은 서로를 모르므로 같은 `(실행, 기준일)` 일정
+#     조회를 **각자 한 번씩** 보낸다 (실측 0.145s + 0.139s). 이 범위 안에서는 처음
+#     한 번만 읽는다. **읽기 전용 한 판에만 쓴다** — 규칙과 경고는 저쪽 docstring 에.
+#
+#     ★ 물류 안쪽(`app.logistics.*`)을 대시보드가 직접 임포트하지 않게 **여기로만**
+#       연다. 이 파일이 물류를 읽는 유일한 길이라는 규율(파일 머리)을 그대로 지킨다.
 
 PANES = ("summary", "stock", "inbound", "outbound")
 

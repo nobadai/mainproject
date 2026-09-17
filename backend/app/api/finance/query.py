@@ -10,6 +10,7 @@ from app.api.finance.schema import FinanceTab, FlowCell, StateOption
 from app.api.primitives import CalendarAxis, Card, Chart, Column, Note, Series, Source, Stat, Table
 from app.api.shown_run import SHOWN_SIM_RUN_ID
 from app.finance.dashboard import get_finance_cashflow, get_finance_dashboard
+from app.finance.db import read_connection_scope
 from app.finance.schemas import FinanceClosingItem, FinanceDashboardResponse, FinanceStateView
 
 STATES = ("base", "loan")
@@ -23,8 +24,12 @@ _MILLION = Decimal(1_000_000)
 
 
 def build(as_of: date, state: str) -> FinanceTab:
-    dash = get_finance_dashboard(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
-    flow = get_finance_cashflow(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, days=30)
+    #  🔵 **이 두 조회가 커넥션 하나를 나눠 쓴다** (2026-09-17). 종전에는 안쪽
+    #     `fetch_all` 이 호출마다 새로 열어 **한 판에 12개**였다 (원격 DB · 개당
+    #     14~22ms). 읽기뿐이라 되는 일이고, 규칙과 경고는 저쪽 docstring 에 있다.
+    with read_connection_scope():
+        dash = get_finance_dashboard(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of)
+        flow = get_finance_cashflow(sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, days=30)
     selected_key, selected = _select_state(dash, state)
     state_as_of = None if selected is None else selected.state_date
     latest_closing_as_of = max((row.close_date for row in dash.recent_closings), default=None)
@@ -158,7 +163,10 @@ def dashboard_cash(axis: CalendarAxis) -> Chart:
     """
     as_of = date.fromisoformat(axis.as_of)
     run = SHOWN_SIM_RUN_ID
-    flow = get_finance_cashflow(sim_run_id=run, as_of=as_of, days=len(axis.days))
+    #  🔵 여기는 조회가 하나뿐이라 범위가 아껴 주는 것은 없다. 그래도 **여는 자리를
+    #     같게** 둬서, 나중에 조회가 늘어도 커넥션은 안 늘게 한다.
+    with read_connection_scope():
+        flow = get_finance_cashflow(sim_run_id=run, as_of=as_of, days=len(axis.days))
     by_date = {row.close_date: row for row in flow.cashflow if row.close_date <= as_of}
     rows = [by_date.get(date.fromisoformat(day.date)) for day in axis.days]
 

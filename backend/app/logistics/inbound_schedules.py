@@ -57,7 +57,10 @@ Header   logistics_runtime_fixture.*_status      «그 축을 확인했나» 만
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import threading
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -89,6 +92,7 @@ __all__ = [
     "receivable_from",
     "record_schedule",
     "schedule_fact_dates_at",
+    "schedule_view_scope",
 ]
 
 
@@ -494,6 +498,7 @@ def assert_cancellable(
 # ETA 도달 · Receipt 없음        O        O          O
 # Receipt 있음 · Lot 없음        X        O          O    ← 여기가 갈리는 자리다
 # Lot + IN Move 완료             X        X          X    (그때부터 on_hand 가 센다)
+# 수용 0 검수 · PUTAWAY_DONE     X        X          X    (만들 재고가 없다 · 검수일부터)
 # 취소됨                        X        X          X
 # ```
 #
@@ -531,6 +536,10 @@ class InboundScheduleView:
     #: 그날까지 **재고가 실제로 섰나** — Lot 과 원장 IN 이 **둘 다** 있어야 참이다.
     #: 🔴 Receipt 존재로 대신하지 않는다. 그 둘은 다른 사건이다.
     stock_applied: bool
+    #: 그날까지 **수용 0 으로 입고 처리가 끝났나** — 수용 0 검수가 그날까지 있었고
+    #: (`inspected_at < (as_of+1) 00:00 KST`) Receipt 가 `PUTAWAY_DONE` · `CLOSED` 다.
+    #: 🔴 재고가 선 것이 아니다 — `stock_applied` 와 다른 사실이다.
+    settled_without_stock: bool = False
 
     def as_in_transit(self) -> InTransitItem:
         """Legacy 계약 그대로의 운송 중 한 줄. **DTO 를 새로 만들지 않는다.**"""
@@ -552,10 +561,74 @@ class InboundScheduleView:
         )
 
 
+class _ViewScope:
+    """한 요청 안에서 `load_schedule_views` 가 낸 답을 들고 있는 자리.
+
+    🔴 **열쇠마다 자물쇠가 하나씩 있다.** 한 화면이 물류를 **동시에** 두 갈래로 읽으면
+       (대시보드가 그렇다) 둘이 같은 순간에 «없다» 를 보고 **둘 다 질의를 보낸다** —
+       그러면 안 묶은 것과 같다. 먼저 온 쪽이 자물쇠를 잡고 읽고, 뒤에 온 쪽은 기다렸다
+       담긴 답을 집는다.
+
+    ⚠️ **답이 안 담기는 경우도 있다** — 먼저 온 쪽이 예외로 터진 때다. 그때 뒤 쪽은
+       자기가 다시 읽는다. 실패를 담아 두면 한 번의 실패가 그 판 전체를 죽인다.
+    """
+
+    def __init__(self) -> None:
+        self._answers: dict[tuple[str, date], tuple[InboundScheduleView, ...]] = {}
+        self._guard = threading.Lock()
+        self._locks: dict[tuple[str, date], threading.Lock] = {}
+
+    def lock_for(self, key: tuple[str, date]) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())
+
+    def get(self, key: tuple[str, date]) -> tuple[InboundScheduleView, ...] | None:
+        return self._answers.get(key)
+
+    def put(self, key: tuple[str, date], views: tuple[InboundScheduleView, ...]) -> None:
+        self._answers[key] = views
+
+
+#: 한 요청 안에서 `load_schedule_views` 가 낸 답. **범위 밖에서는 `None` 이고,
+#: 그때는 종전 그대로 매번 읽는다.**
+_VIEW_SCOPE: ContextVar[_ViewScope | None] = ContextVar(
+    "logistics_schedule_view_scope", default=None
+)
+
+
+@contextmanager
+def schedule_view_scope() -> Iterator[None]:
+    """이 블록 안에서 **같은 `(sim_run_id, as_of)` 일정 조회를 한 번만** 한다.
+
+    🔴 **읽기 전용 한 판에만 쓴다.** 대시보드 화면이 물류를 두 갈래로 읽어
+       (`logistics.query.build` · `logistics.query.dashboard_stock`) 같은 289행 질의가
+       한 요청에 **두 번** 나갔다 (실측 2026-09-17 · 0.145s + 0.139s). 두 갈래는 같은
+       날 · 같은 실행을 묻고 그 사이에 아무것도 쓰지 않으므로 답이 같다.
+
+    ⚠️ **쓰는 흐름(도착 처리 · 승인 · 취소)을 이 범위로 감싸면 안 된다.** 취소가
+       들어간 뒤에도 옛 목록이 나온다 — `inbound_reconciliation` 경로가 그렇다.
+
+    ★ **스레드를 건너 나눠 쓸 수 있다.** `ContextVar` 는 새 스레드에 저절로 따라가지
+      않으므로, 부르는 쪽이 `contextvars.copy_context()` 로 떠서 넘긴다 —
+      `app/api/dashboard/query.py` 가 그렇게 한다. 나눠 쓰는 것은 **답(불변 튜플)**
+      뿐이고 커넥션은 각자 자기 것을 쓴다.
+
+    ★ 범위를 안 열면 아무것도 안 바뀐다.
+    """
+    token = _VIEW_SCOPE.set(_ViewScope())
+    try:
+        yield
+    finally:
+        _VIEW_SCOPE.reset(token)
+
+
 def load_schedule_views(
     conn: Any, *, sim_run_id: str, as_of: date
 ) -> tuple[InboundScheduleView, ...]:
     """`as_of` 시점에 살아 있던 일정 + 그날까지의 계보. **한 질의다.**
+
+    ★ `schedule_view_scope()` 안이면 같은 `(sim_run_id, as_of)` 는 **처음 한 번만**
+      읽는다. 범위 밖이면 종전 그대로 매번 읽는다.
 
     ```text
     created_as_of <= as_of                              그날 이미 장부에 서 있었다
@@ -565,6 +638,13 @@ def load_schedule_views(
     🔴 **계보도 `as_of` 로 자른다.** Receipt 는 `arrived_at <= as_of`, Lot 은
        `received_at <= as_of`, 원장 IN 은 `moved_at <= as_of` 다 — 오늘 상태를
        과거 날짜 답에 섞으면 Historical 조회가 거짓말을 한다.
+
+       ★ **수용 0 완료는 검수 사건으로 자른다** (`inspected_at < timestamp_cutoff(as_of)`
+         — `historical_repository.receipt_state_at` 의 INSPECTED 와 같은 규칙).
+         `PUTAWAY_DONE` 에는 날짜가 없지만, 수용 0 이면 재고화가 쓰는 것이 Receipt
+         상태뿐이고 그것이 검수 기록과 **한 트랜잭션**에서 선다
+         (`inbound_execution._receive_one`). `receipt_status` 는 «재고화가 이미 돌았나»
+         만 본다 — 되돌아가지 않는 상태라 과거 날짜를 앞당기지 않는다.
 
     🔴 **계보는 `EXISTS` 로 묻는다. `LEFT JOIN` 으로 끌어오지 않는다.**
 
@@ -586,6 +666,30 @@ def load_schedule_views(
 
     :raises ScheduleReferenceBroken: 일정의 매입 줄·품목 참조가 깨졌을 때.
     """
+    scope = _VIEW_SCOPE.get()
+    if scope is None:
+        return _load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+    key = (sim_run_id, as_of)
+    #  ★ 자물쇠를 잡고 **다시 본다.** 기다리는 동안 앞사람이 담아 놨을 수 있다.
+    with scope.lock_for(key):
+        answer = scope.get(key)
+        if answer is not None:
+            return answer
+        views = _load_schedule_views(conn, sim_run_id=sim_run_id, as_of=as_of)
+        #  ★ 답이 선 **뒤에** 담는다 — 위에서 터지는 날에는 아무것도 안 담겨서,
+        #    같은 범위의 다음 호출이 자기가 다시 읽는다.
+        scope.put(key, views)
+        return views
+
+
+def _load_schedule_views(
+    conn: Any, *, sim_run_id: str, as_of: date
+) -> tuple[InboundScheduleView, ...]:
+    """질의 한 번. **`load_schedule_views` 의 알맹이이고 범위를 모른다.**"""
+    # ★ 함수 안에서 가져온다 — `historical_repository → repository → inbound_schedules`
+    #   순환이라 모듈 머리에 둘 수 없고, 규칙을 옮겨 적으면 두 곳이 갈린다.
+    from app.logistics.historical_repository import timestamp_cutoff
+
     schema = _schema()
     rows = _rows(
         conn,
@@ -615,7 +719,19 @@ def load_schedule_views(
                         WHERE r.sim_run_id = s.sim_run_id
                           AND r.inbound_id = s.inbound_id
                           AND r.arrived_at <= %(as_of)s
-                   ) AS stock_applied
+                   ) AS stock_applied,
+                   EXISTS (
+                       SELECT 1
+                         FROM {schema}.inbound_receipts r
+                         JOIN {schema}.inbound_inspections ins
+                           ON ins.receipt_id = r.receipt_id
+                          AND ins.accepted_qty_kg = 0
+                          AND ins.inspected_at < %(cutoff)s
+                        WHERE r.sim_run_id = s.sim_run_id
+                          AND r.inbound_id = s.inbound_id
+                          AND r.arrived_at <= %(as_of)s
+                          AND r.receipt_status IN ('PUTAWAY_DONE', 'CLOSED')
+                   ) AS settled_without_stock
             FROM {schema}.inbound_schedules s
             LEFT JOIN {schema}.purchase_items pi
                    ON pi.purchase_item_id = s.purchase_item_id
@@ -626,10 +742,10 @@ def load_schedule_views(
             ORDER BY s.expected_arrival_date, s.inbound_id
             """
         ).format(schema=schema),
-        {"sim": sim_run_id, "as_of": as_of},
+        {"sim": sim_run_id, "as_of": as_of, "cutoff": timestamp_cutoff(as_of)},
     )
     _reject_broken_reference(rows, sim_run_id=sim_run_id, as_of=as_of)
-    return tuple(
+    views = tuple(
         InboundScheduleView(
             inbound_id=row["inbound_id"],
             sim_run_id=row["sim_run_id"],
@@ -642,9 +758,11 @@ def load_schedule_views(
             created_as_of=row["created_as_of"],
             has_receipt=bool(row["has_receipt"]),
             stock_applied=bool(row["stock_applied"]),
+            settled_without_stock=bool(row["settled_without_stock"]),
         )
         for row in rows
     )
+    return views
 
 
 def _reject_broken_reference(
@@ -785,11 +903,20 @@ def in_transit_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]
     return [view.as_in_transit() for view in views if not view.has_receipt]
 
 
+def _receiving_completed(view: InboundScheduleView) -> bool:
+    """도착 처리 · 미래 점유의 종료조건. **재고가 섰거나, 수용 0 으로 처리가 끝났다.**
+
+    🔴 `Receipt 존재` 는 여기에 없다 — 처리 중(`ARRIVED` · `INSPECTED`)인 건은 끝난 것이 아니다.
+    """
+    return view.stock_applied or view.settled_without_stock
+
+
 def receivable_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]:
     """**도착 처리 대상** — 아직 재고가 서지 않은 입고. `receivable_at` 의 거르기 규칙.
 
     ```text
     종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다
+               수용 0 으로 PUTAWAY_DONE · CLOSED 가 되면 빠진다 (만들 재고가 없다)
     ```
 
     🔴 **Receipt 존재로 빼지 않는다.** 검수에서 막힌 건(`Receipt=ARRIVED` · Lot 없음)은
@@ -801,7 +928,7 @@ def receivable_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]
       네 갈래(`due` · `blocked` · `not_due` · `unresolved`)로 나누며 소유한다.
       여기서 미리 자르면 *"아직 안 온 것"* 과 *"못 받은 것"* 이 구별되지 않는다.
     """
-    return [view.as_in_transit() for view in views if not view.stock_applied]
+    return [view.as_in_transit() for view in views if not _receiving_completed(view)]
 
 
 def pending_inbound_from(views: Sequence[InboundScheduleView]) -> list[ScheduledQuantity]:
@@ -809,6 +936,7 @@ def pending_inbound_from(views: Sequence[InboundScheduleView]) -> list[Scheduled
 
     ```text
     종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다 (그때부터 on_hand 가 센다)
+               수용 0 으로 PUTAWAY_DONE · CLOSED 가 되면 빠진다 (셀 재고가 없다)
     ```
 
     🔴 **한 번만 계상하기 위한 경계다.**
@@ -825,7 +953,7 @@ def pending_inbound_from(views: Sequence[InboundScheduleView]) -> list[Scheduled
     ⚠️ `receivable_from` 과 **같은 행**을 고른다 — 다른 것은 DTO 모양뿐이다
        (`ScheduledQuantity.date` vs `InTransitItem.expected_arrival_date`).
     """
-    return [view.as_scheduled_quantity() for view in views if not view.stock_applied]
+    return [view.as_scheduled_quantity() for view in views if not _receiving_completed(view)]
 
 
 def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
