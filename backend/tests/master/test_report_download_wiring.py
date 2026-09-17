@@ -32,16 +32,8 @@ def test_보고서_종류마다_그리는_화면과_파일_이름이_하나씩_�
        그려진다.**
     """
     source = _source()
-    mapping = dict(
-        re.findall(
-            r"(\w+):\s*\{\s*view:\s*(\w+),\s*slug:\s*\"([\w-]+)\"\s*\}",
-            source,
-        )
-        and [(m[0], (m[1], m[2])) for m in re.findall(
-            r"(\w+):\s*\{\s*view:\s*(\w+),\s*slug:\s*\"([\w-]+)\"\s*\}",
-            source,
-        )]
-    )
+    entries = re.findall(r"(\w+):\s*\{\s*view:\s*(\w+),\s*slug:\s*\"([\w-]+)\"\s*\}", source)
+    mapping = {kind: (view, slug) for kind, view, slug in entries}
 
     assert mapping == {
         "FINANCE": ("FinanceReport", "finance"),
