@@ -74,26 +74,26 @@ export function CreditLimitForm({ simRun, asOf, refreshKey, onSaved }: { simRun:
           <label>근거 등급
             <select value={grade} onChange={(event) => setGrade(event.target.value as Grade)}><option value="OFFICIAL">공식 계약</option><option value="VENDOR">거래처 확인</option><option value="SIM_FIXED">시뮬레이션 고정값</option></select>
           </label>
-          <label className="sm:col-span-2">한도 근거 자료 *<input required maxLength={240} value={sourceRef} onChange={(event) => setSourceRef(event.target.value)} placeholder={grade === "OFFICIAL" ? "예: 계약서-2026-0916" : grade === "VENDOR" ? "예: 거래처확인-메일-0916" : "예: 시뮬레이션기준-01"} /><small className="mt-1 block text-[11px] text-ink2">{evidenceHint}</small></label>
+          <label className="sm:col-span-2">한도 근거 자료 *<input required maxLength={240} value={sourceRef} onChange={(event) => setSourceRef(event.target.value)} placeholder={grade === "OFFICIAL" ? "예: 계약서-2026-0916" : grade === "VENDOR" ? "예: 거래처확인-메일-0916" : "예: 시뮬레이션기준-01"} /><small className="mt-1 block text-[15px] text-ink2">{evidenceHint}</small></label>
           <label className="sm:col-span-2">변경 사유<input maxLength={1000} value={note} onChange={(event) => setNote(event.target.value)} /></label>
-          <button disabled={saving} className="w-fit rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>{saving ? "저장 중" : "한도 변경"}</button>
+          <button disabled={saving} className="w-fit rounded-lg px-4 py-2 text-[18px] font-semibold text-white disabled:opacity-50" style={{ background: "var(--color-brand)" }}>{saving ? "저장 중" : "한도 변경"}</button>
         </form>
-        {(partners.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-3 text-[12px] text-ink2">선택 가능한 활성 고객 거래처가 없습니다.</p>}
+        {(partners.data?.rows.length ?? 0) === 0 && <p className="mb-0 mt-3 text-[16px] text-ink2">선택 가능한 활성 고객 거래처가 없습니다.</p>}
       </>}
       {pendingPartner !== null && <ConfirmBox title="입력 중인 여신한도 정보가 있습니다." description="거래처를 변경하면 입력 내용이 초기화됩니다." onCancel={() => setPendingPartner(null)} onConfirm={() => { setPartner(pendingPartner); setPendingPartner(null); resetDraft(); setMessage(null); }} confirmText="거래처 변경" />}
       {confirming && <ConfirmBox title="여신한도를 변경할까요?" description="아래 조건을 다시 확인한 뒤 한도 변경을 누르세요." onCancel={() => setConfirming(false)} onConfirm={save} confirmText={saving ? "저장 중..." : "한도 변경"} disabled={saving}>
-        <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[12px] text-ink2">
+        <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[16px] text-ink2">
           <dt>거래처</dt><dd className="m-0 text-ink">{partnerName}</dd><dt>{asOf} 기준 적용 한도</dt><dd className="m-0 text-ink">{current ? moneyWon(current.credit_limit_krw) : "등록된 한도 없음"}</dd><dt>새 한도</dt><dd className="m-0 text-ink">{amount === "" ? "입력 없음" : moneyWon(amount)}</dd><dt>적용 시작일</dt><dd className="m-0 text-ink">{date}</dd><dt>근거 등급</dt><dd className="m-0 text-ink">{creditGradeText(grade)}</dd><dt>한도 근거 자료</dt><dd className="m-0 break-all text-ink">{sourceRef}</dd>{note && <><dt>변경 사유</dt><dd className="m-0 text-ink">{note}</dd></>}
         </dl>
       </ConfirmBox>}
-      {message && <p className="mb-0 mt-3 text-[13px]">{message}</p>}
+      {message && <p className="mb-0 mt-3 text-[17px]">{message}</p>}
       {partner && <CreditHistory state={history} current={current} asOf={asOf} />}
     </Panel>
   );
 }
 
 function ConfirmBox({ title, description, onCancel, onConfirm, confirmText, disabled = false, children }: { title: string; description: string; onCancel: () => void; onConfirm: () => void; confirmText: string; disabled?: boolean; children?: React.ReactNode }) {
-  return <section className="mt-4 rounded-lg border bg-[var(--color-desk)] p-3 text-[12px]" style={{ borderColor: "var(--color-hair)" }}><p className="m-0 font-semibold">{title}</p><p className="mb-0 mt-1 text-ink2">{description}</p>{children}<div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={onCancel} disabled={disabled} className="rounded-lg border px-3 py-2 font-semibold">취소</button><button type="button" onClick={onConfirm} disabled={disabled} className="rounded-lg border px-3 py-2 font-semibold" style={{ borderColor: "var(--color-brand)", color: "var(--color-brand)" }}>{confirmText}</button></div></section>;
+  return <section className="mt-4 rounded-lg border bg-[var(--color-desk)] p-3 text-[16px]" style={{ borderColor: "var(--color-hair)" }}><p className="m-0 font-semibold">{title}</p><p className="mb-0 mt-1 text-ink2">{description}</p>{children}<div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={onCancel} disabled={disabled} className="rounded-lg border px-3 py-2 font-semibold">취소</button><button type="button" onClick={onConfirm} disabled={disabled} className="rounded-lg border px-3 py-2 font-semibold" style={{ borderColor: "var(--color-brand)", color: "var(--color-brand)" }}>{confirmText}</button></div></section>;
 }
 
 function CreditHistory({ state, current, asOf }: { state: HistoryState; current: CreditLimitHistoryItem | null; asOf: string }) {
@@ -101,21 +101,21 @@ function CreditHistory({ state, current, asOf }: { state: HistoryState; current:
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
   if (state.loading) return <div className="mt-4"><Skeleton what="여신한도 이력" /></div>;
   if (state.error) return <div className="mt-4"><Failed what="여신한도 이력" message={state.error} /></div>;
-  if (!state.data || state.data.length === 0) return <p className="mb-0 mt-4 text-[12px] text-ink2">{asOf} 기준 적용되는 여신한도가 없습니다.</p>;
+  if (!state.data || state.data.length === 0) return <p className="mb-0 mt-4 text-[16px] text-ink2">{asOf} 기준 적용되는 여신한도가 없습니다.</p>;
   const rows = showAll ? state.data : state.data.slice(0, 3);
   async function copySourceRef(value: string) {
     try { await navigator.clipboard.writeText(value); setCopyMessage("근거 참조를 복사했습니다."); } catch { setCopyMessage("근거 참조를 복사하지 못했습니다."); }
   }
   return <div className="mt-5 border-t pt-4" style={{ borderColor: "var(--color-hair)" }}>
-    <h3 className="m-0 text-[13px] font-semibold">{asOf} 기준 적용 한도</h3>
-    {current ? <CreditHistoryRow row={current} current onCopy={copySourceRef} /> : <p className="mb-0 mt-2 text-[12px] text-ink2">{asOf} 기준 적용되는 여신한도가 없습니다.</p>}
-    <h3 className="mb-0 mt-5 text-[13px] font-semibold">변경 이력 {state.data.length}건</h3>
+    <h3 className="m-0 text-[17px] font-semibold">{asOf} 기준 적용 한도</h3>
+    {current ? <CreditHistoryRow row={current} current onCopy={copySourceRef} /> : <p className="mb-0 mt-2 text-[16px] text-ink2">{asOf} 기준 적용되는 여신한도가 없습니다.</p>}
+    <h3 className="mb-0 mt-5 text-[17px] font-semibold">변경 이력 {state.data.length}건</h3>
     <div className="mt-2 flex flex-col gap-2">{rows.map((row) => <CreditHistoryRow key={row.partner_credit_limit_id} row={row} onCopy={copySourceRef} />)}</div>
-    {state.data.length > 3 && <button type="button" onClick={() => setShowAll((value) => !value)} className="mt-3 rounded-lg border px-3 py-2 text-[12px] font-semibold" style={{ borderColor: "var(--color-hair)" }}>{showAll ? "최근 이력만 보기" : "전체 이력 보기"}</button>}
-    {copyMessage && <p className="mb-0 mt-2 text-[12px] text-ink2">{copyMessage}</p>}
+    {state.data.length > 3 && <button type="button" onClick={() => setShowAll((value) => !value)} className="mt-3 rounded-lg border px-3 py-2 text-[16px] font-semibold" style={{ borderColor: "var(--color-hair)" }}>{showAll ? "최근 이력만 보기" : "전체 이력 보기"}</button>}
+    {copyMessage && <p className="mb-0 mt-2 text-[16px] text-ink2">{copyMessage}</p>}
   </div>;
 }
 
 function CreditHistoryRow({ row, current = false, onCopy }: { row: CreditLimitHistoryItem; current?: boolean; onCopy: (value: string) => void }) {
-  return <div className="mt-2 rounded-lg border p-3 text-[12px]" style={{ borderColor: "var(--color-hair)" }}><div className="flex flex-wrap items-center justify-between gap-2"><b>{moneyWon(row.credit_limit_krw)}</b><span>{row.effective_from} ~ {row.effective_to ?? "현재"}{current ? " · 기준일 적용" : ""}</span></div><p className="mb-0 mt-1 text-ink2">{creditGradeText(row.evidence_grade)} · {row.source_ref} <button type="button" onClick={() => onCopy(row.source_ref)} className="ml-1 underline">복사</button></p><p className="mb-0 mt-1 text-ink2">기록자 {recordedByText(row.recorded_by)}</p>{row.note && <p className="mb-0 mt-1 text-ink2">{row.note}</p>}</div>;
+  return <div className="mt-2 rounded-lg border p-3 text-[16px]" style={{ borderColor: "var(--color-hair)" }}><div className="flex flex-wrap items-center justify-between gap-2"><b>{moneyWon(row.credit_limit_krw)}</b><span>{row.effective_from} ~ {row.effective_to ?? "현재"}{current ? " · 기준일 적용" : ""}</span></div><p className="mb-0 mt-1 text-ink2">{creditGradeText(row.evidence_grade)} · {row.source_ref} <button type="button" onClick={() => onCopy(row.source_ref)} className="ml-1 underline">복사</button></p><p className="mb-0 mt-1 text-ink2">기록자 {recordedByText(row.recorded_by)}</p>{row.note && <p className="mb-0 mt-1 text-ink2">{row.note}</p>}</div>;
 }

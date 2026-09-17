@@ -62,11 +62,11 @@ export function ReportDownload({ requestId }: { requestId: string }) {
         type="button"
         onClick={download}
         disabled={busy}
-        className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink disabled:opacity-45"
+        className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[16.5px] text-muted hover:border-accent hover:text-accent-ink disabled:opacity-45"
       >
         {busy ? "만드는 중…" : "↓ 보고서 내려받기 (.md)"}
       </button>
-      {error && <span className="text-[12px] text-warn">{error}</span>}
+      {error && <span className="text-[16px] text-warn">{error}</span>}
     </div>
   );
 }
@@ -133,14 +133,14 @@ export function DomainReportPreview({
         <ReportView facts={facts} />
       </div>
       <div className="domain-report-controls mt-2 flex gap-2">
-        <button type="button" onClick={downloadPdf} disabled={exporting} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink disabled:opacity-45">
+        <button type="button" onClick={downloadPdf} disabled={exporting} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[16.5px] text-muted hover:border-accent hover:text-accent-ink disabled:opacity-45">
           {exporting ? "PDF 만드는 중…" : "PDF 다운로드"}
         </button>
-        {preparedPdf && <button type="button" onClick={savePreparedPdf} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink">파일 저장</button>}
-        <button type="button" onClick={() => window.print()} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink">
+        {preparedPdf && <button type="button" onClick={savePreparedPdf} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[16.5px] text-muted hover:border-accent hover:text-accent-ink">파일 저장</button>}
+        <button type="button" onClick={() => window.print()} className="rounded-lg border border-line bg-sunk px-3 py-1.5 text-[16.5px] text-muted hover:border-accent hover:text-accent-ink">
           인쇄
         </button>
-        {error && <span className="self-center text-[12px] text-warn">{error}</span>}
+        {error && <span className="self-center text-[16px] text-warn">{error}</span>}
       </div>
       <style>{`
         .report-page { width: 297mm; min-height: 210mm; box-sizing: border-box; display: flex; flex-direction: column; break-after: page; page-break-after: always; }

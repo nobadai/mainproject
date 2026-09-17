@@ -43,21 +43,21 @@ export function AdjustmentPanel({
 
   return (
     <section className="rounded-lg border border-line bg-sunk p-3">
-      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.05em] text-muted">
+      <p className="mb-2 text-[15px] font-semibold uppercase tracking-[0.05em] text-muted">
         부서가 제안한 조정 {rows.length}건
       </p>
       <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
         {/* 순서를 손대지 않는다 — 부서가 낸 순서가 그 부서의 설명 순서다 */}
         {rows.map((a, i) => (
-          <li key={`${a.dept}-${a.axis}-${a.target_value}-${i}`} className="text-[12.5px]">
+          <li key={`${a.dept}-${a.axis}-${a.target_value}-${i}`} className="text-[16.5px]">
             <span className="font-semibold text-ink">{DEPT_LABEL[a.dept]}</span>
             <span className="ml-1.5 text-muted">
               {DEPT_AXIS_LABEL[a.axis]}
             </span>
-            <span className="tabular ml-1.5 font-mono text-[12px] text-ink">
+            <span className="tabular ml-1.5 font-mono text-[16px] text-ink">
               {/* 반올림하지 않는다 — 화면이 원본과 다른 숫자를 말하면 안 된다 */}
               {a.target_value.toLocaleString("ko-KR", { maximumFractionDigits: 20 })}
-              <span className="ml-0.5 text-[11px] text-muted">
+              <span className="ml-0.5 text-[15px] text-muted">
                 {UNIT_LABEL[a.unit] ?? ""}
               </span>
             </span>
@@ -70,12 +70,12 @@ export function AdjustmentPanel({
                 "해당 없음" 이 아니다 — 화면이 그 둘을 지어내 가르지 않는다.
             */}
             {a.scenario_labels.length > 0 && (
-              <span className="ml-1.5 text-[11.5px] text-faint">
+              <span className="ml-1.5 text-[15.5px] text-faint">
                 {a.scenario_labels.join("·")}안
               </span>
             )}
             {a.split_date && (
-              <span className="ml-1 font-mono text-[11px] text-faint">
+              <span className="ml-1 font-mono text-[15px] text-faint">
                 {a.split_date} 회차
               </span>
             )}

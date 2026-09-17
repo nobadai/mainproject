@@ -65,10 +65,10 @@ function PartnerCreditBlock({ partner }: { partner: PartnerCredit }) {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <b className="text-[13px]">{partnerText(partner.partner_name, partner.partner_id)}</b>
-        <span className="text-[12px] text-ink2">결제 조건 · {paymentTermText(partner.payment_days)}</span>
+        <b className="text-[17px]">{partnerText(partner.partner_name, partner.partner_id)}</b>
+        <span className="text-[16px] text-ink2">결제 조건 · {paymentTermText(partner.payment_days)}</span>
         {hasLimit && (
-          <span className="text-[11.5px] text-ink2">{creditGradeText(partner.credit_limit_evidence_grade)}</span>
+          <span className="text-[15.5px] text-ink2">{creditGradeText(partner.credit_limit_evidence_grade)}</span>
         )}
       </div>
 
@@ -102,11 +102,11 @@ function PartnerCreditBlock({ partner }: { partner: PartnerCredit }) {
       </Metrics>
 
       <div>
-        <b className="text-[12px]">미수금이 들어오면 풀리는 여신</b>
+        <b className="text-[16px]">미수금이 들어오면 풀리는 여신</b>
         {partner.upcoming_collections.length === 0 ? (
-          <p className="mb-0 mt-1 text-[12px] text-ink2">받을 미수금이 없습니다.</p>
+          <p className="mb-0 mt-1 text-[16px] text-ink2">받을 미수금이 없습니다.</p>
         ) : (
-          <ul className="m-0 mt-2 flex list-none flex-col gap-1.5 p-0 text-[12px]">
+          <ul className="m-0 mt-2 flex list-none flex-col gap-1.5 p-0 text-[16px]">
             {partner.upcoming_collections.map((item, index) => (
               <li
                 key={`${item.due_date}-${index}`}
@@ -131,7 +131,7 @@ function PartnerCreditBlock({ partner }: { partner: PartnerCredit }) {
             ))}
           </ul>
         )}
-        <p className="mb-0 mt-2 text-[11.5px] text-ink2">
+        <p className="mb-0 mt-2 text-[15.5px] text-ink2">
           계약상 결제 예정일을 기준으로 한 예상입니다. 실제 입금이 확인되어야 여신이 풀립니다.
         </p>
       </div>

@@ -86,7 +86,7 @@ export function SalesConversation({ asOf, canApprove }: { asOf: string; canAppro
 
   if (!simRun) {
     return (
-      <p className="m-0 text-sm text-muted">
+      <p className="m-0 text-[18px] text-muted">
         어느 시뮬레이션을 볼지 아직 고르지 않았습니다. 화면 위의 실행 선택에서 먼저 골라 주세요.
       </p>
     );
@@ -126,19 +126,19 @@ export function SalesConversation({ asOf, canApprove }: { asOf: string; canAppro
 
       {rows.length > 0 && stage === "ask" && (
         <div className="flex flex-col gap-2">
-          <p className="m-0 text-sm font-semibold">판매안을 비교하고 진행하시겠어요?</p>
+          <p className="m-0 text-[18px] font-semibold">판매안을 비교하고 진행하시겠어요?</p>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => setStage("cards")}
-              className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white"
+              className="rounded-lg bg-accent px-4 py-1.5 text-[17px] font-semibold text-white"
             >
               판매안 확인
             </button>
             <button
               type="button"
               onClick={() => setStage("declined")}
-              className="rounded-lg border border-line px-4 py-1.5 text-[13px] text-muted hover:bg-sunk"
+              className="rounded-lg border border-line px-4 py-1.5 text-[17px] text-muted hover:bg-sunk"
             >
               지금은 안 할게요
             </button>
@@ -147,9 +147,9 @@ export function SalesConversation({ asOf, canApprove }: { asOf: string; canAppro
       )}
 
       {stage === "declined" && (
-        <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted">
+        <div className="flex flex-wrap items-center gap-2 text-[17px] text-muted">
           <span>알겠습니다. 필요할 때 다시 확인할 수 있습니다.</span>
-          <button type="button" onClick={() => setStage("cards")} className="rounded-md border border-line px-2.5 py-1 text-[12px] hover:bg-sunk">
+          <button type="button" onClick={() => setStage("cards")} className="rounded-md border border-line px-2.5 py-1 text-[16px] hover:bg-sunk">
             판매안 확인
           </button>
         </div>
@@ -188,7 +188,7 @@ function Summary({ data }: { data: SalesProposalsResponse | null }) {
   if (!data) return <EmptyRows what="판매안" />;
   if (data.rows.length === 0) {
     return (
-      <p className="m-0 text-sm leading-relaxed">
+      <p className="m-0 text-[18px] leading-relaxed">
         판매 진행 상황을 확인했습니다.
         <br />
         {data.request_count === 0
@@ -207,7 +207,7 @@ function Summary({ data }: { data: SalesProposalsResponse | null }) {
   const needCollection = data.rows.filter((row) => (toNumber(row.required_collection_before_sale_krw) ?? 0) > 0).length;
   const confirmed = data.rows.filter((row) => row.sale_status !== null).length;
   return (
-    <div className="flex flex-col gap-1 text-sm leading-relaxed">
+    <div className="flex flex-col gap-1 text-[18px] leading-relaxed">
       <p className="m-0">판매 진행 상황을 확인했습니다.</p>
       {items.map((item) => (
         <p key={item.name} className="m-0">
@@ -241,11 +241,11 @@ function Cards({
   }
   return (
     <div className="flex flex-col gap-4">
-      <p className="m-0 text-sm">판매안을 제시합니다. 비교한 뒤 진행할 안을 선택해 주세요.</p>
+      <p className="m-0 text-[18px]">판매안을 제시합니다. 비교한 뒤 진행할 안을 선택해 주세요.</p>
       {groups.map((group) => (
         <section key={group.item} className="flex flex-col gap-2">
-          <b className="text-[13.5px]">
-            {group.item} <span className="text-[12px] font-normal text-muted">· 판매안 {group.rows.length}개</span>
+          <b className="text-[17.5px]">
+            {group.item} <span className="text-[16px] font-normal text-muted">· 판매안 {group.rows.length}개</span>
           </b>
           <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr))]">
             {group.rows.map((row) => (
@@ -259,7 +259,7 @@ function Cards({
           </div>
         </section>
       ))}
-      <p className="m-0 text-[12px] text-muted">
+      <p className="m-0 text-[16px] text-muted">
         추천은 시스템이 권한 안이고, 선택은 직접 고르는 안입니다. 추천과 다른 안을 골라도 됩니다. 선택만으로는 판매가 확정되지 않습니다.
       </p>
     </div>
@@ -306,11 +306,11 @@ function ConfirmSelection({
   ];
   return (
     <section className="rounded-xl border border-accent bg-accent-wash p-4">
-      <p className="m-0 text-sm">선택한 판매안입니다.</p>
-      <p className="m-0 mt-1 text-[15px] font-semibold">
+      <p className="m-0 text-[18px]">선택한 판매안입니다.</p>
+      <p className="m-0 mt-1 text-[19px] font-semibold">
         {itemText(null, row.item)} · {kindText(row.scenario_type)}
       </p>
-      <dl className="m-0 mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]">
+      <dl className="m-0 mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[17px]">
         {lines.map(([name, value]) => (
           <div key={name} className="contents">
             <dt className="text-muted">{name}</dt>
@@ -319,20 +319,20 @@ function ConfirmSelection({
         ))}
       </dl>
       {row.finance_reason_codes.includes(CREDIT_REASON) && required !== null && required > 0 && (
-        <p className="m-0 mt-2 text-[12.5px]">현재 조건으로는 바로 판매하기 어렵습니다. {collectionNeedText(required)}</p>
+        <p className="m-0 mt-2 text-[16.5px]">현재 조건으로는 바로 판매하기 어렵습니다. {collectionNeedText(required)}</p>
       )}
-      {recommendedElsewhere && <p className="m-0 mt-2 text-[12px] text-muted">추천안과 다른 안을 선택했습니다.</p>}
+      {recommendedElsewhere && <p className="m-0 mt-2 text-[16px] text-muted">추천안과 다른 안을 선택했습니다.</p>}
       {blocker ? (
-        <p className="m-0 mt-3 text-[13px]">{blocker}</p>
+        <p className="m-0 mt-3 text-[17px]">{blocker}</p>
       ) : (
-        <p className="m-0 mt-3 text-sm font-semibold">이 조건으로 판매를 확정할까요?</p>
+        <p className="m-0 mt-3 text-[18px] font-semibold">이 조건으로 판매를 확정할까요?</p>
       )}
       <div className="mt-2.5 flex flex-wrap gap-2">
         <button
           type="button"
           onClick={onCancel}
           disabled={submitting}
-          className="rounded-lg border border-line bg-surface px-4 py-1.5 text-[13px] disabled:opacity-45"
+          className="rounded-lg border border-line bg-surface px-4 py-1.5 text-[17px] disabled:opacity-45"
         >
           취소
         </button>
@@ -341,7 +341,7 @@ function ConfirmSelection({
             type="button"
             onClick={onConfirm}
             disabled={submitting}
-            className="rounded-lg bg-accent px-4 py-1.5 text-[13px] font-semibold text-white disabled:opacity-45"
+            className="rounded-lg bg-accent px-4 py-1.5 text-[17px] font-semibold text-white disabled:opacity-45"
           >
             {submitting ? "최종 확인 중..." : "판매 확정"}
           </button>
@@ -361,13 +361,13 @@ function OutcomeView({ outcome }: { outcome: Outcome }) {
   if (confirmed) {
     return (
       <section className="rounded-xl border p-4" style={{ borderColor: "var(--color-t-good)" }}>
-        <p className="m-0 text-sm font-semibold" style={{ color: "var(--color-t-good)" }}>
+        <p className="m-0 text-[18px] font-semibold" style={{ color: "var(--color-t-good)" }}>
           판매가 확정되었습니다.
         </p>
-        <p className="m-0 mt-1.5 text-[13px]">
+        <p className="m-0 mt-1.5 text-[17px]">
           {itemText(null, row.item)} · {kindText(row.scenario_type)}
         </p>
-        <p className="m-0 mt-0.5 text-[13px] tabular-nums text-muted">
+        <p className="m-0 mt-0.5 text-[17px] tabular-nums text-muted">
           {toNumber(row.quantity_kg) === null ? "수량 정보 없음" : `${toNumber(row.quantity_kg)!.toLocaleString("ko-KR")} kg`} ·{" "}
           {toNumber(row.unit_price_krw) === null ? "단가 정보 없음" : `${toNumber(row.unit_price_krw)!.toLocaleString("ko-KR")}원/kg`} · 판매금액{" "}
           {moneyWon(row.reported_sales_amount_krw)} · {paymentTermText(row.payment_days)}
@@ -399,10 +399,10 @@ function OutcomeView({ outcome }: { outcome: Outcome }) {
   }
   return (
     <section className="rounded-xl border p-4" style={{ borderColor: "var(--color-t-warn)" }}>
-      <p className="m-0 text-sm font-semibold">{headline}</p>
-      {creditHint && <p className="m-0 mt-1.5 text-[13px]">{creditHint}</p>}
-      {reason && <p className="m-0 mt-1.5 text-[13px] text-muted">{reason}</p>}
-      <p className="m-0 mt-1.5 text-[12px] text-muted">다른 판매안은 자동으로 선택하지 않았습니다. 필요하면 직접 다시 골라 주세요.</p>
+      <p className="m-0 text-[18px] font-semibold">{headline}</p>
+      {creditHint && <p className="m-0 mt-1.5 text-[17px]">{creditHint}</p>}
+      {reason && <p className="m-0 mt-1.5 text-[17px] text-muted">{reason}</p>}
+      <p className="m-0 mt-1.5 text-[16px] text-muted">다른 판매안은 자동으로 선택하지 않았습니다. 필요하면 직접 다시 골라 주세요.</p>
     </section>
   );
 }

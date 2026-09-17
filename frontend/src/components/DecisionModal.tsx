@@ -42,14 +42,14 @@ export function DecisionModal({
         className="absolute inset-0 cursor-default bg-ink/25"
       />
       <div className="relative w-full max-w-[430px] rounded-xl border border-line bg-surface p-5 shadow-[0_20px_50px_-20px_rgba(21,26,22,.5)]">
-        <h4 className="m-0 text-[17px] font-semibold">
+        <h4 className="m-0 text-[21px] font-semibold">
           ‘{scenario.label}’ 안으로 진행할까요?
         </h4>
-        <p className="m-0 mb-4 mt-1 text-[13.5px] text-muted">
+        <p className="m-0 mb-4 mt-1 text-[17.5px] text-muted">
           승인으로 기록됩니다. 되돌리려면 다른 안을 다시 골라야 합니다.
         </p>
 
-        <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3.5 gap-y-1 text-[13.5px]">
+        <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3.5 gap-y-1 text-[17.5px]">
           {requestLabel(targetRequestId) && (
             <>
               <dt className="text-muted">매입 판단</dt>
@@ -69,17 +69,17 @@ export function DecisionModal({
         </dl>
 
         <div className="mt-3.5 rounded-lg border border-warn/25 bg-warn-wash p-3">
-          <p className="m-0 text-[11px] font-semibold uppercase tracking-wide text-warn">
+          <p className="m-0 text-[15px] font-semibold uppercase tracking-wide text-warn">
             기록이지 발주가 아닙니다
           </p>
-          <p className="m-0 mt-1 text-[13px] text-muted">
+          <p className="m-0 mt-1 text-[17px] text-muted">
             여기서 끝나는 것은 <b className="font-semibold text-ink">사람이 이 안을 골랐다</b>{" "}
             까지이고, 실제 발주는 별도입니다.
           </p>
         </div>
 
         {error && (
-          <p className="mt-3 rounded-lg border border-warn/30 bg-warn-wash p-2.5 text-[13px] text-warn">
+          <p className="mt-3 rounded-lg border border-warn/30 bg-warn-wash p-2.5 text-[17px] text-warn">
             {error}
           </p>
         )}
@@ -88,7 +88,7 @@ export function DecisionModal({
           <button
             type="button"
             onClick={onCancel}
-            className="flex-1 rounded-lg border border-line bg-surface py-2 text-[13.5px] font-semibold text-muted"
+            className="flex-1 rounded-lg border border-line bg-surface py-2 text-[17.5px] font-semibold text-muted"
           >
             취소
           </button>
@@ -96,7 +96,7 @@ export function DecisionModal({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className="flex-1 rounded-lg border border-accent bg-accent py-2 text-[13.5px] font-semibold text-white disabled:opacity-60"
+            className="flex-1 rounded-lg border border-accent bg-accent py-2 text-[17.5px] font-semibold text-white disabled:opacity-60"
           >
             {busy ? "기록 중…" : "승인 기록"}
           </button>

@@ -74,7 +74,7 @@ export function ActionButton({ href, label }: { href: string; label: string }) {
   if (result)
     return (
       <span
-        className="rounded-lg px-2.5 py-1 text-[12px] font-semibold"
+        className="rounded-lg px-2.5 py-1 text-[16px] font-semibold"
         style={{
           background: result.ok ? "var(--color-t-good-bg)" : "var(--color-t-bad-bg)",
           color: result.ok ? "var(--color-t-good)" : "var(--color-t-bad)",
@@ -121,7 +121,7 @@ export function ActionButton({ href, label }: { href: string; label: string }) {
       type="button"
       onClick={() => void run()}
       disabled={busy}
-      className="rounded-lg px-3 py-1.5 text-[12.5px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40"
+      className="rounded-lg px-3 py-1.5 text-[16.5px] font-semibold transition disabled:cursor-not-allowed disabled:opacity-40"
       style={{ background: "var(--color-nav)", color: "#f4f3ee" }}
     >
       {busy ? "바꾸는 중…" : label}

@@ -43,11 +43,11 @@ const MAX_ROWS = 10;
 /** 표 아래 «외 N건». 🔴 **건수를 추정하지 않는다** — facts 의 total 을 쓴다. */
 function More({ total, shown }: { total: number; shown: number }) {
   if (!Number.isFinite(total) || total <= shown) return null;
-  return <p className="m-0 mt-1 text-[10px] text-[#70857b]">외 {(total - shown).toLocaleString("ko-KR")}건</p>;
+  return <p className="m-0 mt-1 text-[14px] text-[#70857b]">외 {(total - shown).toLocaleString("ko-KR")}건</p>;
 }
 
 function Empty({ children }: { children: string }) {
-  return <p className="m-0 rounded-lg border border-[#dbe7e0] bg-[#f4f8f6] p-3 text-[11px] text-[#70857b]">{children}</p>;
+  return <p className="m-0 rounded-lg border border-[#dbe7e0] bg-[#f4f8f6] p-3 text-[15px] text-[#70857b]">{children}</p>;
 }
 
 export function LogisticsReport({ facts }: { facts: ReportFacts }) {
@@ -105,7 +105,7 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
       </div>
 
       {notes.length > 0 && <Section title="운영 확인사항">
-        <ul className="m-0 list-disc rounded-lg border border-[#dbe7e0] bg-[#f4f8f6] py-3 pl-8 pr-3 text-[11px] text-[#2c463b]">
+        <ul className="m-0 list-disc rounded-lg border border-[#dbe7e0] bg-[#f4f8f6] py-3 pl-8 pr-3 text-[15px] text-[#2c463b]">
           {notes.map((note) => <li key={note} className="mb-1 last:mb-0">{note}</li>)}
         </ul>
       </Section>}
@@ -116,8 +116,8 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
               {/* 🔴 빈 날은 0kg 이 아니라 «안 연 날» 이다 — 선을 잇지 않는다. */}
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={trend}>
-                  <XAxis dataKey="date" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
+                  <XAxis dataKey="date" tick={{ fontSize: 14 }} />
+                  <YAxis tick={{ fontSize: 14 }} />
                   <Tooltip />
                   <Line type="monotone" dataKey="on_hand_qty_kg" stroke="#1d6b48" dot={false} />
                 </LineChart>
@@ -144,7 +144,7 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
     </ReportChrome>
 
     <ReportChrome title="재고·물류 운영 보고서" subtitle="입고 · 검수" facts={facts} page={2}>
-      <p className="m-0 mb-3 text-[11px] text-[#70857b]">창고 도착 전 입고 예정과 검수 진행 상황을 보여줍니다.</p>
+      <p className="m-0 mb-3 text-[15px] text-[#70857b]">창고 도착 전 입고 예정과 검수 진행 상황을 보여줍니다.</p>
       <div className="grid grid-cols-4 gap-3">
         {/* 🔴 「오늘」이 아니다 — 이 보고서는 과거 `as_of` 도 조회한다 (화면 「기준일」과 같은 말). */}
         <Metric label="도착 예정" value={`${text(arrival.due_count, "0")}건`} detail={Number(arrival.due_count) > 0 ? "기준일에 받을 수 있는 입고" : "예정된 입고 없음"} />
@@ -192,7 +192,7 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
                 </tr>)}
               </Table>
               <More total={receiptRollup.length} shown={Math.min(MAX_ROWS, receiptRollup.length)} />
-              <p className="m-0 mt-1 text-[10px] text-[#70857b]">재고가 되는 것은 주문 수량이 아니라 합격 수량입니다.</p>
+              <p className="m-0 mt-1 text-[14px] text-[#70857b]">재고가 되는 것은 주문 수량이 아니라 합격 수량입니다.</p>
             </>}
       </Section>
     </ReportChrome>
@@ -222,7 +222,7 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
                 </tr>)}
               </Table>
               <More total={reservations.length} shown={Math.min(MAX_ROWS, reservations.length)} />
-              <p className="m-0 mt-1 text-[10px] text-[#70857b]">예약과 할당은 재고를 바로 줄이지 않습니다 — 실제 출고 때 줄어듭니다.</p>
+              <p className="m-0 mt-1 text-[14px] text-[#70857b]">예약과 할당은 재고를 바로 줄이지 않습니다 — 실제 출고 때 줄어듭니다.</p>
             </>}
       </Section>
     </ReportChrome>
@@ -253,7 +253,7 @@ export function LogisticsReport({ facts }: { facts: ReportFacts }) {
                 </tr>)}
               </Table>
               <More total={lots.length} shown={Math.min(MAX_ROWS, lots.length)} />
-              <p className="m-0 mt-1 text-[10px] text-[#70857b]">급한 Lot 이 위에 옵니다 — 폐기 검토 · 우선 출고 · 신선도 잔여가 적은 순입니다.</p>
+              <p className="m-0 mt-1 text-[14px] text-[#70857b]">급한 Lot 이 위에 옵니다 — 폐기 검토 · 우선 출고 · 신선도 잔여가 적은 순입니다.</p>
             </>}
       </Section>
     </ReportChrome>

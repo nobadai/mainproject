@@ -127,16 +127,16 @@ function PlanCard({ plan }: { plan: Plan }) {
         className="flex flex-wrap items-center gap-2 border-b px-4 py-3"
         style={{ borderColor: "var(--color-hair-soft)" }}
       >
-        <strong className="text-[14px] font-semibold">{plan.key}</strong>
+        <strong className="text-[18px] font-semibold">{plan.key}</strong>
         <Pill text={plan.knob} tone="info" />
         <PlanState plan={plan} />
-        <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+        <span className="ml-auto text-[15.5px]" style={{ color: "var(--color-mut)" }}>
           {plan.coverage}
         </span>
       </header>
 
       <div className="flex flex-col gap-3.5 p-4">
-        <dl className="m-0 flex flex-col gap-1.5 text-[12.5px]">
+        <dl className="m-0 flex flex-col gap-1.5 text-[16.5px]">
           {[
             ["사는 양", `${plan.qty_kg.toLocaleString("ko-KR")} kg`, true],
             ["예상 금액", `${plan.amount_krw.toLocaleString("ko-KR")} 원`, false],
@@ -146,7 +146,7 @@ function PlanCard({ plan }: { plan: Plan }) {
               <dt className="m-0" style={{ color: "var(--color-mut)" }}>
                 {k}
               </dt>
-              <dd className={`tabular m-0 font-mono ${hero ? "text-[19px]" : "text-[13px]"}`}>{v}</dd>
+              <dd className={`tabular m-0 font-mono ${hero ? "text-[23px]" : "text-[17px]"}`}>{v}</dd>
             </div>
           ))}
           {/*
@@ -163,7 +163,7 @@ function PlanCard({ plan }: { plan: Plan }) {
             style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
           >
             <dt className="m-0 font-semibold">이보다 비싸면 안 산다</dt>
-            <dd className="tabular m-0 font-mono text-[14px] font-semibold">
+            <dd className="tabular m-0 font-mono text-[18px] font-semibold">
               {plan.cut_unit_price === null
                 ? "이 실행에는 기준이 없습니다"
                 : `${plan.cut_unit_price.toLocaleString("ko-KR")} 원/kg`}
@@ -172,28 +172,28 @@ function PlanCard({ plan }: { plan: Plan }) {
         </dl>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             회차
           </h3>
           <DataTable table={plan.legs} />
         </section>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             지급
           </h3>
           <DataTable table={plan.payments} />
         </section>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             근거
           </h3>
-          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[15.5px] leading-relaxed">
             {plan.reasons.map((r, i) => (
               <li key={i} className="flex flex-wrap items-baseline gap-1.5">
                 <span
-                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[14px] font-semibold"
                   style={{ background: "var(--color-sunk)", color: "var(--color-ink2)" }}
                 >
                   {r.source}
@@ -213,10 +213,10 @@ function PlanCard({ plan }: { plan: Plan }) {
 
         {plan.risks.length > 0 && (
           <section className="flex flex-col gap-2">
-            <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-t-warn)" }}>
+            <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-t-warn)" }}>
               걸리는 것
             </h3>
-            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
+            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[15.5px] leading-relaxed">
               {plan.risks.map((r) => (
                 <li key={r} className="flex gap-2">
                   <i aria-hidden style={{ color: "var(--color-t-warn)" }}>·</i>

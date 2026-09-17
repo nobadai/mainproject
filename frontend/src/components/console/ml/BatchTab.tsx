@@ -148,7 +148,7 @@ export function BatchTab() {
         style={{ borderColor: "var(--color-hair)" }}
       >
         <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <h2 className="m-0 text-[13.5px] font-semibold">금일 자동 작업 결과</h2>
+          <h2 className="m-0 text-[17.5px] font-semibold">금일 자동 작업 결과</h2>
           {/*  ★ **실패했을 때만 버튼을 보입니다.** 잘 돌았는데 버튼이 있으면
                  누르고 싶어집니다 — 자동 작업은 학습표를 비우고 다시 채우는
                  것이라 이유 없이 돌릴 일이 아닙니다. */}
@@ -160,7 +160,7 @@ export function BatchTab() {
         </header>
         {todayFailed && (
           <p
-            className="m-0 rounded-lg px-3.5 py-2.5 text-[12px] leading-relaxed"
+            className="m-0 rounded-lg px-3.5 py-2.5 text-[16px] leading-relaxed"
             style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
           >
             ★ <b>오늘 아침 작업이 실패했습니다.</b> 매입 파트 전달표에 오늘 것이 안 갔을 수
@@ -172,7 +172,7 @@ export function BatchTab() {
         {report ? (
           <ReportBody report={report} />
         ) : (
-          <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+          <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
             불러오는 중… (실패한 작업이 없으면 내용이 비어 있습니다)
           </p>
         )}
@@ -182,10 +182,10 @@ export function BatchTab() {
         style={{ borderColor: "var(--color-hair)" }}
       >
         <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <h2 className="m-0 text-[13.5px] font-semibold">최근 자동 작업 기록</h2>
+          <h2 className="m-0 text-[17.5px] font-semibold">최근 자동 작업 기록</h2>
           {failed > 0 && (
             <span
-              className="rounded px-2 py-0.5 text-[11px] font-semibold"
+              className="rounded px-2 py-0.5 text-[15px] font-semibold"
               style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
             >
               {failed}건 실패
@@ -199,7 +199,7 @@ export function BatchTab() {
 
         {err && (
           <p
-            className="m-0 rounded-lg px-3.5 py-2.5 text-[12px]"
+            className="m-0 rounded-lg px-3.5 py-2.5 text-[16px]"
             style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
           >
             {err}
@@ -207,21 +207,21 @@ export function BatchTab() {
         )}
 
         {!runs ? (
-          <p className="m-0 py-6 text-center text-[12.5px]" style={{ color: "var(--color-mut2)" }}>
+          <p className="m-0 py-6 text-center text-[16.5px]" style={{ color: "var(--color-mut2)" }}>
             작업 기록을 불러오는 중…
           </p>
         ) : runs.length === 0 ? (
           //  ★ **빈 표를 그리지 않습니다.** 머리글만 있는 표는 «배치가 안 돌았다»
           //    로 읽힙니다 — 실제로는 «그 기간을 안 골랐다» 입니다.
           <p
-            className="m-0 rounded-lg border border-dashed px-4 py-6 text-center text-[12px]"
+            className="m-0 rounded-lg border border-dashed px-4 py-6 text-center text-[16px]"
             style={{ borderColor: "var(--color-hair)", color: "var(--color-mut2)" }}
           >
             이 기간에 배치 기록이 없습니다
           </p>
         ) : (
           <div className="thin-scroll -mx-1 overflow-x-auto px-1">
-            <table className="w-full border-collapse text-[12px]">
+            <table className="w-full border-collapse text-[16px]">
               <thead>
                 <tr>
                   {/*  ★ «실행»(run_id) 열은 뺐습니다 (2026-09-16). 사람이 볼 값이
@@ -273,14 +273,14 @@ export function BatchTab() {
                         style={{ borderColor: "var(--color-hair-soft)" }}
                       >
                         <span
-                          className="inline-flex items-center whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-semibold"
+                          className="inline-flex items-center whitespace-nowrap rounded px-2 py-0.5 text-[15px] font-semibold"
                           style={{ background: st.bg, color: st.fg }}
                         >
                           {st.label}
                         </span>
                       </td>
                       <td
-                        className="whitespace-nowrap border-b px-2.5 py-2 text-[11.5px]"
+                        className="whitespace-nowrap border-b px-2.5 py-2 text-[15.5px]"
                         style={{ borderColor: "var(--color-hair-soft)", color: "var(--color-mut)" }}
                       >
                         {r.host ?? "—"}
