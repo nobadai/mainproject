@@ -52,7 +52,9 @@ _PAY_COLS = [
     Column(key="amount", label="금액", align="right", mono=True),
 ]
 _COMMITTED_COLS = [
-    Column(key="approval", label="승인", mono=True),
+    #  🔴 칸 이름이 틀렸었다 — 「승인」인데 실린 값은 **매입 번호**(`purchase_id`)다 (2026-09-17).
+    #     화면은 이 칸을 **가린다** (`console/purchase/page.tsx`) · 값은 API 에 남긴다.
+    Column(key="approval", label="매입 번호", mono=True),
     Column(key="item", label="품목"),
     Column(key="buy", label="사는 날", mono=True),
     Column(key="arrive", label="도착", mono=True),
@@ -81,12 +83,18 @@ _KNOB = {
 #:                              (마스터 통보 「백필 승인은 사람 승인이 아닙니다」)
 _EMPTY_COMMITTED = "아직 확정된 매입이 없습니다 — 안이 승인되면 여기에 생깁니다"
 
+#: 한 번에 사는 안의 빈 지급 표. 예시값도 같은 문장을 쓴다 — 두 곳에 적으면 한쪽만
+#: 낡는다 (전에는 둘 다 「지급일 규칙이 아직 미결」이었고 같이 틀렸다 · ``_payments`` 참조).
+_PAY_EMPTY_SINGLE = "한 번에 사는 안이라 지급 계획을 따로 만들지 않습니다"
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  DB 읽기
 # ══════════════════════════════════════════════════════════════════════════
 
-def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
+def _read(
+    as_of: date, *, window_days: int | None = None, sim_run_id: str | None = None
+) -> dict[str, Any]:
     """저장된 실행과 확정 매입을 읽는다. **SELECT 뿐이다.**
 
     🔴 **축(`sim_run_id`)으로 여기서 거르지 않는다.** 칸을 읽어 오기만 하고 고르는 것은
@@ -96,6 +104,13 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
            WHERE 로 걸러 오면 뺀 수를 셀 수 없고, 그러면 조용히 없애는 것이 된다
         ② 검사가 이 함수를 대신 세워 상황을 주입한다. WHERE 에 두면 그 주입이
            필터를 건너뛰어 **축이 도는지를 못 잰다** (규칙 8)
+
+    🔵 **예외 하나 — 도착일 조회(``arrivals``)만 축을 SQL 에 건다** (2026-09-17).
+    ① 은 그 조회에 해당이 없다 — 건수를 안 세고 도착일을 찾아 오기만 한다. ② 는
+    ``_arrival_index`` 의 파이썬 축 필터를 **그대로 두어** 지킨다. ``sim_run_id=None``
+    이면 지금까지처럼 안 건다. 이유는 실측 — 그 조회가 모든 걷기의 시나리오를 끌어와
+    (REH-0914 08-31 · 13,220행 · 45.6MB) 한 판 ``1,285ms`` 중 ``1,150ms`` 를 먹었고,
+    축을 걸면 ``164ms`` 에 **응답 본문 sha 가 같다** (REH · FINAL · V13 세 실행).
 
     🔵 **``window_days`` 는 도착일 조회(``arrivals``)의 날짜 창이다** (2026-09-16).
 
@@ -148,7 +163,11 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
             " i.unit_price_krw_per_kg, i.line_amount_krw"
             " FROM {} p JOIN {} i USING (purchase_id)"
             " WHERE p.purchase_type = 'MASTER_APPROVAL' AND p.purchase_date <= %(as_of)s"
-            " ORDER BY p.purchase_date, i.purchase_item_id"
+            #  🔵 **최신순이다** (2026-09-17). 오래된 순이면 오늘 산 줄이 수백 줄 맨 아래에
+            #     깔린다 (REH-0914 08-31 · 291줄). 같은 날 안에서도 뒤집어 **통째로 역순**이다.
+            #  ⚠️ 순서에 기대는 계산은 없다 — 이번 주 매입액 · 입고 예정은 합이고, 도착일 맞춤은
+            #     `arrivals` 쪽 순서를 쓴다. 화면이 자르는 것은 페이지뿐이다(`page.tsx`).
+            " ORDER BY p.purchase_date DESC, i.purchase_item_id DESC"
         ).format(table("purchases"), table("purchase_items")),
         {"as_of": as_of},
     )
@@ -160,7 +179,12 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
     items = fetch_all(sql.SQL("SELECT item_id, item_name FROM {}").format(table("items")))
     #  확정 매입의 도착일은 원장에 없다. 그날 실행의 시나리오에서 **금액으로**
     #  맞춰 온다 — purchase_id 문자열을 쪼개면 이름 규칙에 묶인다.
-    all_dates = sorted({row["purchase_date"] for row in buys})
+    #  🔵 축을 주면 **그 축의 원장 날짜만** 건다. 도착일이 필요한 줄은 `_committed` 가
+    #     남기는 그 축의 줄뿐이다 — 다른 걷기만 산 날을 걸면 끌어온 행이 전부 버려진다.
+    all_dates = sorted({
+        row["purchase_date"] for row in buys
+        if sim_run_id is None or row["sim_run_id"] == sim_run_id
+    })
     #  🔵 날짜 창. `None` 이면 안 좁힌다 — 그때 `dates is all_dates` 라 아래 조회가
     #     지금까지와 **한 글자도 다르지 않다.**
     #
@@ -170,12 +194,15 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
     dates = all_dates if window_days is None else [
         d for d in all_dates if 0 <= (as_of - d).days < window_days
     ]
+    #  🔵 축 조건은 **줄 때만** 붙인다. `None` 을 `= %(sim)s` 에 넣으면 `NULL = NULL` 이라
+    #     0행이 되고, 그건 «안 거른다» 가 아니라 «다 버린다» 다.
+    axis = sql.SQL("") if sim_run_id is None else sql.SQL(" AND sim_run_id = %(sim)s")
     arrivals = fetch_all(
         sql.SQL(
             "SELECT as_of, item, sim_run_id, response_payload->'scenarios' AS scenarios"
-            " FROM {} WHERE as_of = ANY(%(dates)s) AND cycle = 'PROCUREMENT'"
-        ).format(table("master_agent_runs")),
-        {"dates": dates},
+            " FROM {} WHERE as_of = ANY(%(dates)s) AND cycle = 'PROCUREMENT'{}"
+        ).format(table("master_agent_runs"), axis),
+        {"dates": dates} if sim_run_id is None else {"dates": dates, "sim": sim_run_id},
     ) if dates else []
     return {
         "runs": runs,
@@ -186,6 +213,8 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
         #  🔴 **「전부 읽었나」를 값으로 돌려준다.** 창을 좁히면 도착일이 비는데, 그
         #     공란이 «맞출 것이 없었다» 인지 «안 읽었다» 인지 여기서만 알 수 있다.
         #     읽는 쪽(`build`)이 다시 계산하면 두 벌이 되고, 한쪽만 고치는 날이 온다.
+        #  ⚠️ 「전부」는 **그 축의** 날짜다. 다른 걷기만 산 날을 안 건 것은 «안 읽었다» 가
+        #     아니다 — 그 줄은 `_committed` 가 어차피 뺀다.
         "arrivals_complete": dates == all_dates,
     }
 
@@ -256,7 +285,9 @@ def _pick(
         aside = f". 계약 밖 품목({names})은 뺐습니다 — 지금 사는 것은 {'·'.join(ITEMS)} 입니다"
     #  🔴 거른 것을 조용히 없애지 않는다 — 계약 밖 품목과 같은 규율이다.
     if off_axis:
-        aside += f". 다른 걷기의 실행 {off_axis}건은 뺐습니다 — 지금 보는 것은 {sim_run_id} 입니다"
+        #  🔴 **뺀 건수만 적는다** (2026-09-17). 어느 걷기를 보는지는 `build` 가 안 목록
+        #     안내 끝에 **한 번만** 적는다 — 여기서 또 적으면 같은 이름이 두 번 나온다.
+        aside += f". 다른 걷기의 실행 {off_axis}건은 뺐습니다"
     #  🔴 **안 거를 때도 말한다** (마스터 청구 2026-09-10). 축이 없는 실행은 손으로
     #     돌린 것이거나 축이 생기기 전 기록인데, 걷기와 **같아 보이면** 보는 사람이
     #     둘을 한 세상으로 읽는다. 마스터가 실제로 그 오독을 했다 —
@@ -270,10 +301,14 @@ def _pick(
         )
     if not chosen:
         return [], f"그날 실행 {len(runs)}건 · 그중 안을 낸 계약 품목 실행 0건{aside}"
-    names = " · ".join(f"{r['item']} {r['request_id']}" for r in chosen)
+    #  🔴 **요청 ID 를 글에 안 싣는다** (2026-09-17). 무엇을 골랐는지는 「품목별 최신 하나」
+    #     라는 **규칙 문장**이 말하고(레슨 ①), 어느 실행인지는 안마다 `request_id` ·
+    #     `history_run_id` 칸에 남는다 — 말로 한 승인이 그 칸을 쓴다.
+    #  ★ 「환경이 선 것」은 `runtime_status=READY` 의 안쪽 말이라 풀어 쓴다. 수는 그대로다.
+    names = " · ".join(str(r["item"]) for r in chosen)
     return chosen, (
-        f"그날 실행 {len(runs)}건 중 환경이 선 것 {len(ready)}건 · "
-        f"안을 낸 것 {len(with_plans)}건 — 품목별 최신 하나를 보입니다 ({names}){aside}"
+        f"그날 실행 {len(runs)}건 중 {len(ready)}건이 돌았고 "
+        f"{len(with_plans)}건이 안을 냈습니다 — 품목별 최신 하나를 보입니다 ({names}){aside}"
     )
 
 
@@ -295,7 +330,7 @@ def _no_plan_note(
         if not runs:
             return Note(
                 tone="warn",
-                text=f"{picked_text}. 이 걷기({sim_run_id})의 실행이 그날 없습니다 —"
+                text=f"{picked_text}. 이 걷기의 실행이 그날 없습니다 —"
                 " 안이 죽은 것이 아니라 돌지 않았습니다.",
             )
     for run in runs:
@@ -357,8 +392,18 @@ def _payments(scenario: dict[str, Any]) -> Table:
         split_plan 2회차   228건   payment_schedule 배열     ← 228 = 228
 
     ⚠️ 그래서 **빈 표가 흔한 것이 정상**이다. 한 번에 사는 안은 지급이 한 건이라
-    따로 계획을 만들지 않는다. 없는 것을 매입일로 메우지 않는다 (규칙 3) —
-    지급일 규칙(``purchase_payment_days`` · N5)이 아직 미결이라 더 그렇다.
+    따로 계획을 만들지 않는다 (``package_scenarios.build_payment_schedule``).
+    없는 것을 매입일로 메우지 않는다 (규칙 3).
+
+    🔴 ~~지급일 규칙(N5)이 아직 미결이라 더 그렇다~~ — **낡았다** (2026-09-17 정정).
+    재무가 N5=0 을 `2026-09-10` 에 확정했고, 안을 낸 실행은 전부 그 값을 받았다
+    (REH-0914 378/378 · FINAL-0918 505/505). 그런데도 1회차 줄을 안 만드는 이유는
+    **두 벌**이다 — 만들면 ``split_plan[].amount_krw`` 와 같은 값이 한 번 더 나간다.
+    빈 표 문구도 그래서 「미결」이 아니라 「한 번에 사는 안」을 말한다.
+
+    ⚠️ **나눠 사는 안인데 계획이 없는 경우는 다른 문장이다.** 에이전트는 N5 를 못
+    받았을 때도 계획을 안 만든다. 그 자리에 「한 번에 사는 안」을 적으면 거짓이고,
+    원인을 짐작해 적는 것도 짓는 것이라 **실리지 않았다는 사실만** 적는다.
 
     ``basis`` · ``amount_max_krw`` 는 안 싣는다. 앞은 내부 어휘이고 뒤는 **재무
     STRESS 금액**이라, 지급 표에 두면 실제로 낼 돈으로 읽힌다.
@@ -375,7 +420,12 @@ def _payments(scenario: dict[str, Any]) -> Table:
     return Table(
         columns=_PAY_COLS,
         rows=rows,
-        empty_text="이 실행에는 지급 계획이 없습니다 — 지급일 규칙이 아직 미결입니다",
+        #  🔴 N5 값이나 사는 날을 문장에 넣지 않는다 — 회차 표에 이미 있는 사실이다.
+        empty_text=(
+            _PAY_EMPTY_SINGLE
+            if len(scenario.get("split_plan") or []) <= 1
+            else "나눠 사는 안인데 지급 계획이 실리지 않았습니다"
+        ),
     )
 
 
@@ -405,7 +455,8 @@ def _records(as_of: date, sim_run_id: str | None) -> dict[tuple[str, str], Recor
 def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], str],
           request_id: str, sim_run_id: str | None = None, *,
           run_id: Any = None,
-          records: dict[tuple[str, str], RecordedTotals] | None = None) -> Plan | None:
+          records: dict[tuple[str, str], RecordedTotals] | None = None,
+          decided_requests: frozenset[str] = frozenset()) -> Plan | None:
     label = str(scenario.get("label") or "")
     sourcing = _sourcing(scenario.get("sourcing_plan") or [])
     if sourcing is None:
@@ -439,7 +490,13 @@ def _plan(item: str, scenario: dict[str, Any], decided: dict[tuple[str, str], st
             for r in scenario.get("rationale") or []
         ],
         risks=[str(x) for x in scenario.get("risks") or []],
-        pending=decision is None,
+        #  🔴 **「대기」는 안이 아니라 요청(품목·날)의 사실이다** (2026-09-17).
+        #     전에는 `decision is None` — (요청, 안 이름) 한 쌍으로만 봐서, 같은 요청에서
+        #     보수안이 승인되면 **고르지 않은 기본안이 「승인 대기」로 남았다.** 매입 탭 통계와
+        #     대시보드 배지가 그 수를 셌다 (REH-0914 08-31 · 3건인데 기다리는 것은 양파 1건).
+        #  ★ 낱말(`state` 「후보」)은 안 바꾼다 — 주인은 `plan_state.py` 다. 형제 안은
+        #    「후보」 그대로이고, **기다리는 수에서만** 빠진다.
+        pending=request_id not in decided_requests,
         approved=decision == "APPROVE",
         #  🔴 **`approved` 하나로는 못 가른다** — 승인만 된 안과 실매입까지 적은 안이
         #     둘 다 참이다. 낱말과 판정의 주인은 `app/api/plan_state.py` 하나이고
@@ -578,7 +635,7 @@ def _demo_plan(label: str, coverage: str, qty: float, amount: int, cap: int) -> 
             {"leg": 1, "buy": "2026-01-06", "qty": f"{qty:,.0f} kg", "arrive": "2026-01-08"},
         ]),
         payments=Table(columns=_PAY_COLS, rows=[],
-                       empty_text="예시값입니다 — 지급일 규칙이 아직 미결입니다"),
+                       empty_text=f"예시값입니다 — {_PAY_EMPTY_SINGLE}"),
         reasons=list(_DEMO_REASONS), risks=list(_DEMO_RISKS), pending=True,
     )
 
@@ -653,7 +710,9 @@ def build(
     #    대신 「예시값」 딱지가 붙습니다. 예외 종류를 골라 잡으면 안 골라낸
     #    하나 때문에 화면이 통째로 죽습니다 (ML 이 forecast 에서 같은 판단).
     try:
-        data = _read(as_of, window_days=window_days)
+        #  🔴 축을 흘린다 — 안 흘리면 도착일 조회가 모든 걷기를 다시 끌어온다.
+        #     `tests/api/test_purchase_tab_axis_sql.py` 가 이 자리를 직접 잠근다.
+        data = _read(as_of, window_days=window_days, sim_run_id=sim_run_id)
     except Exception as error:  # noqa: BLE001  DB 미연결 · 표 없음 둘 다
         log.info("매입 값을 못 읽어 예시값을 씁니다: %s", error)
         return _demo(f"DB 를 못 읽었습니다 ({type(error).__name__})")
@@ -670,6 +729,9 @@ def build(
         for row in data["decisions"]
         if row["scenario_label"]
     }
+    #  ★ 결정이 난 요청. `decided` 와 **같은 행**에서 뽑는다 — 무엇을 결정으로 치는지
+    #    (안 이름이 붙은 행)가 두 곳에서 갈리면 「승인됨」과 「대기 아님」이 따로 논다.
+    decided_requests = frozenset(request_id for request_id, _label in decided)
     chosen, picked_text = _pick(runs, sim_run_id)
     #  ★ 안과 **같은 실행 · 같은 날**의 실매입 기록. 열쇠는 `(품목, 안 이름)`.
     records = _records(as_of, sim_run_id)
@@ -685,6 +747,7 @@ def build(
                 #     그때 «못 읽었다» 로 두는 것이 맞다 — 지어내지 않는다.
                 run_id=run.get("run_id"),
                 records=records,
+                decided_requests=decided_requests,
             )
             if plan is None:
                 skipped += 1
@@ -698,6 +761,12 @@ def build(
 
     if plans:
         text = picked_text
+        #  🔴 **어느 걷기를 보는지는 이 한 자리에만 적는다** (2026-09-17). 실행 이름은 내부
+        #     식별자라 한 번 걷었다가, 화면에 어디에도 안 남아 되살렸다 — 두 세상을 섞어
+        #     읽지 않게 하는 것이 09-10 에 이 이름을 실은 이유다. 요청 ID 는 여전히 안 싣는다.
+        #  ⚠️ 확정 매입 안내 · 안 없는 날 안내에는 **안 넣는다** — 한 곳이면 된다.
+        if sim_run_id is not None:
+            text += f". 이 걷기({sim_run_id})를 봅니다"
         if skipped:
             text += f". 등급 배분이 비어 화면에 못 올린 안 {skipped}개"
         if no_cut:
@@ -713,7 +782,8 @@ def build(
 
     arrived_unknown = sum(1 for row in committed.rows if row["arrive"] is None)
     committed_text = (
-        "승인(MASTER_APPROVAL)으로 원장에 남은 매입만 봅니다 — "
+        #  🔴 `MASTER_APPROVAL` 은 원장의 안쪽 코드다 — 뜻만 적는다 (2026-09-17).
+        "승인을 거쳐 원장에 남은 매입만 봅니다 — "
         f"{as_of.isoformat()} 까지 {len(committed.rows)}줄."
     )
     if not arrivals_complete:
@@ -729,14 +799,12 @@ def build(
         committed_text += f" 도착일을 못 맞춘 줄 {arrived_unknown}개는 **공란**입니다."
     #  🔴 뺀 것을 조용히 없애지 않는다 — 이번 주 매입액이 왜 작은지가 여기 있다.
     if committed_off_axis:
-        committed_text += (
-            f" 다른 걷기의 줄 {committed_off_axis}개는 뺐습니다 —"
-            f" 지금 보는 것은 {sim_run_id} 입니다."
-        )
-    if committed.rows:
-        committed_text += (
-            " ⚠️ 지급일이 매입일과 같게 적재돼 있습니다 — 지급일 규칙이 아직 미결입니다."
-        )
+        #  🔴 뺀 수는 남기고 실행 이름은 안 적는다 — `_pick` 의 안내문과 같은 규율이다.
+        committed_text += f" 다른 걷기의 줄 {committed_off_axis}개는 뺐습니다."
+    #  🔴 ~~「⚠️ 지급일이 매입일과 같게 적재돼 있습니다 — 지급일 규칙이 아직 미결입니다」~~
+    #     **걷었다** (2026-09-17). 지급일이 매입일과 같은 것은 경고할 일이 아니라 **확정값
+    #     N5=0 의 결과**다 (재무 확정 2026-09-10). 「미결」이 거짓이었고, 줄이 있으면 무조건
+    #     붙어 원장 값과 상관없이 같은 말을 했다. 지급일은 표의 「지급」 칸이 그대로 보인다.
 
     return PurchaseTab(
         stats=[
@@ -744,7 +812,10 @@ def build(
                  detail=f"{as_of.isoformat()} · 실행 {len(runs)}건 중 고른 {len(chosen)}건",
                  raw=len(plans)),
             Stat(label="승인 대기", value=str(pending), unit="건",
-                 detail="사람이 고르면 확정 매입이 생깁니다",
+                 #  🔴 «사람이» 라고 쓰지 않는다 — 걷기 구간은 AUTO-BACKFILL 로 승인된다
+                 #     (`schema.PurchaseTab.committed` 주석 · 마스터 통보 2026-09-10).
+                 #     빈 표 문구(`_EMPTY_COMMITTED`)와 같은 말로 맞춘다.
+                 detail="안이 승인되면 확정 매입이 생깁니다",
                  tone="warn" if pending else "neutral", raw=pending),
             Stat(label="이번 주 확정 매입액", value=f"{week_amount:,}", unit="원",
                  detail=f"{week_start.isoformat()} ~ {as_of.isoformat()} · 승인분 줄 금액 합계",

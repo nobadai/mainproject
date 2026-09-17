@@ -100,14 +100,24 @@ def _data() -> dict[str, Any]:
     }
 
 
-def _read(_as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
+def _read(
+    _as_of: date, *, window_days: int | None = None, sim_run_id: str | None = None
+) -> dict[str, Any]:
     """`_read` 대역. **창 규칙은 진짜와 같은 자리에서 돈다.**
 
     ★ 날짜 고르기를 여기서 흉내 내는 대신 진짜와 같은 식을 쓴다 — 식이 갈리면 이 검사가
       실제와 다른 세상을 재게 된다.
+
+    🔴 **`sim_run_id` 를 받아야 한다** (2026-09-17). `build` 가 `_read` 에 축을 흘리는데,
+       안 받으면 `TypeError` 가 `build` 의 `except` 에 삼켜져 **조용히 예시값**이 나간다 —
+       실제로 ①의 두 검사만 빨개지고 ②의 «대시보드가 같다» 셋은 예시값끼리 대 보며 통과했다.
+       날짜도 진짜처럼 **그 축의** 원장 날짜로 고른다.
     """
     data = _data()
-    all_dates = sorted({row["purchase_date"] for row in data["buys"]})
+    all_dates = sorted({
+        row["purchase_date"] for row in data["buys"]
+        if sim_run_id is None or row["sim_run_id"] == sim_run_id
+    })
     dates = all_dates if window_days is None else [
         d for d in all_dates if 0 <= (AS_OF - d).days < window_days
     ]

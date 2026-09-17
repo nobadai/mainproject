@@ -92,6 +92,14 @@ get_finance_dashboard(sim_run_id=..., as_of=as_of)
 띄우게 되고, 그건 **틀린 줄도 모르는** 오류입니다.
 급하면 ㉰ 로 두고 `Note` 에 «어느 실행을 보고 있는지» 를 적으세요.
 
+**발표용으로 ㉰ 로 정했습니다 (2026-09-14) — `app/api/shown_run.py`.**
+화면이 읽는 실행은 `SHOWN_SIM_RUN_ID`, 기준일은 `SHOWN_AS_OF` 한 자리에서만 정합니다.
+재무 · 물류 · 판매 · 대시보드와 매입 라우터(쿼리에 축이 없을 때)가 이 값을 씁니다.
+각 탭 `Source.note` 에 「보고 있는 실행: 실행 이름」 을 적습니다.
+최종 실행 SIM-CHAIN-FINAL 이 끝나면 그 두 줄을 `"SIM-CHAIN-FINAL"` · `date(2026, 9, 20)` 로 바꾸고,
+발표 뒤에는 ㉮ 주소 파라미터 방식으로 올립니다.
+🔴 화면에서 번인 상수를 다시 쓰지 마세요.
+
 ---
 
 ## DB 는 이미 있는 것을 쓰세요
@@ -138,14 +146,14 @@ rows = fetch_all(f'SELECT * FROM {schema}.purchases WHERE as_of = %s', (as_of,))
 | `plans` | `list[Plan]` | 필수 | 오늘 낸 안들. 비면 화면이 «안이 없다» 고 적는다 |
 | `plans_note` | `Note` | 필수 | 안이 왜 이 개수인가 |
 | `committed` | `Table` | 필수 | 승인을 거친 뒤에 생기는 확정 매입 |
-| `committed_note` | `Note` | 필수 | 승인 전에는 표가 빈다는 안내 |
+| `committed_note` | `Note` | 필수 | 어떤 줄을 봤나 — 기준일까지 줄 수 · 도착일을 못 맞춘 줄 · 다른 걷기라 뺀 줄 |
 | `source` | `Source` | 필수 | 예시값인지 실제 값인지 |
 
 ### `Plan` — 매입안 하나.
 
 | 칸 | 타입 | 필수 | 무엇 |
 |---|---|---|---|
-| `key` | `str` | 필수 | 보수 · 기본 · 공격 |
+| `key` | `str` | 필수 | 품목 · 안 이름 (예: 배추 · 보수) |
 | `coverage` | `str` | 필수 | 며칠치인가 |
 | `knob` | `str` | 필수 | 무엇으로 조절한 안인가 |
 | `qty_kg` | `float` | 필수 | 사는 양 (kg) |
@@ -158,8 +166,11 @@ rows = fetch_all(f'SELECT * FROM {schema}.purchases WHERE as_of = %s', (as_of,))
 | `payments` | `Table` | 필수 | 언제 얼마 내나 |
 | `reasons` | `list[Reason]` | 필수 | 이 안을 왜 냈나. 여섯 갈래를 다 채운다 |
 | `risks` | `list[str]` | 필수 | 걸리는 것. 비어 있으면 안 적는다 |
-| `pending` | `bool` | 필수 | 아직 사람이 안 고른 안인가 |
+| `pending` | `bool` | 필수 | 이 안의 요청(품목·날)에 아직 결정이 없나. 형제 안이 결정되면 거짓이다 |
 | `approved` | `bool` | 선택 | 이미 승인된 안인가 |
+| `state` | `str` | 선택 | 이 안이 실제로 어느 상태인가 — 후보 · 승인됨 · 매입 기록됨 · 반려. 🔴 낱말과 가르는 규칙의 주인은 `app/api/plan_state.py` 하나다 (대시보드도 같은 것을 쓴다). 화면이 이 넷 밖의 말을 만들지 않는다. |
+| `request_id` | `str &#124; None` | 선택 | 이 안을 낸 실행의 업무 키. 못 읽으면 None 이고 지어내지 않는다 |
+| `history_run_id` | `str &#124; None` | 선택 | 이 안을 낸 실행 이력 행 id(master_agent_runs.run_id). 못 읽으면 None |
 | `sim_run_id` | `str &#124; None` | 선택 | 어느 걷기의 실행인가. None 이면 걷기 밖(손 실행·축이 생기기 전)이다 |
 
 ### `Reason` — 이 안을 왜 냈나 — 한 줄.
