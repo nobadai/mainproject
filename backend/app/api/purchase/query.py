@@ -86,7 +86,9 @@ _EMPTY_COMMITTED = "아직 확정된 매입이 없습니다 — 안이 승인되
 #  DB 읽기
 # ══════════════════════════════════════════════════════════════════════════
 
-def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
+def _read(
+    as_of: date, *, window_days: int | None = None, sim_run_id: str | None = None
+) -> dict[str, Any]:
     """저장된 실행과 확정 매입을 읽는다. **SELECT 뿐이다.**
 
     🔴 **축(`sim_run_id`)으로 여기서 거르지 않는다.** 칸을 읽어 오기만 하고 고르는 것은
@@ -96,6 +98,13 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
            WHERE 로 걸러 오면 뺀 수를 셀 수 없고, 그러면 조용히 없애는 것이 된다
         ② 검사가 이 함수를 대신 세워 상황을 주입한다. WHERE 에 두면 그 주입이
            필터를 건너뛰어 **축이 도는지를 못 잰다** (규칙 8)
+
+    🔵 **예외 하나 — 도착일 조회(``arrivals``)만 축을 SQL 에 건다** (2026-09-17).
+    ① 은 그 조회에 해당이 없다 — 건수를 안 세고 도착일을 찾아 오기만 한다. ② 는
+    ``_arrival_index`` 의 파이썬 축 필터를 **그대로 두어** 지킨다. ``sim_run_id=None``
+    이면 지금까지처럼 안 건다. 이유는 실측 — 그 조회가 모든 걷기의 시나리오를 끌어와
+    (REH-0914 08-31 · 13,220행 · 45.6MB) 한 판 ``1,285ms`` 중 ``1,150ms`` 를 먹었고,
+    축을 걸면 ``164ms`` 에 **응답 본문 sha 가 같다** (REH · FINAL · V13 세 실행).
 
     🔵 **``window_days`` 는 도착일 조회(``arrivals``)의 날짜 창이다** (2026-09-16).
 
@@ -160,7 +169,12 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
     items = fetch_all(sql.SQL("SELECT item_id, item_name FROM {}").format(table("items")))
     #  확정 매입의 도착일은 원장에 없다. 그날 실행의 시나리오에서 **금액으로**
     #  맞춰 온다 — purchase_id 문자열을 쪼개면 이름 규칙에 묶인다.
-    all_dates = sorted({row["purchase_date"] for row in buys})
+    #  🔵 축을 주면 **그 축의 원장 날짜만** 건다. 도착일이 필요한 줄은 `_committed` 가
+    #     남기는 그 축의 줄뿐이다 — 다른 걷기만 산 날을 걸면 끌어온 행이 전부 버려진다.
+    all_dates = sorted({
+        row["purchase_date"] for row in buys
+        if sim_run_id is None or row["sim_run_id"] == sim_run_id
+    })
     #  🔵 날짜 창. `None` 이면 안 좁힌다 — 그때 `dates is all_dates` 라 아래 조회가
     #     지금까지와 **한 글자도 다르지 않다.**
     #
@@ -170,12 +184,15 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
     dates = all_dates if window_days is None else [
         d for d in all_dates if 0 <= (as_of - d).days < window_days
     ]
+    #  🔵 축 조건은 **줄 때만** 붙인다. `None` 을 `= %(sim)s` 에 넣으면 `NULL = NULL` 이라
+    #     0행이 되고, 그건 «안 거른다» 가 아니라 «다 버린다» 다.
+    axis = sql.SQL("") if sim_run_id is None else sql.SQL(" AND sim_run_id = %(sim)s")
     arrivals = fetch_all(
         sql.SQL(
             "SELECT as_of, item, sim_run_id, response_payload->'scenarios' AS scenarios"
-            " FROM {} WHERE as_of = ANY(%(dates)s) AND cycle = 'PROCUREMENT'"
-        ).format(table("master_agent_runs")),
-        {"dates": dates},
+            " FROM {} WHERE as_of = ANY(%(dates)s) AND cycle = 'PROCUREMENT'{}"
+        ).format(table("master_agent_runs"), axis),
+        {"dates": dates} if sim_run_id is None else {"dates": dates, "sim": sim_run_id},
     ) if dates else []
     return {
         "runs": runs,
@@ -186,6 +203,8 @@ def _read(as_of: date, *, window_days: int | None = None) -> dict[str, Any]:
         #  🔴 **「전부 읽었나」를 값으로 돌려준다.** 창을 좁히면 도착일이 비는데, 그
         #     공란이 «맞출 것이 없었다» 인지 «안 읽었다» 인지 여기서만 알 수 있다.
         #     읽는 쪽(`build`)이 다시 계산하면 두 벌이 되고, 한쪽만 고치는 날이 온다.
+        #  ⚠️ 「전부」는 **그 축의** 날짜다. 다른 걷기만 산 날을 안 건 것은 «안 읽었다» 가
+        #     아니다 — 그 줄은 `_committed` 가 어차피 뺀다.
         "arrivals_complete": dates == all_dates,
     }
 
@@ -653,7 +672,9 @@ def build(
     #    대신 「예시값」 딱지가 붙습니다. 예외 종류를 골라 잡으면 안 골라낸
     #    하나 때문에 화면이 통째로 죽습니다 (ML 이 forecast 에서 같은 판단).
     try:
-        data = _read(as_of, window_days=window_days)
+        #  🔴 축을 흘린다 — 안 흘리면 도착일 조회가 모든 걷기를 다시 끌어온다.
+        #     `tests/api/test_purchase_tab_axis_sql.py` 가 이 자리를 직접 잠근다.
+        data = _read(as_of, window_days=window_days, sim_run_id=sim_run_id)
     except Exception as error:  # noqa: BLE001  DB 미연결 · 표 없음 둘 다
         log.info("매입 값을 못 읽어 예시값을 씁니다: %s", error)
         return _demo(f"DB 를 못 읽었습니다 ({type(error).__name__})")
