@@ -83,7 +83,11 @@ export function DomainReportPreview({
   const [error, setError] = useState<string | null>(null);
 
   async function downloadPdf() {
-    if (exporting || !root.current) return;
+    if (exporting) return;
+    if (!root.current) {
+      setError("보고서를 다운로드하지 못했습니다. 다시 시도해 주세요.");
+      return;
+    }
     setExporting(true);
     setError(null);
     try {
