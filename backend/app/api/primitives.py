@@ -65,6 +65,16 @@ class Column(BaseModel):
     label: str
     align: Align = "left"
     mono: bool = Field(default=False, description="수치라 폭 고정 글꼴로 볼 것인가")
+    #: 칸 너비. CSS 값(`12%` · `120px`)이고 **표마다 따로 정한다.**
+    #:
+    #: 🔴 **칸 수가 표마다 다르므로 너비 규칙도 하나일 수 없다** (#812). 칸 넷인 표와
+    #:    일곱인 표에 같은 규칙을 걸면 한쪽은 반드시 성기거나 빽빽해진다. 종전에는
+    #:    화면 쪽에서 규칙 하나로 모든 표를 맞추려다 네 번 헛짚었다.
+    #:
+    #: ★ `None` 이면 **균등 배분**이다 — 값이 고만고만한 표는 그대로 두면 된다.
+    width: str | None = Field(
+        default=None, description="칸 너비(CSS). 없으면 균등 배분"
+    )
 
 
 class Table(BaseModel):
