@@ -93,7 +93,7 @@ function reasonText(r: { source: string; text: string }): string {
 const STATE_TONE: Record<string, Tone> = {
   //  결정이 안 난 안. 🔴 ~~기다리는 것 — 사람이 아직 할 일이 남았다~~ 낡았다 (2026-09-17).
   //  같은 요청에서 다른 안이 결정되면 「후보」여도 **기다리지 않는다** — 기다리는지는
-  //  `plan.pending` 이 말하고(초록 테두리), 이 색은 낱말만 따른다.
+  //  `plan.pending` 이 말하고(요청 틀의 초록 테두리 · `RequestFrame`), 이 색은 낱말만 따른다.
   후보: "warn",
   //  결정이 났다
   승인됨: "good",
@@ -160,20 +160,117 @@ function PlanState({ plan }: { plan: Plan }) {
   return <Pill text={plan.state} tone={STATE_TONE[plan.state] ?? "neutral"} />;
 }
 
+/**
+ * 요청(품목·날) 하나 — 틀 하나에 담을 안 1~3개.
+ *
+ * `item` 은 안 이름 앞자리다. 🔴 매입 `Plan` 에 품목 칸이 없다 — API 가 `key` 를
+ * 「품목 · 안 이름」으로 만들고(`query._plan`), 대시보드 서버(`plan_state.plan_item`)와
+ * 말로 한 승인(`MasterConsole.planItem`)도 같은 자리를 쪼개 읽는다.
+ */
+type RequestGroup = { key: string; item: string; pending: boolean; plans: Plan[] };
+
+const PLAN_KEY_SEP = " · ";
+
+/**
+ * 「배추 · 보수」 → `{ item: "배추", label: "보수" }`. **화면 글자를 가를 때만** 쓴다.
+ *
+ * 🔴 `plan.key` 자체는 그대로 둔다 — React 열쇠이고, 말로 한 승인(`MasterConsole`)이 그
+ *    모양 그대로 읽는다. 걷는 것은 카드 제목의 **글자**뿐이다.
+ * ★ 첫 「 · 」 에서 가른다 — `MasterConsole.planItem` · `planLabel` 과 같은 규칙이다.
+ *   🟢 품목 · 안 이름에 「 · 」 가 든 경우가 없다 (2026-09-17 18:03 KST · DB 읽기 전용 · 안
+ *   전수 REH-0914 684 · FINAL-0918 707 · V13 231 — 품목은 배추 · 무 · 양파, 안 이름은
+ *   보수 · 기본 · 공격뿐). 계약 품목(`contracts/core.py ITEMS`)도 그 셋이다.
+ * ⚠️ 가를 자리가 없으면 둘 다 열쇠 전체다 — 품목을 지어내지 않는다.
+ */
+function splitPlanKey(key: string): { item: string; label: string } {
+  const at = key.indexOf(PLAN_KEY_SEP);
+  return at < 0
+    ? { item: key, label: key }
+    : { item: key.slice(0, at), label: key.slice(at + PLAN_KEY_SEP.length) };
+}
+
+/**
+ * 안 목록을 **요청마다** 묶는다 (2026-09-17). 순서는 API 가 준 순서 — 요청이 처음 나온 자리.
+ *
+ * ★ 열쇠는 `request_id` 다. 비어 있으면(데모 · 못 읽은 실행) **품목**으로 묶는다 — API 가
+ *   품목마다 실행을 **하나만** 고르므로(`query._pick` 「품목별 최신 하나」) 이 화면에서
+ *   한 품목의 안은 언제나 한 실행 · 한 요청의 것이다. 두 열쇠가 같은 묶음을 만든다.
+ * 🔴 틀의 `pending` 은 안들 중 **하나라도** 기다리면 참이다. API 가 `pending` 을 요청
+ *    단위로 싣으므로(`query._plan`) 한 틀 안에서 값이 갈리는 일은 없다 — 갈리는 날이 와도
+ *    기다리는 것을 틀에서 숨기지 않으려는 쪽으로 둔다.
+ */
+function groupByRequest(plans: Plan[]): RequestGroup[] {
+  const groups = new Map<string, RequestGroup>();
+  for (const plan of plans) {
+    const { item } = splitPlanKey(plan.key);
+    const key = plan.request_id ?? `품목:${item}`;
+    const group = groups.get(key) ?? { key, item, pending: false, plans: [] };
+    group.plans.push(plan);
+    group.pending ||= plan.pending;
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * 요청 틀. **테두리는 여기 한 번** — 요청에 결정이 없을 때만 초록이다 (2026-09-17).
+ *
+ * 🔴 전에는 안 카드마다 `plan.pending` 으로 테두리를 켰다. 요청 단위 `pending` 이 선 뒤로는
+ *    같은 요청의 카드 1~3장이 **같이** 켜지고 꺼져, 「기다리는 것이 몇 개인가」가 카드
+ *    수로 읽혔다 — 09-11 은 기다리는 요청이 둘(양파 · 무)인데 초록 카드가 다섯이다.
+ *
+ * 머리 낱말은 둘이다 — 「승인 대기」 · 「승인 완료」. 🔴 **새 낱말이 아니다** — 대시보드
+ * 배지(`api/dashboard/query.py` 「승인 대기 N건」 · 「오늘 승인 완료」)와 같은 말 · 같은 색이다.
+ * ★ 「대기 아님」이 곧 「승인」인 근거: 매입 API 는 **안 이름이 붙은 결정**만 결정으로
+ *   세고(`query.build` `decided`), DB CHECK `master_decisions_scenario_required` 가 안 이름을
+ *   `APPROVE` 에만 허락한다. 되돌린 승인(`REQUEST_CHANGE`)은 안 이름이 없어 다시 「승인 대기」다.
+ * ⚠️ 카드의 낱말(「후보」 · 「승인됨」 · 「매입 기록됨」)은 **그대로** 둔다 — 안마다 다르다
+ *    (한 요청에 승인된 안 하나와 후보 둘). 틀 머리는 요청의 말, 카드 배지는 안의 말이다.
+ * ⚠️ 통계 「승인 대기 N건」은 **안 단위 그대로**다 — 대시보드 배지가 마스터 파일에서 같은
+ *    수를 따로 센다. 여기서 요청 수로 바꾸면 두 화면의 수가 갈린다.
+ */
+function RequestFrame({ group }: { group: RequestGroup }) {
+  return (
+    <section
+      className="flex min-w-0 flex-col gap-3 rounded-2xl border p-3"
+      style={{
+        borderColor: group.pending ? "var(--color-t-good)" : "var(--color-hair)",
+        boxShadow: group.pending ? "0 0 0 1px var(--color-t-good)" : undefined,
+      }}
+    >
+      <header className="flex flex-wrap items-center gap-2 px-1">
+        <h2 className="m-0 text-[15px] font-semibold">{group.item}</h2>
+        <Pill
+          text={group.pending ? "승인 대기" : "승인 완료"}
+          tone={group.pending ? "warn" : "good"}
+        />
+      </header>
+      {/*
+        ★ `auto-fill` 이다 — `auto-fit` 이면 안이 하나뿐인 요청의 카드가 틀 너비 전체로
+          늘어나, 틀마다 카드 폭이 달라진다. 칸 폭을 틀끼리 맞춘다.
+      */}
+      <div className="grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(340px,1fr))]">
+        {group.plans.map((p) => (
+          <PlanCard key={p.key} plan={p} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function PlanCard({ plan }: { plan: Plan }) {
   return (
+    //  🔴 카드에는 테두리 색을 안 켠다 — 기다리는지는 요청 틀(`RequestFrame`)이 한 번만 말한다
     <article
       className="flex min-w-0 flex-col overflow-hidden rounded-xl border bg-panel"
-      style={{
-        borderColor: plan.pending ? "var(--color-t-good)" : "var(--color-hair)",
-        boxShadow: plan.pending ? "0 0 0 1px var(--color-t-good)" : undefined,
-      }}
+      style={{ borderColor: "var(--color-hair)" }}
     >
       <header
         className="flex flex-wrap items-center gap-2 border-b px-4 py-3"
         style={{ borderColor: "var(--color-hair-soft)" }}
       >
-        <strong className="text-[14px] font-semibold">{plan.key}</strong>
+        {/* 🔴 품목은 요청 틀 머리에 있다 — 카드 제목은 안 이름만 (`plan.key` 는 안 바꾼다) */}
+        <strong className="text-[14px] font-semibold">{splitPlanKey(plan.key).label}</strong>
         <Pill text={plan.knob} tone="info" />
         <PlanState plan={plan} />
         <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
@@ -289,9 +386,9 @@ export default function PurchasePage() {
       <SourceTag sources={[data.source]} />
       <StatRow items={data.stats} />
 
-      <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))]">
-        {data.plans.map((p) => (
-          <PlanCard key={p.key} plan={p} />
+      <div className="flex flex-col gap-4">
+        {groupByRequest(data.plans).map((g) => (
+          <RequestFrame key={g.key} group={g} />
         ))}
       </div>
       {/* ③ 안 목록 안내(`plans_note`)는 그리지 않는다 — 머리 주석 「안 그리는 것」 참조 */}
