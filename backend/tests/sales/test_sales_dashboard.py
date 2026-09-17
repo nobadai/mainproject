@@ -53,6 +53,11 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
     )
     monkeypatch.setattr(
         dashboard,
+        "load_today_confirmed_sales",
+        lambda **_: [_confirmed_sale("SALE-002", AS_OF, date(2026, 1, 3))],
+    )
+    monkeypatch.setattr(
+        dashboard,
         "load_sales_receivables",
         lambda **_: [
             _receivable("AR-1", date(2025, 12, 20), Decimal(10), "OPEN"),
@@ -79,6 +84,8 @@ def test_sales_dashboard_aggregates_db_facts(monkeypatch):
     assert response.collection_summary["PARTIAL"].count == 2
     assert response.collection_summary["OPEN"].count == 7
     assert [sale.sale_id for sale in response.recent_sales] == ["SALE-002", "SALE-001"]
+    assert response.today_confirmed_sales[0].order_date == AS_OF
+    assert response.today_confirmed_sales[0].sale_date == date(2026, 1, 3)
     assert response.receivables[0].display_status == "연체"
     assert response.receivables[1].display_status == "수금 완료"
     assert response.receivables[1].d_day is None
@@ -92,6 +99,7 @@ def test_sales_dashboard_empty_unknown_sim_run(monkeypatch):
     monkeypatch.setattr(dashboard, "load_collection_summary", lambda **_: [])
     monkeypatch.setattr(dashboard, "load_item_summaries", lambda **_: [])
     monkeypatch.setattr(dashboard, "load_recent_sales", lambda **_: [])
+    monkeypatch.setattr(dashboard, "load_today_confirmed_sales", lambda **_: [])
     monkeypatch.setattr(dashboard, "load_sales_receivables", lambda **_: [])
 
     response = dashboard.get_sales_dashboard(sim_run_id="NO-SUCH-RUN", as_of=AS_OF)
@@ -100,6 +108,40 @@ def test_sales_dashboard_empty_unknown_sim_run(monkeypatch):
     assert response.meta.data_type is None
     assert response.summary.sales_count == 0
     assert response.items == []
+
+
+def test_today_confirmed_sales_uses_confirmation_date_not_delivery_date(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_fetch_all(query, params):
+        captured["query"] = str(query)
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(dashboard, "fetch_all", fake_fetch_all)
+
+    assert (
+        dashboard.load_today_confirmed_sales(
+            sim_run_id="SIM-20260914", as_of=date(2026, 9, 14)
+        )
+        == []
+    )
+
+    query = str(captured["query"])
+    assert "s.order_date = %s" in query
+    assert "s.sale_date <= %s" not in query
+    assert "s.order_status IN ('CONFIRMED', 'DELIVERED')" in query
+    assert captured["params"] == ["SIM-20260914", date(2026, 9, 14)]
+
+
+def test_today_confirmed_sales_preserves_future_delivery_date():
+    rows = [_confirmed_sale("SALE-1", date(2026, 9, 14), date(2026, 9, 17))]
+
+    confirmed = dashboard._today_confirmed_sales(rows)
+
+    assert confirmed[0].order_date == date(2026, 9, 14)
+    assert confirmed[0].sale_date == date(2026, 9, 17)
+    assert confirmed[0].order_status == "CONFIRMED"
 
 
 def _item(item_id: str, item_name: str, count: int, amount: str) -> dict[str, object]:
@@ -117,6 +159,7 @@ def _item(item_id: str, item_name: str, count: int, amount: str) -> dict[str, ob
 def _sale(sale_id: str, sale_date: date) -> dict[str, object]:
     return {
         "sale_id": sale_id,
+        "order_date": sale_date,
         "sale_date": sale_date,
         "customer_partner_id": "PARTNER-1",
         "partner_name": "거래처",
@@ -126,6 +169,22 @@ def _sale(sale_id: str, sale_date: date) -> dict[str, object]:
         "collection_due_date": AS_OF,
         "collection_status": "PARTIAL",
         "order_status": "DELIVERED",
+    }
+
+
+def _confirmed_sale(sale_id: str, order_date: date, sale_date: date) -> dict[str, object]:
+    return {
+        "sale_id": sale_id,
+        "order_date": order_date,
+        "sale_date": sale_date,
+        "customer_partner_id": "PARTNER-1",
+        "partner_name": "테스트거래처A",
+        "item_id": "ITEM-BAECHU",
+        "item_name": "배추",
+        "quantity_kg": Decimal(500),
+        "unit_price_krw_per_kg": Decimal(1200),
+        "line_amount_krw": Decimal(600000),
+        "order_status": "CONFIRMED",
     }
 
 
