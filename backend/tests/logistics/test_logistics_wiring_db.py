@@ -374,7 +374,7 @@ def test_06_놓아준_예약은_품목_가용으로_돌아온다(conn: psycopg.C
     _예약(conn, "RSV-1", "300")
     assert _품목가용(_스냅샷(conn)) == Decimal(400)
 
-    outbound.release_reservation(conn, reservation_id="RSV-1")
+    outbound.release_reservation(conn, reservation_id="RSV-1", released_as_of=AS_OF)
 
     assert _품목가용(_스냅샷(conn)) == Decimal(700) == _가용(conn)
 
