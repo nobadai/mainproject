@@ -81,6 +81,10 @@ _KNOB = {
 #:                              (마스터 통보 「백필 승인은 사람 승인이 아닙니다」)
 _EMPTY_COMMITTED = "아직 확정된 매입이 없습니다 — 안이 승인되면 여기에 생깁니다"
 
+#: 한 번에 사는 안의 빈 지급 표. 예시값도 같은 문장을 쓴다 — 두 곳에 적으면 한쪽만
+#: 낡는다 (전에는 둘 다 「지급일 규칙이 아직 미결」이었고 같이 틀렸다 · ``_payments`` 참조).
+_PAY_EMPTY_SINGLE = "한 번에 사는 안이라 지급 계획을 따로 만들지 않습니다"
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  DB 읽기
@@ -376,8 +380,18 @@ def _payments(scenario: dict[str, Any]) -> Table:
         split_plan 2회차   228건   payment_schedule 배열     ← 228 = 228
 
     ⚠️ 그래서 **빈 표가 흔한 것이 정상**이다. 한 번에 사는 안은 지급이 한 건이라
-    따로 계획을 만들지 않는다. 없는 것을 매입일로 메우지 않는다 (규칙 3) —
-    지급일 규칙(``purchase_payment_days`` · N5)이 아직 미결이라 더 그렇다.
+    따로 계획을 만들지 않는다 (``package_scenarios.build_payment_schedule``).
+    없는 것을 매입일로 메우지 않는다 (규칙 3).
+
+    🔴 ~~지급일 규칙(N5)이 아직 미결이라 더 그렇다~~ — **낡았다** (2026-09-17 정정).
+    재무가 N5=0 을 `2026-09-10` 에 확정했고, 안을 낸 실행은 전부 그 값을 받았다
+    (REH-0914 378/378 · FINAL-0918 505/505). 그런데도 1회차 줄을 안 만드는 이유는
+    **두 벌**이다 — 만들면 ``split_plan[].amount_krw`` 와 같은 값이 한 번 더 나간다.
+    빈 표 문구도 그래서 「미결」이 아니라 「한 번에 사는 안」을 말한다.
+
+    ⚠️ **나눠 사는 안인데 계획이 없는 경우는 다른 문장이다.** 에이전트는 N5 를 못
+    받았을 때도 계획을 안 만든다. 그 자리에 「한 번에 사는 안」을 적으면 거짓이고,
+    원인을 짐작해 적는 것도 짓는 것이라 **실리지 않았다는 사실만** 적는다.
 
     ``basis`` · ``amount_max_krw`` 는 안 싣는다. 앞은 내부 어휘이고 뒤는 **재무
     STRESS 금액**이라, 지급 표에 두면 실제로 낼 돈으로 읽힌다.
@@ -394,7 +408,12 @@ def _payments(scenario: dict[str, Any]) -> Table:
     return Table(
         columns=_PAY_COLS,
         rows=rows,
-        empty_text="이 실행에는 지급 계획이 없습니다 — 지급일 규칙이 아직 미결입니다",
+        #  🔴 N5 값이나 사는 날을 문장에 넣지 않는다 — 회차 표에 이미 있는 사실이다.
+        empty_text=(
+            _PAY_EMPTY_SINGLE
+            if len(scenario.get("split_plan") or []) <= 1
+            else "나눠 사는 안인데 지급 계획이 실리지 않았습니다"
+        ),
     )
 
 
@@ -597,7 +616,7 @@ def _demo_plan(label: str, coverage: str, qty: float, amount: int, cap: int) -> 
             {"leg": 1, "buy": "2026-01-06", "qty": f"{qty:,.0f} kg", "arrive": "2026-01-08"},
         ]),
         payments=Table(columns=_PAY_COLS, rows=[],
-                       empty_text="예시값입니다 — 지급일 규칙이 아직 미결입니다"),
+                       empty_text=f"예시값입니다 — {_PAY_EMPTY_SINGLE}"),
         reasons=list(_DEMO_REASONS), risks=list(_DEMO_RISKS), pending=True,
     )
 
@@ -754,10 +773,10 @@ def build(
             f" 다른 걷기의 줄 {committed_off_axis}개는 뺐습니다 —"
             f" 지금 보는 것은 {sim_run_id} 입니다."
         )
-    if committed.rows:
-        committed_text += (
-            " ⚠️ 지급일이 매입일과 같게 적재돼 있습니다 — 지급일 규칙이 아직 미결입니다."
-        )
+    #  🔴 ~~「⚠️ 지급일이 매입일과 같게 적재돼 있습니다 — 지급일 규칙이 아직 미결입니다」~~
+    #     **걷었다** (2026-09-17). 지급일이 매입일과 같은 것은 경고할 일이 아니라 **확정값
+    #     N5=0 의 결과**다 (재무 확정 2026-09-10). 「미결」이 거짓이었고, 줄이 있으면 무조건
+    #     붙어 원장 값과 상관없이 같은 말을 했다. 지급일은 표의 「지급」 칸이 그대로 보인다.
 
     return PurchaseTab(
         stats=[
@@ -765,7 +784,10 @@ def build(
                  detail=f"{as_of.isoformat()} · 실행 {len(runs)}건 중 고른 {len(chosen)}건",
                  raw=len(plans)),
             Stat(label="승인 대기", value=str(pending), unit="건",
-                 detail="사람이 고르면 확정 매입이 생깁니다",
+                 #  🔴 «사람이» 라고 쓰지 않는다 — 걷기 구간은 AUTO-BACKFILL 로 승인된다
+                 #     (`schema.PurchaseTab.committed` 주석 · 마스터 통보 2026-09-10).
+                 #     빈 표 문구(`_EMPTY_COMMITTED`)와 같은 말로 맞춘다.
+                 detail="안이 승인되면 확정 매입이 생깁니다",
                  tone="warn" if pending else "neutral", raw=pending),
             Stat(label="이번 주 확정 매입액", value=f"{week_amount:,}", unit="원",
                  detail=f"{week_start.isoformat()} ~ {as_of.isoformat()} · 승인분 줄 금액 합계",

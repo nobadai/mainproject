@@ -307,6 +307,65 @@ def test_지급_계획이_없으면_빈_표에_이유를_적는다(read):
     assert table.empty_text.strip()
 
 
+def test_빈_지급_표_사유는_회차_수를_따라_갈린다(read):
+    """🔴 빈 이유를 **바르게** 말한다 (2026-09-17 정정).
+
+    전에는 두 경우 모두 「지급일 규칙이 아직 미결」이었다. N5=0 은 09-10 에 확정됐고
+    실행 전부가 받았으니 그 문장은 거짓이었다. 1회차면 「한 번에 사는 안」이고,
+    나눠 사는데 계획이 없으면 **그 사실만** 적는다 — 원인을 짐작해 짓지 않는다.
+
+    ★ 규칙 8 — 문장을 상수와 대 보지 않는다. **회차 수를 바꿔** 사유가 따라 갈리는지 본다.
+    """
+    두_회차 = [
+        {"seq": 1, "date": "2026-01-06", "qty_kg": 700, "amount_krw": 647500,
+         "expected_arrival_date": "2026-01-08"},
+        {"seq": 2, "date": "2026-01-09", "qty_kg": 735, "amount_krw": 679875,
+         "expected_arrival_date": "2026-01-12"},
+    ]
+    read(_data(runs=[_run("REQ-A", _scenario("보수"), _scenario("기본", split_plan=두_회차))]))
+    한번, 나눠 = (plan.payments for plan in tab.build(AS_OF).plans)
+
+    assert 한번.rows == [] and 나눠.rows == []
+    assert "한 번에 사는 안" in 한번.empty_text
+    assert "한 번에 사는 안" not in 나눠.empty_text
+    for text in (한번.empty_text, 나눠.empty_text):
+        assert "미결" not in text
+        #  🔴 N5 값이나 사는 날을 문장에 지어 넣지 않는다 — 회차 표에 있는 사실이다
+        assert "N5" not in text and "2026-" not in text
+
+
+def test_확정_매입_안내에_지급일_미결_경고를_안_붙인다(read):
+    """🔴 「지급일이 매입일과 같게 적재돼 있습니다 — 지급일 규칙이 아직 미결」을 걷었다.
+
+    지급일이 매입일과 같은 것은 확정값 N5=0 의 결과다. 그 문장은 줄이 **있기만 하면**
+    붙어 원장 값과 상관없이 같은 말을 했다 — 그래서 줄이 있는 날을 주입해 본다
+    (줄이 없으면 전에도 안 붙었으므로 빈 원장으로는 못 잰다).
+    """
+    buy = {
+        "purchase_id": "PUR-A", "purchase_date": AS_OF, "payment_due_date": AS_OF,
+        "settlement_status": "OPEN", "sim_run_id": "SIM-BURNIN-202512",
+        "item_id": "ITEM-BAECHU", "grade": "특", "quantity_kg": 1435,
+        "unit_price_krw_per_kg": 925, "line_amount_krw": 1327375,
+    }
+    read(_data(buys=[buy]))
+    result = tab.build(AS_OF)
+
+    assert result.committed.rows, "줄이 있어야 이 검사가 무엇을 잰다"
+    assert "미결" not in result.committed_note.text
+    assert "매입일과 같게" not in result.committed_note.text
+
+
+def test_승인_대기_설명에_사람이라고_쓰지_않는다(read):
+    """🔴 걷기 구간은 AUTO-BACKFILL 로 승인된다 — «사람이 고르면» 은 거짓이 된다.
+
+    같은 파일이 확정 매입 표 제목에서 이미 그 말을 걷었다 (`schema.PurchaseTab.committed`).
+    """
+    read(_data())
+    detail = next(s for s in tab.build(AS_OF).stats if s.label == "승인 대기").detail
+
+    assert detail and "사람" not in detail
+
+
 def test_줄_금액은_원장_합계가_아니라_줄_금액이다(read):
     """레슨 ③ — ``purchases`` 와 ``purchase_items`` 를 조인하면 합계가 줄마다 반복된다.
 
