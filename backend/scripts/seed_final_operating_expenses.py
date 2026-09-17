@@ -43,6 +43,18 @@ from app.finance.expenses import create_expense
 #:
 #: ★ 지급 예정일은 **원문 그대로** 적는다. 5월만 11일인 것은 달력 사정이고, 규칙으로
 #:   바꿔 계산하면 그 사정이 사라진다.
+#:
+#: ★ **`warehouse_base_cost` 의 날짜 정책.** 셋이 서로 다른 사실이라 한 칸에 모으지 않는다.
+#:
+#: ```text
+#: expense_date   해당 월 1일        그 달에 **발생한** 의무
+#: due_date       합의 지급 예정일    **나가기로 한** 날 (아래 목록)
+#: paid_date      실제 settle 된 걷기 날짜   **실제로 나간** 날 — 이 스크립트가 적지 않는다
+#: ```
+#:
+#: 🔴 `paid_date` 는 여기서 비운다(`create_expense` 계약상 NULL). 지급은 걷기가
+#:    `settle_due_expenses()` 로 하고 그날을 적는다 — seed 가 미리 적으면 나가지도 않은
+#:    돈이 나간 것으로 남는다.
 DUE_DATES = (
     date(2026, 1, 10),
     date(2026, 2, 10),
@@ -59,14 +71,27 @@ EXPECTED_COUNT = len(DUE_DATES)
 EXPECTED_TOTAL = MONTHLY_KRW * EXPECTED_COUNT  # 34,695,000
 CATEGORY = "OTHER"
 EVIDENCE_ID = "EV-SRC-LOGI-PERSONA"
-NOTE = "창고 임대·기본운영비"
+#: 비용 한 줄이 **무엇에서 나온 값인지**를 원장에 같이 적는다.
+#:
+#: 🔴 `3,855,000원/월` 을 claim 으로 직접 가진 Evidence row 는 현재 DB 에 **없다.**
+#:    그래서 근거는 존재하는 `EV-SRC-LOGI-PERSONA` 를 쓰고, 어느 문서의 어느 항목인지는
+#:    이 `note` 가 진다. 없는 Evidence 를 새로 만들어 근거처럼 세우지 않는다 — 그러면
+#:    원장에는 근거가 있는 것처럼 보이고 실제로는 아무도 확인한 적이 없는 값이 된다.
+NOTE = (
+    "창고 임대·기본운영비.\n"
+    "Logistics Persona v0.5.2 §10.2 warehouse_base_cost 기준.\n"
+    "월 3,855,000원 Simulation 고정값."
+)
 
 
 def _expense_date(due: date) -> date:
-    """비용이 **발생한** 달의 1일.
+    """비용이 **발생한** 달의 1일 — `warehouse_base_cost` 의 발생일 정책.
 
-    ★ 발생과 지급은 다른 사실이다. 임대료는 그 달에 발생하고 10일에 나간다 — 둘을 같은
-      날짜로 적으면 미래 투영이 «이번 달 의무» 를 못 본다.
+    ★ 발생과 지급은 다른 사실이다. 임대료는 그 달에 발생하고 지급 예정일에 나간다 —
+      둘을 같은 날짜로 적으면 미래 투영이 «이번 달 의무» 를 못 본다.
+
+    ★ 지급 예정일이 5월만 11일이어도 발생일은 5월 1일이다. 발생은 달의 사실이고,
+      지급일이 주말·공휴일로 밀린 것은 **지급 쪽 사정**이다.
     """
     return due.replace(day=1)
 
@@ -148,6 +173,7 @@ def main() -> int:
     print(f"월 금액      {MONTHLY_KRW:,} KRW")
     print(f"건수 / 총액   {EXPECTED_COUNT} / {EXPECTED_TOTAL:,} KRW")
     print(f"근거         {EVIDENCE_ID}")
+    print("세부 근거     " + NOTE.replace("\n", "\n             "))
     print()
 
     with get_connection() as conn:
