@@ -223,8 +223,15 @@ def build(as_of: date) -> DashboardTab:
                  tone="info", raw=cabbage.predicted),
             *([s] if (s := _buffer_stat(fi)) is not None else []),
             _현재고(lg),
+            #  🔴 **상세는 값과 같은 것을 센다** (2026-09-18). 전에는 그날 안 **전부**의 이름과
+            #     수를 붙여, 값 1 옆에 「양파 · 공격, 배추 · 보수, … · 5안」이 섰다 — 값은 대기인
+            #     안만 세는데(`_pending`) 상세는 다른 것을 셌다 (REH-0914 08-31).
+            #  ★ 「N안 중 M건 대기」 — M 이 곧 값이다. 대기인 안 이름만 적는 쪽도 쟀는데
+            #    카드에서 두 줄이 되고(최장 50글자 · 09-10), 대기 0 인 날(안이 선 146일 중 92일)에
+            #    따로 쓸 말이 필요했다. 안 이름은 아래 매입 표가 상태와 함께 이미 보인다.
+            #  ⚠️ 값(`pending`)은 안 건드린다 — 배지 「승인 대기 N건」과 같은 수다.
             Stat(label="매입 승인 대기", value=str(pending), unit="건",
-                 detail=(", ".join(p.key for p in pu.plans) + f" · {len(pu.plans)}안"
+                 detail=(f"{len(pu.plans)}안 중 {pending}건 대기"
                          if pu.plans else "오늘 낸 안 없음"),
                  tone=("warn" if pending else "good"), raw=pending),
             sl.stats[0],
