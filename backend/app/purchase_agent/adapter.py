@@ -39,10 +39,13 @@ from app.purchase_agent.llm.split_allocation import ROLE as SPLIT_ROLE
 from app.purchase_agent.nodes.classify_situation import (
     SplitEntryCap,
     compute_ci_width,
+    compute_rise_rate_2w,
     coverage_by_label,
     estimate_daily_demand,
     is_gate_excluded,
+    judge_sustained_rise,
     split_entry_cap,
+    sustained_rise_sentence,
     volume_gate_holds,
 )
 from app.purchase_agent.quotes import QuoteSource, observed_at, quote_block_reason
@@ -1095,6 +1098,10 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
     )
     # 기준값도 ①과 같은 함수로 뽑는다 — 고정 임계가 아니라 **도착일 창고 여유**다 (`#308`).
     arrival_cap = split_entry_cap(state, constraints)
+    # 가격 경로가 보는 두 값 — ①·④ 와 **같은 함수**로 다시 구한다 (위 ``ci_width`` 와 같은 이유).
+    rise_rate = compute_rise_rate_2w(state["forecast"], judgment_day)
+    rise_threshold = constraints["triggers"]["pre_purchase_rise_rate"]
+    trend = judge_sustained_rise(state["forecast"], constraints)
 
     def ref(kind: str) -> tuple[str, ...]:
         return (f"{item}-{kind}-{as_of}",)
@@ -1157,6 +1164,25 @@ def build_evidences(state: Mapping[str, Any], payload: Mapping[str, Any]) -> tup
             #   여유를 못 받은 날에 *"미달"* 이라고 쓰면 판정하지 않은 것이 판정한 것으로
             #   읽히고, 읽는 사람은 그날 축이 왜 닫혔는지 되물을 수 없다.
             evidence_detail=_volume_gate_sentence(estimated_total_kg, arrival_cap),
+        ),
+        Evidence(
+            claim="allowed_axes",
+            source="tool_calc",
+            # **네 번째 게이트 — 가격 경로의 상승률 · 궤적** (2026-09-17). 전에는 이 게이트의
+            # 근거가 따로 없어, 안정인 날 timing 이 닫혀도 «상승률이 모자랐나 · 예측이
+            # 내려갔나 · 판정을 못 했나» 를 기록에서 가를 수 없었다.
+            # 🔴 stable 여부는 위 CI 근거가 말한다 — 여기서 겹쳐 적지 않는다.
+            ref_ids=ref("TREND"),
+            value=round(rise_rate, 6),
+            unit="ratio",
+            evidence_grade="SIM_FIXED",
+            evidence_detail=(
+                f"D+{judgment_day} 예측 상승률 {rise_rate:+.1%} "
+                f"{_relation(rise_rate, rise_threshold, '>=')} 임계 {rise_threshold:.0%} · "
+                + sustained_rise_sentence(
+                    trend.verdict, trend.withheld_reason, trend.first_decline
+                )
+            ),
         ),
         Evidence(
             claim="allowed_axes",

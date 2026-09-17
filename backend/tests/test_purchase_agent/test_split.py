@@ -84,9 +84,14 @@ def _staged(item: str = ITEM, as_of: date = RISING) -> dict:
 
 
 def _flatten_trend(state: dict) -> None:
-    """지속 상승 궤적을 깬다 — 궤적 가지를 끄고 수량 가지만 남길 때 쓴다."""
+    """지속 상승 궤적을 깬다 — 궤적 가지를 끄고 수량 가지만 남길 때 쓴다.
+
+    🔴 **보합이 아니라 실제 하락을 넣는다** (2026-09-17 정의 교체). 전에는 D+2 를 D+1 과
+      **같게** 만들어 엄격 증가를 깼는데, 지금 정의는 보합을 허용해 그 입력이 여전히
+      지속 상승이다. 1 만 낮춰도 «실제 하락» 이 선다.
+    """
     daily = deepcopy(state["forecast"]["daily"])
-    daily[1]["predicted"] = daily[0]["predicted"]  # 단조 증가가 아니게 된다
+    daily[1]["predicted"] = daily[0]["predicted"] - 1  # D+1 → D+2 실제 하락
     state["forecast"] = {**state["forecast"], "daily": daily}
 
 
