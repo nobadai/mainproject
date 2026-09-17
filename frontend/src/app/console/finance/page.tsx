@@ -65,13 +65,9 @@ import {
   verdictText,
 } from "./user_text";
 
-type Tab = "overview" | "cash" | "receivables" | "payables" | "expenses" | "loans" | "runs";
+type Tab = "overview" | "cash" | "receivables" | "payables" | "expenses" | "credit" | "loans" | "runs";
 const TABS: { key: Tab; label: string }[] = [
-  { key: "overview", label: "재무 현황" },
-  { key: "cash", label: "자금 흐름" },
-  { key: "receivables", label: "받을 돈" },
-  { key: "payables", label: "줄 돈" },
-  { key: "expenses", label: "비용" },
+  { key: "overview", label: "요약" }, { key: "cash", label: "현금흐름" }, { key: "receivables", label: "미수금" }, { key: "payables", label: "지급 예정" }, { key: "expenses", label: "운영비" }, { key: "credit", label: "여신" },
   { key: "loans", label: "차입" },
   { key: "runs", label: "실행 이력" },
 ];
@@ -90,7 +86,7 @@ export default function FinancePage() {
       <TechDetails summary={simRun ? "실행 선택 · 기술 상세" : "실행을 선택해 주세요"} open={!simRun}>
         <RunPicker asOf={asOf} />
       </TechDetails>
-      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} />}
+      {!simRun ? <NoRunChosen /> : <Body simRun={simRun} asOf={asOf} tab={tab} onTab={setTab} />}
     </div>
   );
 }
@@ -115,19 +111,20 @@ function latestClosing(rows: ClosingItem[] | undefined, asOf: string): ClosingIt
   return best;
 }
 
-function Body({ simRun, asOf, tab }: { simRun: string; asOf: string; tab: Tab }) {
-  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} />;
+function Body({ simRun, asOf, tab, onTab }: { simRun: string; asOf: string; tab: Tab; onTab: (tab: Tab) => void }) {
+  if (tab === "overview") return <Overview simRun={simRun} asOf={asOf} onTab={onTab} />;
   if (tab === "cash") return <Cashflow simRun={simRun} asOf={asOf} />;
   if (tab === "receivables") return <Receivables simRun={simRun} asOf={asOf} />;
   if (tab === "payables") return <Payables simRun={simRun} asOf={asOf} />;
   if (tab === "expenses") return <Expenses simRun={simRun} asOf={asOf} />;
+  if (tab === "credit") return <><Panel title="여신" subtitle="거래처별 신용 한도와 사용 상태를 확인하고 관리합니다."><p className="m-0 text-sm text-ink2">한도·현재 미수·가용 여신은 Finance read model 값을 그대로 표시합니다.</p></Panel><CreditPanel simRun={simRun} asOf={asOf} /><CreditLimitForm simRun={simRun} asOf={asOf} refreshKey={0} onSaved={() => undefined} /></>;
   if (tab === "loans") return <Loans simRun={simRun} asOf={asOf} />;
   return <Runs simRun={simRun} />;
 }
 
 /* ── 재무 현황 ─────────────────────────────────────────────────────────── */
 
-function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
+function Overview({ simRun, asOf, onTab }: { simRun: string; asOf: string; onTab: (tab: Tab) => void }) {
   const [creditRefresh, setCreditRefresh] = useState(0);
   const [cashRefresh, setCashRefresh] = useState(0);
   const summary = useConsoleData<FinanceSummaryResponse>(
@@ -172,8 +169,9 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
                 날짜를 가질 수 있고, 사용자는 같은 시점 숫자로 읽는다. 묶음을 나누고
                 각 묶음이 어느 날짜의 값인지 제목에 적는다. */}
             <BasisGroup title="재무 상태" basis={state.state_date}>
-              <Metric label="현재 현금" value={moneyWon(state.current_cash_krw)} />
+              <button type="button" aria-label="현금흐름 보기" onClick={() => onTab("cash")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="현재 현금 · 현금흐름 보기" value={moneyWon(state.current_cash_krw)} /></button>
               <Metric label="최소 운영현금" value={moneyWon(state.minimum_operating_cash_krw)} />
+              <button type="button" aria-label="차입 상세 보기" onClick={() => onTab("loans")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="차입잔액 · 상세 보기" value={moneyWon(state.current_debt_krw)} /></button>
             </BasisGroup>
             {closing ? (
               <BasisGroup title="일마감" basis={closing.close_date}>
@@ -214,16 +212,11 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
         ) : (
           <>
             <Metrics>
-              <Metric
-                label="받을 돈"
-                value={moneyWon(receivables.data?.summary.total_outstanding_krw)}
-              />
-              <Metric
-                label="그중 연체"
-                value={moneyWon(overdueReceivable(receivables.data))}
-                hint="만기가 지난 금액"
-              />
-              <Metric label="줄 돈" value={moneyWon(payables.data?.summary.total_outstanding_krw)} />
+              <button type="button" aria-label="미수금 상세 보기" onClick={() => onTab("receivables")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="받을 돈 · 상세 보기" value={moneyWon(receivables.data?.summary.total_outstanding_krw)} /></button>
+              <Metric label="1–7일 연체" value={moneyWon(receivables.data.summary.days_1_7_krw)} />
+              <Metric label="8–30일 연체" value={moneyWon(receivables.data.summary.days_8_30_krw)} />
+              <Metric label="30일 초과" value={moneyWon(receivables.data.summary.days_30_plus_krw)} />
+              <button type="button" aria-label="지급 예정 상세 보기" onClick={() => onTab("payables")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="지급 예정 · 상세 보기" value={moneyWon(payables.data?.summary.total_outstanding_krw)} /></button>
               <Metric label="그중 연체" value={moneyWon(payables.data?.summary.overdue_krw)} />
             </Metrics>
             <div className="mt-4 grid gap-5 sm:grid-cols-2">
@@ -271,24 +264,6 @@ function Overview({ simRun, asOf }: { simRun: string; asOf: string }) {
       <AgentCard state={latest} />
     </>
   );
-}
-
-/**
- * 연체된 받을 돈. **한 구간이 아니라 만기가 지난 구간 전부다.**
- *
- * ⚠️ 전에는 `1–7일` 한 칸만 «그중 연체» 로 적어, 8일 넘게 밀린 돈이 연체에서 빠졌다.
- *   합치는 것은 표시용이고, 구간 금액 자체는 백엔드가 나눈 값 그대로다.
- */
-function overdueReceivable(data: ReceivablesResponse | null): number | null {
-  if (!data) return null;
-  const parts = [
-    data.summary.days_1_7_krw,
-    data.summary.days_8_30_krw,
-    data.summary.days_30_plus_krw,
-  ].map(toNumber);
-  //  🔴 한 구간이라도 값이 없으면 합을 만들지 않는다 — 없는 것을 0 으로 읽지 않는다.
-  if (parts.some((value) => value === null)) return null;
-  return parts.reduce<number>((sum, value) => sum + (value ?? 0), 0);
 }
 
 /**

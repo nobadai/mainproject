@@ -32,6 +32,11 @@ function describe(run: ConsoleRun): string {
   return parts.join(" · ");
 }
 
+function modeLabel(run: ConsoleRun | null): string {
+  // run id 문자열(REH 등)에서 실행 성격을 추론하지 않는다. 저장된 run_type만 쓴다.
+  return run?.run_type ?? "PREVIEW · 실행 모드 미확인";
+}
+
 export function RunPicker({ asOf }: { asOf: string }) {
   const simRun = useSimRun();
   const state = useConsoleData<ConsoleRunsResponse>("runs", () => consoleRuns.list(), true);
@@ -51,7 +56,8 @@ export function RunPicker({ asOf }: { asOf: string }) {
       className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border bg-panel px-4 py-3 text-[11.5px]"
       style={{ borderColor: "var(--color-hair)" }}
     >
-      <Pill text={simRun ? "LIVE" : "NO RUN"} tone={simRun ? "good" : "sim"} />
+      <Pill text={simRun ? modeLabel(selected) : "NO RUN"} tone={simRun ? "sim" : "sim"} />
+      {simRun && !selected?.run_type && <span className="text-ink2">저장된 실행 모드가 없어 미리보기로 표시합니다.</span>}
       <span className="flex items-center gap-2">
         <b>sim_run_id</b>
         <select

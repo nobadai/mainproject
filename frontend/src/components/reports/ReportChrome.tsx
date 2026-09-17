@@ -14,6 +14,10 @@ export function ReportChrome({
   children: ReactNode;
 }) {
   const period = facts.start_date === facts.end_date ? facts.end_date : `${facts.start_date} ~ ${facts.end_date}`;
+  const availableStart = facts.available_start_date;
+  const availableEnd = facts.available_end_date;
+  const requestedAndAvailableDiffer = Boolean(availableStart && availableEnd && (availableStart !== facts.start_date || availableEnd !== facts.end_date));
+  const mode = facts.data_mode ? String(facts.data_mode) : "PREVIEW · 실행 모드 미확인";
   return (
     <article data-report-page className="report-page bg-white text-[#16241f] shadow-xl print:shadow-none">
       <div className="h-2 bg-[#0e2419]" />
@@ -22,10 +26,11 @@ export function ReportChrome({
         <div className="mt-2 flex items-end justify-between gap-5">
           <div><h2 className="m-0 text-2xl font-extrabold">{title}</h2><p className="m-0 mt-1 text-sm text-[#668076]">{subtitle}</p></div>
           <dl className="m-0 grid grid-cols-2 gap-x-5 gap-y-1 text-right text-[11px] text-[#587067]">
-            <dt>보고기간</dt><dd>{String(period ?? "—")}</dd><dt>기준일</dt><dd>{String(facts.as_of ?? "—")}</dd><dt>기준 실행</dt><dd>{String(facts.sim_run_id ?? "—")}</dd>
+            <dt>보고 기간</dt><dd>{String(period ?? "—")}</dd><dt>기준일 (as_of)</dt><dd>{String(facts.as_of ?? "—")}</dd><dt>기준 실행</dt><dd>{String(facts.sim_run_id ?? "—")}</dd><dt>데이터 모드</dt><dd>{mode}</dd>
           </dl>
         </div>
       </header>
+      {requestedAndAvailableDiffer && <div className="mx-10 mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900">요청 기간: {String(period)} · 사용 가능 데이터: {String(availableStart)} ~ {String(availableEnd)}. 데이터가 없는 기간은 보고서에 표시되지 않습니다.</div>}
       <main className="px-10 py-7">{children}</main>
       <footer className="mt-auto flex justify-between border-t border-[#dce7e1] px-10 py-3 text-[10px] text-[#71867d]">
         <span>기존 Domain read model 기준 · 업무 계산 없음</span><span>{page} / 4</span>

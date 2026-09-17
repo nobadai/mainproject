@@ -3,6 +3,7 @@
 from psycopg import sql
 from pydantic import BaseModel
 
+from app.contracts.core import ITEMS
 from app.sales.db import fetch_all, get_db_schema
 
 
@@ -23,8 +24,9 @@ def get_console_items() -> ConsoleItemsResponse:
         sql.SQL("""
             SELECT item_id, item_code, item_name, base_unit
             FROM {}.items
-            WHERE mvp_active
+            WHERE mvp_active AND item_name = ANY(%s)
             ORDER BY item_name, item_id
-        """).format(sql.Identifier(get_db_schema()))
+        """).format(sql.Identifier(get_db_schema())),
+        (list(ITEMS),),
     )
     return ConsoleItemsResponse(rows=[ConsoleItem.model_validate(row) for row in rows])

@@ -680,6 +680,33 @@ def test_finance_report_domain_action_returns_structured_facts_without_markdown(
     assert result.report_kind == "FINANCE"
 
 
+def test_finance_report_without_period_asks_before_generating(monkeypatch):
+    from app.master import ask_service
+
+    called = False
+
+    def report(**_kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(ask_service, "render_finance_chat_report", report)
+    result = run(
+        "재무 보고서 만들어줘",
+        intent_json(
+            action="DOMAIN_ACTION",
+            domain_action="FINANCE_REPORT_GENERATE",
+            slots={},
+            confidence="HIGH",
+        ),
+    )
+
+    assert result.outcome == "NEEDS_CLARIFICATION"
+    assert result.confirm_required is False
+    assert result.clarification == "어느 기간의 재무 보고서를 생성할까요?"
+    assert called is False
+
+
 def test_sales_report_domain_action_returns_structured_facts_without_markdown(monkeypatch):
     from datetime import date
 
@@ -1251,13 +1278,15 @@ def test_finance_report_facts_keep_null_operating_expense(monkeypatch):
     from app.master.report import render_finance_chat_report
 
     dump = lambda **kwargs: SimpleNamespace(model_dump=lambda **_kwargs: kwargs, **kwargs)
-    closing = dump(close_date="2026-09-01", operating_expense_cash_out_krw=None)
+    closing = dump(close_date=date(2026, 9, 1), operating_expense_cash_out_krw=None)
     monkeypatch.setattr(
         dashboard,
         "get_finance_dashboard",
         lambda **_kwargs: dump(states=[], recent_closings=[closing]),
     )
-    monkeypatch.setattr(dashboard, "get_finance_cashflow", lambda **_kwargs: dump())
+    monkeypatch.setattr(
+        dashboard, "get_finance_cashflow", lambda **_kwargs: dump(cashflow=[closing])
+    )
     empty_receivable = dump(
         total_outstanding_krw=0, days_1_7_krw=0, days_8_30_krw=0, days_30_plus_krw=0
     )
@@ -1285,6 +1314,56 @@ def test_finance_report_facts_keep_null_operating_expense(monkeypatch):
     )
     assert facts["kind"] == "FINANCE"
     assert facts["closings"][0]["operating_expense_cash_out_krw"] is None
+
+
+def test_finance_report_cash_trend_uses_full_requested_range(monkeypatch):
+    from datetime import date
+    from types import SimpleNamespace
+
+    from app.finance import (
+        console_credit,
+        console_expenses,
+        console_payables,
+        console_receivables,
+        dashboard,
+    )
+    from app.master.report import render_finance_chat_report
+
+    dump = lambda **kwargs: SimpleNamespace(model_dump=lambda **_kwargs: kwargs, **kwargs)
+    preview = dump(close_date=date(2026, 6, 12), base_net_cash_krw=12)
+    first = dump(close_date=date(2026, 1, 3), base_net_cash_krw=1)
+    last = dump(close_date=date(2026, 6, 12), base_net_cash_krw=12)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        dashboard,
+        "get_finance_dashboard",
+        lambda **_kwargs: dump(states=[], recent_closings=[preview]),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "get_finance_cashflow",
+        lambda **kwargs: (seen.update(kwargs) or dump(cashflow=[first, last])),
+    )
+    monkeypatch.setattr(
+        console_receivables, "get_console_receivables", lambda **_kwargs: dump(summary=dump())
+    )
+    monkeypatch.setattr(
+        console_payables, "get_console_payables", lambda **_kwargs: dump(summary=dump())
+    )
+    monkeypatch.setattr(
+        console_expenses, "get_console_expenses", lambda **_kwargs: dump(summary=dump(), rows=[])
+    )
+    monkeypatch.setattr(console_credit, "get_console_credit", lambda **_kwargs: dump(partners=[]))
+
+    facts = render_finance_chat_report(
+        sim_run_id="SIM-1",
+        as_of=date(2026, 6, 12),
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 6, 12),
+    )
+
+    assert seen == {"sim_run_id": "SIM-1", "as_of": date(2026, 6, 12), "days": 163}
+    assert [row["close_date"] for row in facts["closings"]] == [date(2026, 1, 3), date(2026, 6, 12)]
 
 
 def test_sales_report_facts_include_actual_confirmed_sales_only(monkeypatch):

@@ -233,6 +233,7 @@ export interface FinanceSummaryResponse {
     collection_cash_in_krw: Money;
     base_net_cash_krw: Money;
     loan_execution_krw: Money;
+    operating_expense_cash_out_krw: Money;
   };
   recent_closings: ClosingItem[];
 }

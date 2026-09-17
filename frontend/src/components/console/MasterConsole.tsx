@@ -14,6 +14,7 @@ import { DomainReadResult } from "@/components/console/DomainReadResult";
 import { SalesConversation } from "@/components/console/SalesConversation";
 import { Markdownish } from "@/components/console/ml/Markdownish";
 import { ApiError, ask, execute } from "@/lib/api";
+import { useSimRun } from "@/components/console/RunPicker";
 //  🔴 시연용 기준일 (`#431`). 시연이 끝나면 이 줄을 지우고 `AS_OF` 로 되돌린다.
 import { asOfSnapshot, serverAsOf, subscribeAsOf } from "@/lib/demo_as_of";
 import { formatKoreanDate, userErrorText } from "@/lib/procurementLabels";
@@ -102,6 +103,58 @@ type LlmTraceData = Pick<
   AskResponse,
   "intent" | "llm_status" | "llm_provider" | "llm_model" | "llm_attempts" | "llm_fallback_used"
 >;
+
+/** Browser-only chat state. Keep only what is needed to redraw a conversation after refresh. */
+const CHAT_STORAGE_KEY = "haetdeul.master.chat.v1";
+type ReportPeriodState = "idle" | "awaiting" | "custom";
+type PersistedTurn =
+  | Extract<Turn, { kind: "me" | "bot" | "domain" | "sales" | "error" }>;
+
+function persistedTurns(turns: Turn[]): PersistedTurn[] {
+  return turns.flatMap((turn): PersistedTurn[] => {
+    switch (turn.kind) {
+      case "me":
+      case "error":
+        return [turn];
+      case "bot":
+        return [{ kind: "bot", text: turn.text, markdown: turn.markdown, hideText: turn.hideText }];
+      case "domain":
+        // `result.data` is the structured report/read payload required for a restored card.
+        // Trace/provider details and the full ask response deliberately stay out of storage.
+        return [{ kind: "domain", result: turn.result }];
+      case "sales":
+        return [{ kind: "sales", asOf: turn.asOf, detail: { text: turn.detail.text, note: turn.detail.note } }];
+      default:
+        // Confirmations and procurement execution state must be obtained live, not resumed from storage.
+        return [];
+    }
+  });
+}
+
+function readChatSnapshot(): { turns: PersistedTurn[]; reportPeriod: ReportPeriodState; dateFrom: string; dateTo: string } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const snapshot: unknown = JSON.parse(localStorage.getItem(CHAT_STORAGE_KEY) ?? "null");
+    if (!snapshot || typeof snapshot !== "object") return null;
+    const value = snapshot as { turns?: unknown; reportPeriod?: unknown; dateFrom?: unknown; dateTo?: unknown };
+    const turns = Array.isArray(value.turns)
+      ? value.turns.filter((turn): turn is PersistedTurn =>
+          Boolean(turn && typeof turn === "object" && "kind" in turn && ["me", "bot", "domain", "sales", "error"].includes(String((turn as { kind?: unknown }).kind))),
+        )
+      : [];
+    const reportPeriod: ReportPeriodState = value.reportPeriod === "awaiting" || value.reportPeriod === "custom"
+      ? value.reportPeriod
+      : "idle";
+    return {
+      turns,
+      reportPeriod,
+      dateFrom: typeof value.dateFrom === "string" ? value.dateFrom : "",
+      dateTo: typeof value.dateTo === "string" ? value.dateTo : "",
+    };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * 판매가 답했는가. **구조화된 조회 답(`status.answers.sales`)으로 가른다** — 문장을 긁지 않는다.
@@ -209,10 +262,15 @@ export function MasterConsole({ session }: { session: Session }) {
   //  🔴 시연용 기준일 (`#431`). `ask` · `execute` 가 실제로 싣는 값과 같은 곳을 읽는다
   //     — 머리에 적힌 날짜와 서버에 보내는 날짜가 갈리면 안 된다.
   const asOf = useSyncExternalStore(subscribeAsOf, asOfSnapshot, serverAsOf);
+  const simRun = useSimRun();
   //  세션 판정(하이드레이션 · 로그인 리다이렉트)은 **셸이 이미 했다**
   //  (`app/console/layout.tsx`). 여기까지 왔으면 사람이 있다.
   const [tab, setTab] = useState<"master" | "runs">("master");
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [chatSnapshot] = useState(() => readChatSnapshot());
+  const [turns, setTurns] = useState<Turn[]>(() => chatSnapshot?.turns ?? []);
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriodState>(() => chatSnapshot?.reportPeriod ?? "idle");
+  const [reportDates, setReportDates] = useState(() => ({ from: chatSnapshot?.dateFrom ?? "", to: chatSnapshot?.dateTo ?? "" }));
+  const [resetOpen, setResetOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   // 🔴 분류가 못 돈 뒤 남은 잠금 시간(초). **연타가 한도를 더 깎는다** — 실측에서
@@ -253,6 +311,15 @@ export function MasterConsole({ session }: { session: Session }) {
   useEffect(() => {
     tail.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns]);
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({
+      turns: persistedTurns(turns),
+      reportPeriod,
+      dateFrom: reportDates.from,
+      dateTo: reportDates.to,
+    }));
+  }, [turns, reportDates, reportPeriod]);
 
   //  남은 초를 1초씩 깎는다. 0 이 되면 잠금이 풀린다 — 여기서 다시 보내지 않는다.
   useEffect(() => {
@@ -297,17 +364,30 @@ export function MasterConsole({ session }: { session: Session }) {
   }
 
   /** ① 발화문 분류. **확인이 필요하면 아무것도 실행하지 않는다.** */
-  async function send(text: string) {
+  async function send(text: string, context?: { dateFrom?: string; dateTo?: string }) {
     const utterance = text.trim();
     if (!utterance || locked) return;
+    setReportPeriod("idle");
+    setReportDates({ from: "", to: "" });
     setDraft("");
     push({ kind: "me", text: utterance });
     setBusy(true);
     try {
-      const res: AskResponse = await ask(utterance);
+      const res: AskResponse = await ask(utterance, { simRunId: simRun || undefined, dateFrom: context?.dateFrom, dateTo: context?.dateTo });
       //  분류가 못 돌았으면 연달아 누르지 못하게 몇 초 더 잠근다.
       if (classifyFailed(res)) setCooldown(FALLBACK_COOLDOWN_SEC);
-      if (res.confirm_required) {
+      const slots = res.intent.slots;
+      const awaitingReportPeriod =
+        res.outcome === "NEEDS_CLARIFICATION" &&
+        res.intent.domain_action === "FINANCE_REPORT_GENERATE" &&
+        !context?.dateFrom &&
+        !slots?.period &&
+        !slots?.start_date &&
+        !slots?.end_date;
+      if (awaitingReportPeriod) {
+        setReportPeriod("awaiting");
+        push({ kind: "bot", text: clarificationText(res, "어느 기간의 재무 보고서를 생성할까요?") });
+      } else if (res.confirm_required) {
         push({
           kind: "confirm",
           text: clarificationText(res, "진행할까요?"),
@@ -575,7 +655,7 @@ export function MasterConsole({ session }: { session: Session }) {
      * 못해 `overflow-y-auto` 가 안 걸린다.
      */
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
+      <header className="relative flex flex-wrap items-center gap-2 border-b border-line px-4 py-2.5">
         {(["master", "runs"] as const).map((k) => (
           <button
             key={k}
@@ -608,6 +688,8 @@ export function MasterConsole({ session }: { session: Session }) {
           ))}
         </span>
         <span className="ml-auto text-[11px] text-faint">기준일 {formatKoreanDate(asOf)}</span>
+        <button type="button" onClick={() => setResetOpen(true)} className="rounded-md border border-line px-2 py-1 text-[11px] text-muted transition hover:bg-sunk focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">대화 초기화</button>
+        {resetOpen && <div role="dialog" aria-modal="true" aria-label="대화 초기화 확인" className="absolute right-4 top-12 z-20 rounded-lg border border-line bg-surface p-3 text-xs shadow-lg"><p className="m-0">현재 대화내용을 모두 초기화할까요?<br />이 작업은 되돌릴 수 없습니다.</p><div className="mt-3 flex justify-end gap-2"><button type="button" onClick={() => setResetOpen(false)} className="rounded border border-line px-2 py-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">취소</button><button type="button" onClick={() => { setTurns([]); setReportPeriod("idle"); setReportDates({ from: "", to: "" }); setDraft(""); localStorage.removeItem(CHAT_STORAGE_KEY); setResetOpen(false); }} className="rounded bg-accent px-2 py-1 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">초기화</button></div></div>}
       </header>
 
         {isHistory ? (
@@ -618,6 +700,16 @@ export function MasterConsole({ session }: { session: Session }) {
           <>
             <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4">
               {turns.length === 0 && <Empty onPick={send} />}
+              {reportPeriod !== "idle" && (
+                <ReportControls
+                  mode={reportPeriod}
+                  onPreset={(preset) => void send(`${preset} 재무 보고서 만들어줘`)}
+                  onChooseCustom={() => setReportPeriod("custom")}
+                  dates={reportDates}
+                  onDatesChange={setReportDates}
+                  onCustomSubmit={(dateFrom, dateTo) => void send("재무 보고서 만들어줘", { dateFrom, dateTo })}
+                />
+              )}
 
               {turns.map((turn, i) => (
                 <TurnView
@@ -899,5 +991,56 @@ function Empty({ onPick }: { onPick: (text: string) => void }) {
         ))}
       </div>
     </div>
+  );
+}
+
+function ReportControls({
+  mode,
+  onPreset,
+  onChooseCustom,
+  dates,
+  onDatesChange,
+  onCustomSubmit,
+}: {
+  mode: Exclude<ReportPeriodState, "idle">;
+  onPreset: (preset: string) => void;
+  onChooseCustom: () => void;
+  dates: { from: string; to: string };
+  onDatesChange: (dates: { from: string; to: string }) => void;
+  onCustomSubmit: (dateFrom: string, dateTo: string) => void;
+}) {
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!dates.from || !dates.to) return setError("시작일과 종료일을 모두 선택해 주세요.");
+    if (dates.from > dates.to) return setError("종료일은 시작일 이후여야 합니다.");
+    setError("");
+    onCustomSubmit(dates.from, dates.to);
+  }
+
+  if (mode === "custom") {
+    return (
+      <section className="mt-5 rounded-lg border border-line bg-sunk p-3" aria-label="재무 보고서 기간 직접 선택">
+        <p className="m-0 text-sm font-semibold">보고 기간 직접 선택</p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <label className="text-xs font-medium text-muted">시작일<input type="date" value={dates.from} onChange={(e) => onDatesChange({ ...dates, from: e.target.value })} className="mt-1 block w-full rounded border border-line bg-surface p-2 text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" /></label>
+          <label className="text-xs font-medium text-muted">종료일<input type="date" value={dates.to} onChange={(e) => onDatesChange({ ...dates, to: e.target.value })} className="mt-1 block w-full rounded border border-line bg-surface p-2 text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" /></label>
+        </div>
+        {error && <p className="mb-0 mt-2 text-xs text-red-700" role="alert">{error}</p>}
+        <button type="button" onClick={submit} className="mt-3 rounded bg-accent px-3 py-2 text-xs font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">이 기간으로 보고서 생성</button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="mt-5 rounded-lg border border-line bg-sunk p-3" aria-label="재무 보고서 기간 선택">
+      <p className="m-0 text-sm font-semibold">어느 기간의 재무 보고서를 생성할까요?</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {["최근 7일", "최근 30일", "최근 3개월", "최근 1년"].map((label) => (
+          <button key={label} type="button" onClick={() => onPreset(label)} className="rounded border border-line bg-surface px-2 py-1 text-xs text-ink transition hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{label}</button>
+        ))}
+        <button type="button" onClick={onChooseCustom} className="rounded border border-line bg-surface px-2 py-1 text-xs text-ink transition hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">직접 선택</button>
+      </div>
+    </section>
   );
 }
