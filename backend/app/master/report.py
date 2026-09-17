@@ -1158,6 +1158,12 @@ def render_logistics_chat_report(
             {"date": day.isoformat(), "on_hand_qty_kg": float(series[day]) if known else None}
         )
 
+    #  ★ 공용 머리말(`ReportChrome`)이 «요청 기간 vs 실제 데이터 기간» 을 설명하는 칸.
+    #    🔴 **새로 재지 않는다** — 위 `trend` 가 이미 «열린 날만 값» 이라, 값이 있는 날의
+    #       처음과 끝이 그대로 실제 데이터 범위다. 값이 하나도 없으면 `None` 이고
+    #       그것도 사실이다 (0 일짜리 범위를 지어내지 않는다).
+    covered = [row["date"] for row in trend if row["on_hand_qty_kg"] is not None]
+
     capacity = inventory.capacity
     return {
         "kind": "LOGISTICS",
@@ -1165,6 +1171,13 @@ def render_logistics_chat_report(
         "as_of": as_of.isoformat(),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
+        "available_start_date": covered[0] if covered else None,
+        "available_end_date": covered[-1] if covered else None,
+        #: 🔴 **물류에는 권위 있는 «데이터 모드» 가 없다.** 재무는
+        #:    `dashboard.meta.data_type` 에서 오는데 물류 read model 에는 대응하는 칸이
+        #:    없다. 새 문자열을 지어내면 화면이 **근거 없는 설명**을 하게 되므로 `None`
+        #:    으로 둔다 — 공용 머리말이 그때 「실행 모드 미확인」으로 적는다.
+        "data_mode": None,
         #: ★ **기준일 Snapshot 인가 기간 발생 내역인가를 칸 이름으로 가른다.**
         #:   `summary` · `inventory` · `outbound` 는 `as_of` 상태이고,
         #:   `inbound.period_*` 와 `trend` 는 `start_date~end_date` 에 일어난 일이다.

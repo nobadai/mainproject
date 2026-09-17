@@ -376,6 +376,20 @@ def _period(intent: Intent, *, as_of: date) -> tuple[date, date]:
     raise _DomainClarification("기간을 확인해 주세요.")
 
 
+#: 화면이 **직접 고른 날짜 범위**(`date_from`/`date_to`)를 슬롯으로 받는 보고서.
+#:
+#: ★ **집합의 주인을 하나로 둔다.** 종전에는 `ask()` 안에 문자열 집합이 박혀 있어
+#:   보고서가 늘 때마다 그 자리를 찾아 고쳐야 했고, 실제로 물류가 빠져 화면에서 고른
+#:   기간이 물류 보고서에만 안 먹었다.
+#:
+#: ⚠️ **기간 누락 되묻기(`_has_report_period`)와는 다른 집합이다.** 그쪽은 아직
+#:    `FINANCE_REPORT_GENERATE` 한 곳에만 걸려 있고(판매도 빠져 있다), 공용 규칙으로
+#:    넓힐지는 별도 결정이라 여기서 같이 묶지 않는다.
+_REPORT_DATE_RANGE_ACTIONS = frozenset(
+    {"FINANCE_REPORT_GENERATE", "SALES_REPORT_GENERATE", "LOGISTICS_REPORT_GENERATE"}
+)
+
+
 def _has_report_period(intent: Intent) -> bool:
     """Report generation must not silently turn an omitted period into TODAY."""
     slots = _slots(intent)
@@ -1095,7 +1109,7 @@ def ask(
         if request.date_from > request.date_to:
             raise ValueError("시작일은 종료일보다 늦을 수 없습니다.")
         intent = result.intent
-        if intent.domain_action in {"FINANCE_REPORT_GENERATE", "SALES_REPORT_GENERATE"}:
+        if intent.domain_action in _REPORT_DATE_RANGE_ACTIONS:
             slots = _slots(intent).model_copy(update={
                 "start_date": request.date_from.isoformat(),
                 "end_date": request.date_to.isoformat(),
