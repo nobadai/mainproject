@@ -111,7 +111,7 @@ function Body({ simRun, asOf, tab, onTab }: { simRun: string; asOf: string; tab:
   if (tab === "receivables") return <Receivables simRun={simRun} asOf={asOf} />;
   if (tab === "payables") return <Payables simRun={simRun} asOf={asOf} />;
   if (tab === "expenses") return <Expenses simRun={simRun} asOf={asOf} />;
-  if (tab === "credit") return <><Panel title="여신" subtitle="거래처별 신용 한도와 사용 상태를 확인하고 관리합니다."><p className="m-0 text-[18px] text-ink2">한도·현재 미수·가용 여신은 Finance read model 값을 그대로 표시합니다.</p></Panel><CreditPanel simRun={simRun} asOf={asOf} /><CreditLimitForm simRun={simRun} asOf={asOf} refreshKey={0} onSaved={() => undefined} /></>;
+  if (tab === "credit") return <><Panel title="여신" ><p className="m-0 text-[18px] text-ink2">거래처별 신용 한도와 사용 상태를 확인하고 관리합니다.</p></Panel><CreditPanel simRun={simRun} asOf={asOf} /><CreditLimitForm simRun={simRun} asOf={asOf} refreshKey={0} onSaved={() => undefined} /></>;
   if (tab === "loans") return <Loans simRun={simRun} asOf={asOf} />;
   return <Runs simRun={simRun} />;
 }
@@ -913,7 +913,7 @@ function Runs({ simRun }: { simRun: string }) {
   return (
     <Panel
       title="재무 판단 이력"
-      subtitle="이 실행 전체의 판단 기록입니다 — 화면 위의 데이터 기준일과 무관합니다"
+      subtitle="이 실행 전체의 판단 기록입니다"
     >
       {data.rows.length === 0 ? (
         <>
@@ -945,7 +945,7 @@ function Runs({ simRun }: { simRun: string }) {
       {data.rows.length > 0 && (
         <p className="mb-0 mt-3 text-[15.5px] text-ink2">
           판단 기준일은 그 판단이 어느 날짜를 두고 내려졌는지이고, 실행 시각은 시스템이 실제로
-          계산한 시점입니다 - 둘 다 화면 위의 데이터 기준일과 다른 축입니다.
+          계산한 시점입니다.
         </p>
       )}
     </Panel>

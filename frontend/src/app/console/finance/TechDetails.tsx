@@ -35,14 +35,7 @@ export function TechDetails({
 /** 기준일과 데이터 출처 한 줄. **내부 식별자를 쓰지 않는다.** */
 export function DataBasis({ asOf, note }: { asOf: string; note: string }) {
   return (
-    <p className="m-0 flex flex-wrap items-baseline gap-x-5 gap-y-1 text-[16px] text-ink2">
-      <span>
-        기준일 <b className="text-ink tabular-nums">{asOf}</b>
-      </span>
-      <span>
-        데이터 기준 <b className="text-ink">{note}</b>
-      </span>
-    </p>
+    <></>
   );
 }
 
