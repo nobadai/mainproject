@@ -168,6 +168,39 @@ _RECEIPT_LABEL = {
 _VERDICT_LABEL = {"PASS": "합격", "HOLD": "보류", "REJECT": "거절"}
 
 
+def _receipt_progress(row: Any) -> tuple[str, str]:
+    """도착한 물량 한 줄의 **처리 상태**와 **재고 처리**. 🔴 판정을 새로 만들지 않는다.
+
+    ```text
+    창고 도착        검수 전                      재고: 검수 대기
+    검수 완료        검수는 끝 · 재고 아직        재고: 반영 대기
+    처리 완료        stock_applied               재고: 재고 반영 완료
+    처리 완료        settled_without_stock (#805) 재고: 반영할 재고 없음
+    ```
+
+    🔴 **«입고 처리 완료» 와 «재고 반영 완료» 는 다른 사실이다** (#805). 수용할 것이
+       0 이라 재고를 안 만들고 끝난 입고도 **처리는 끝난 것**이다 — 「아직」으로 적으면
+       도착 요약에서는 빠진 건이 이 표에서만 영영 밀린 것처럼 보인다.
+
+    🔴 **실패라고 적지 않는다.** 만들 재고가 없던 것이지 처리가 실패한 것이 아니다.
+
+    ⚠️ **`accepted_qty_kg == 0` 으로 여기서 다시 판정하지 않는다.** 그 규칙의 주인은
+       `inbound_schedules.settled_without_stock` 하나다. 그 값이 `None`(그날 일정을
+       못 읽음)이면 둘을 가릴 수 없으므로 «—» 로 둔다 — 넘겨짚지 않는다.
+    """
+    if row.stock_applied:
+        return "처리 완료", "재고 반영 완료"
+    if row.settled_without_stock:
+        return "처리 완료", "반영할 재고 없음"
+    if row.receipt_status == "ARRIVED":
+        return "창고 도착", "검수 대기"
+    #  검수는 끝났는데 재고가 없다 — 「반영 대기」인지 「반영할 재고 없음」인지는
+    #  일정이 낸 사실로만 갈린다. 못 읽었으면 가리지 않는다.
+    if row.settled_without_stock is None:
+        return _label(_RECEIPT_LABEL, row.receipt_status) or "—", "—"
+    return "검수 완료", "반영 대기"
+
+
 def _label(table: dict[str, str], value: Any) -> str | None:
     """사전에 있으면 사람 말로, 없으면 «—». **내부 코드를 그대로 내보내지 않는다.**"""
     if value is None or value == "":
@@ -757,15 +790,36 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
     summary = inb.arrival_summary
     transit = inb.in_transit
 
-    #  ★ 아직 재고에 안 잡힌 건을 **맨 위로** 올리고, 그다음 최근 도착 순이다.
+    #  ★ 아직 처리가 안 끝난 건을 **맨 위로** 올리고, 그다음 최근 도착 순이다.
     #    🔴 잘라내도 «아직 할 일» 은 안 잘린다 — 그것이 이 정렬의 이유다.
-    #    판정은 하지 않는다. `stock_applied` 는 서버가 이미 낸 값이다.
+    #    판정은 하지 않는다. 재고가 섰거나(`stock_applied`) 수용 0 으로 끝난
+    #    (`settled_without_stock` · #805) 건은 둘 다 **끝난 것**이다.
     receipts = sorted(
         (r for r in inb.receipts if _on_screen(r.item_name)),
-        key=lambda r: (r.stock_applied, -r.arrived_at.toordinal()),
+        key=lambda r: (
+            bool(r.stock_applied or r.settled_without_stock),
+            -r.arrived_at.toordinal(),
+        ),
     )
     shown_receipts = receipts[:_MAX_HISTORY_ROWS]
     hidden_receipts = len(receipts) - len(shown_receipts)
+    receipt_rows: list[dict[str, str | float | int | None]] = []
+    for r in shown_receipts:
+        #  🔴 «처리 완료» 와 «재고 반영 완료» 를 한 칸에 담지 않는다 (#805).
+        state, applied = _receipt_progress(r)
+        receipt_rows.append(
+            {
+                "arrive": _md(r.arrived_at),
+                "item": r.item_name or r.item_id,
+                "ord": _kg_cell(r.ordered_qty_kg),
+                "acc": _kg_cell(r.accepted_qty_kg),
+                "hold": _kg_cell(r.hold_qty_kg),
+                "rej": _kg_cell(r.rejected_qty_kg),
+                "verdict": _label(_VERDICT_LABEL, r.inspection_verdict),
+                "state": state,
+                "applied": applied,
+            }
+        )
 
     return Pane(
         key="inbound",
@@ -796,10 +850,14 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
                 key="flow", title="입고 처리 흐름",
                 #  ⚠️ 내부 이름은 `in_transit` 이지만 차량 운송을 추적하는 값이 아니다 —
                 #     「입고 일정에 올라 있고 아직 도착하지 않은 건」이라 그렇게 적는다.
-                flow=["실매입 확정", "입고 예정", "창고 도착", "검수", "재고 반영"],
+                flow=["실매입 확정", "입고 예정", "창고 도착", "검수", "입고 처리 완료"],
+                #  🔴 흐름의 끝을 «재고 반영» 으로 못박지 않는다 (#805) — 수용할 것이
+                #     0 이면 재고를 안 만들고도 입고 처리는 끝난다.
                 lead=Note(
                     tone="info",
-                    text="**창고 도착과 재고 반영은 다릅니다.** 검수를 통과해야 재고가 늘어납니다.",
+                    text=("**창고 도착과 재고 반영은 다릅니다.** 검수를 통과한 수용 수량만 "
+                          "재고가 됩니다. 수용할 물량이 없으면 재고는 안 생기지만 "
+                          "**입고 처리는 끝난 것**입니다."),
                 ),
             ),
             Card(
@@ -841,29 +899,19 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
                 ),
             ),
             Card(
-                key="receipt", title="입고 내역",
-                subtitle="창고에 도착한 물량의 검수와 재고 반영 상태입니다",
+                key="receipt", title="입고 처리 현황",
+                subtitle="창고에 도착한 물량의 검수와 재고 처리 상태입니다",
                 #  🔴 `arrival_schedule` 은 **표가 아니라 계약 필드명**이었다.
                 #     실제 출처는 이 둘이다.
                 source_ref="inbound_receipts · inbound_inspections",
                 #  🔴 Receipt ID 는 본문에 싣지 않는다 — 사용자가 읽을 값이 아니다.
                 table=_t(
-                    [("item", "품목", "left"),
-                     ("ord", "주문", "right"), ("acc", "합격", "right"),
-                     ("arrive", "도착일", "left"), ("state", "진행 상태", "left"),
-                     ("verdict", "검수 결과", "left"), ("applied", "재고 반영", "left")],
-                    [
-                        {
-                            "item": r.item_name or r.item_id,
-                            "ord": _kg_cell(r.ordered_qty_kg),
-                            "acc": _kg_cell(r.accepted_qty_kg),
-                            "arrive": _md(r.arrived_at),
-                            "state": _label(_RECEIPT_LABEL, r.receipt_status),
-                            "verdict": _label(_VERDICT_LABEL, r.inspection_verdict),
-                            "applied": "반영됨" if r.stock_applied else "아직",
-                        }
-                        for r in shown_receipts
-                    ],
+                    [("arrive", "도착일", "left"), ("item", "품목", "left"),
+                     ("ord", "주문", "right"), ("acc", "수용", "right"),
+                     ("hold", "보류", "right"), ("rej", "거절", "right"),
+                     ("verdict", "검수 결과", "left"),
+                     ("state", "처리 상태", "left"), ("applied", "재고 처리", "left")],
+                    receipt_rows,
                     empty_text="이 날짜까지 창고에 도착한 물량이 없습니다",
                 ),
                 footer=(

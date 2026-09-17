@@ -546,3 +546,75 @@ def test_console_service_는_커넥션을_열지_않는다() -> None:
     from app.logistics import console_service
 
     assert _커넥션을_여는_자리(inspect.getsource(console_service)) == []
+
+
+#  ── #805 입고 처리 완료 != 재고 반영 완료 ────────────────────────────────
+
+
+def _입고행(
+    *,
+    state: str,
+    stock_applied: bool,
+    settled: bool | None,
+    verdict: str | None = "PASS",
+) -> Any:
+    """`ConsoleInboundReceipt` 계약 그대로의 한 줄."""
+    return SimpleNamespace(
+        inbound_id="INB-1", receipt_id="RCPT-1", item_id=ITEM_ON_SCREEN,
+        item_name=ITEM_ON_SCREEN, arrived_at=AS_OF,
+        ordered_qty_kg=Decimal(100), accepted_qty_kg=Decimal(100),
+        hold_qty_kg=Decimal(0), rejected_qty_kg=Decimal(0),
+        receipt_status=state, fact_source="inbound_receipts",
+        inspection_id="INS-1", inspection_verdict=verdict, inspected_qty_kg=Decimal(100),
+        lot_id="LOT-1" if stock_applied else None,
+        in_move_id="MOVE-1" if stock_applied else None,
+        stock_applied=stock_applied, settled_without_stock=settled,
+    )
+
+
+def _입고_카드(rows: list[Any]) -> Any:
+    inb = SimpleNamespace(
+        in_transit=[], in_transit_status="CONFIRMED_ZERO",
+        receipts=rows, arrival_summary=_도착요약(),
+    )
+    return 카드(logistics_query._inbound_pane(inb, AS_OF), "receipt").table
+
+
+def test_재고가_선_입고는_처리도_재고도_완료로_적는다():
+    표 = _입고_카드([_입고행(state="PUTAWAY_DONE", stock_applied=True, settled=False)])
+    assert (표.rows[0]["state"], 표.rows[0]["applied"]) == ("처리 완료", "재고 반영 완료")
+
+
+def test_수용_0_으로_끝난_입고는_아직이_아니라_반영할_재고_없음이다():
+    """🔴 #805 — 재고가 없다고 «아직» 으로 적으면 영영 밀린 것처럼 보인다."""
+    표 = _입고_카드([_입고행(state="INSPECTED", stock_applied=False, settled=True)])
+    상태, 재고 = 표.rows[0]["state"], 표.rows[0]["applied"]
+    assert (상태, 재고) == ("처리 완료", "반영할 재고 없음")
+    #  ★ 실패라고 적지 않는다 — 만들 재고가 없던 것이지 처리가 실패한 것이 아니다.
+    assert "실패" not in str(재고) and "아직" not in str(재고)
+
+
+def test_검수_전_입고는_창고_도착_검수_대기다():
+    표 = _입고_카드([_입고행(state="ARRIVED", stock_applied=False, settled=False, verdict=None)])
+    assert (표.rows[0]["state"], 표.rows[0]["applied"]) == ("창고 도착", "검수 대기")
+
+
+def test_검수는_끝났고_재고_전이면_반영_대기다():
+    표 = _입고_카드([_입고행(state="INSPECTED", stock_applied=False, settled=False)])
+    assert (표.rows[0]["state"], 표.rows[0]["applied"]) == ("검수 완료", "반영 대기")
+
+
+def test_일정을_못_읽으면_반영_대기라고_넘겨짚지_않는다():
+    """🔴 `None` 은 «아니다» 가 아니라 «모른다» 다 — 둘을 가릴 수 없으면 «—» 다."""
+    표 = _입고_카드([_입고행(state="INSPECTED", stock_applied=False, settled=None)])
+    assert 표.rows[0]["applied"] == "—"
+
+
+def test_아직_안_끝난_입고가_완료된_입고보다_위에_온다():
+    """잘라내도 «할 일» 은 안 잘린다 — #805 완료 둘을 같이 뒤로 보낸다."""
+    행 = [
+        _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=False),
+        _입고행(state="INSPECTED", stock_applied=False, settled=True),
+        _입고행(state="ARRIVED", stock_applied=False, settled=False, verdict=None),
+    ]
+    assert [r["state"] for r in _입고_카드(행).rows] == ["창고 도착", "처리 완료", "처리 완료"]
