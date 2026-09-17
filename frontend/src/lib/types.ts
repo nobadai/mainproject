@@ -354,7 +354,7 @@ export interface RunReport {
 /**
  * 실매입 기록의 반영 상태. 백엔드 `PurchaseRecordStatus` 의 거울.
  *
- * 🔴 화면에는 이 값을 그대로 쓰지 않는다 — 사람 말(기록 대기 · 반영됨 · 반영되지 않음)로 옮긴다.
+ * 🔴 화면에는 이 값을 그대로 쓰지 않는다 — 사람 말(기록 대기 · 반영됨 · 입고 처리 중)로 옮긴다.
  */
 export type PurchaseRecordStatus =
   | "AWAITING_PURCHASE_RECORD"
