@@ -54,8 +54,14 @@ BUYS = [_buy(d, 800_000) for d in BUY_DATES]
 class _Recorder:
     """`fetch_all` 을 대신 선다. **나간 질의의 파라미터를 그대로 모은다.**
 
-    🔴 순서로 가르지 않고 **파라미터 칸으로** 가른다 — 도착일 조회만 `dates` 를 싣는다.
-    순서로 가르면 `_read` 안에서 질의 하나만 자리를 옮겨도 검사가 조용히 딴것을 잰다.
+    🔴 순서로 가르지 않고 **파라미터 칸과 문면으로** 가른다 — 도착일 조회만 `dates` 를 싣고,
+    원장 조회만 `purchase_items` 를 읽는다. 순서로 가르면 `_read` 안에서 질의 하나만 자리를
+    옮겨도 검사가 조용히 딴것을 잰다.
+
+    ⚠️ (2026-09-17) 전에는 실행 · 원장을 **`as_of` 를 실은 몇 번째 호출인가**로 갈랐다. 한
+    검사가 `_read` 를 두 번 부르면 둘째 판의 실행 조회에 원장 행이 돌아갔는데, 그때까지는
+    `_read` 가 실행 행을 안 들여다봐 안 드러났다. 결정 조회를 그날 실행의 요청 ID 로 좁히면서
+    `_read` 가 실행 행을 읽게 됐고 그 자리가 드러났다.
     """
 
     def __init__(self) -> None:
@@ -65,10 +71,9 @@ class _Recorder:
         self.params.append(params)
         if params and "dates" in params:
             return []  # 내용은 이 검사의 관심이 아니다. **나갔는지**가 관심이다
-        if params and "as_of" in params:
-            seen = sum(1 for p in self.params if p and "as_of" in p)
-            return [] if seen == 1 else BUYS  # 첫째가 runs · 둘째가 buys
-        return []  # decisions · items
+        if "purchase_items" in query.as_string(None):
+            return BUYS
+        return []  # runs · decisions · items
 
     @property
     def arrival_calls(self) -> list[Any]:

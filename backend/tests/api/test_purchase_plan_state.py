@@ -436,7 +436,12 @@ def test_결정_조회가_회차를_같이_읽는다(monkeypatch):
     문면: list[str] = []
 
     def _record(query: Any, params: Any = None) -> list[dict[str, Any]]:
-        문면.append(query.as_string(None))
+        text = query.as_string(None)
+        문면.append(text)
+        #  ★ 결정 조회는 **그날 실행이 있어야** 나간다 (요청 ID 로 좁힌다 · 2026-09-17) —
+        #    실행 조회에 한 행을 돌려준다
+        if "master_agent_runs" in text and "run_id, request_id" in text:
+            return [{"request_id": "REQ-A", "sim_run_id": AXIS}]
         return []
 
     monkeypatch.setattr(finance_db, "fetch_all", _record)

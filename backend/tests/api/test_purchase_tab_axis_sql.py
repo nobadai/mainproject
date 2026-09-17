@@ -79,7 +79,9 @@ class _Recorder:
 
     @property
     def arrivals(self) -> list[tuple[str, Any]]:
-        return [(text, params) for text, params in self.calls if "'scenarios'" in text]
+        #  ★ 실행 조회도 본문에서 `'scenarios'` 칸을 뽑는다 (2026-09-17) — 도착일 조회는
+        #    그 칸에 `AS scenarios` 이름을 붙이는 쪽으로 가른다
+        return [(text, params) for text, params in self.calls if "AS scenarios" in text]
 
 
 @pytest.fixture
