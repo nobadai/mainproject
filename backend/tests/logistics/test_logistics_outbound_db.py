@@ -335,7 +335,7 @@ def test_6_취소하면_가용이_돌아온다(conn: psycopg.Connection) -> None
     _예약(conn, rid="RSV-남", qty="80")
     _할당한다(conn, ("LOT-A", "80"), rid="RSV-남")
 
-    결과 = release_reservation(conn, reservation_id="RSV-남")
+    결과 = release_reservation(conn, reservation_id="RSV-남", released_as_of=AS_OF)
 
     assert 결과.applied is True and 결과.status == "RELEASED"
     assert all(행["status"] == "CANCELLED" for 행 in _할당(conn))
@@ -585,7 +585,7 @@ def test_27b_출고된_예약은_취소할_수_없다(conn: psycopg.Connection) 
     ship_allocated_stock(conn, reservation_id=RSV, shipped_at=AS_OF)
 
     with pytest.raises(OutboundIntegrityError, match="이미 출고된"):
-        release_reservation(conn, reservation_id=RSV)
+        release_reservation(conn, reservation_id=RSV, released_as_of=AS_OF)
 
 
 def test_28_예약만_하고_출고하지_않으면_원장이_없다(conn: psycopg.Connection) -> None:
@@ -825,7 +825,7 @@ def test_D5_D6_놓아준_예약은_가용을_돌려준다(conn: psycopg.Connecti
     with pytest.raises(InvalidOutboundRequest):
         _예약한다(conn, "RSV-B", "10")
 
-    release_reservation(conn, reservation_id="RSV-A", status=상태)
+    release_reservation(conn, reservation_id="RSV-A", status=상태, released_as_of=AS_OF)
 
     assert _예약한다(conn, "RSV-B", "100").applied is True
 
@@ -1108,7 +1108,7 @@ def test_S6b_같은_id_에_다른_요구량이면_충돌이다(conn: psycopg.Con
 def test_S6c_놓아준_예약은_다시_채우지_않는다(conn: psycopg.Connection) -> None:
     _lot(conn, "LOT-A", qty="100", received_at=date(2026, 1, 1))
     _부분예약(conn, required="100")
-    release_reservation(conn, reservation_id=RSV)
+    release_reservation(conn, reservation_id=RSV, released_as_of=AS_OF)
 
     with pytest.raises(OutboundIntegrityError, match="놓아준 예약"):
         _부분예약(conn, required="100")
@@ -1370,7 +1370,7 @@ def _되살아난_Lot_상황(conn: psycopg.Connection) -> None:
     assert _내할당(conn) == {"LOT-OLD": Decimal(40)}
 
     _lot(conn, "LOT-NEW", qty="100", received_at=date(2026, 1, 15))
-    release_reservation(conn, reservation_id="RSV-OTHER")
+    release_reservation(conn, reservation_id="RSV-OTHER", released_as_of=AS_OF)
     assert _부분예약(conn, required="100").reserved_qty_kg == Decimal(100)
 
 
