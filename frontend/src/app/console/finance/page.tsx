@@ -77,7 +77,7 @@ export default function FinancePage() {
   const simRun = FINANCE_SALES_SIM_RUN_ID;
   const [tab, setTab] = useState<Tab>("overview");
   return (
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
+    <div className="flex w-full flex-col gap-4 sm:gap-5">
       <DomainHeader title="재무" tabs={TABS} active={tab} onChange={setTab} />
       <DataBasis asOf={asOf} note={DATA_SOURCE_NOTE} />
       <Body simRun={simRun} asOf={asOf} tab={tab} onTab={setTab} />
