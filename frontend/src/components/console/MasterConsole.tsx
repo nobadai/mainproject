@@ -169,8 +169,11 @@ const FALLBACK_COOLDOWN_SEC = 5;
 /**
  * 바닥에서 이만큼 안이면 «바닥을 보고 있다» 로 본다(px).
  *
+ * **이 값은 알림 버튼에만 쓴다.** 스크롤을 움직일지 말지는 여기서 안 정한다 —
+ * 판은 «내 글» 일 때만 내려간다.
+ *
  * 딱 0 으로 두면 안 된다 — 한 줄 반쯤 남은 자리, 소수점 높이, 확대 배율 때문에
- * 바닥까지 내려도 1~2px 이 남는 일이 흔하다. 그러면 따라 내려가지 않는다.
+ * 바닥까지 내려도 1~2px 이 남는 일이 흔하다. 그러면 바닥인데도 버튼이 뜬다.
  */
 const STICK_PX = 40;
 
@@ -258,53 +261,62 @@ export function MasterConsole({ session }: { session: Session }) {
   const tail = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLInputElement>(null);
 
-  /* ── 새 글이 와도 읽던 자리를 뺏지 않는다 ──────────────────────────────
+  /* ── 자기가 보낸 글에만 내려간다 ──────────────────────────────────────
    *
    * 예전엔 `turns` 가 늘 때마다 **무조건** 바닥으로 내려갔다. 위로 올려 지난 답을
    * 읽는 중에 새 글이 하나만 붙어도 읽던 자리가 끌려 내려갔다.
    *
+   * **규칙은 하나뿐이다 — 내려가는 것은 `kind === "me"` 일 때뿐이다.**
+   * 답이 도착했을 때는 **어디에 있든 판을 움직이지 않는다.** 바닥 근처면 따라
+   * 내려가던 규칙은 없앴다 (2026-09-17 지시).
+   *
    * ★ 새 글은 **아래에 붙는다.** 그러면 브라우저가 `scrollTop` 을 그대로 두므로
    *   위에 보이던 내용은 한 픽셀도 안 움직인다 — **아무것도 안 하는 것**이
-   *   자리를 지키는 것이다. 그래서 «늘어난 높이만큼 빼 준다» 는 보정을 두지 않는다.
-   *   (윗쪽에 끼워 넣는 일이 생기면 그때 보정이 필요해진다. 지금은 없다.)
+   *   자리를 지키는 것이다. 그래서 `scrollTop` 보정을 따로 두지 않는다.
    *
-   * 내려가는 자리는 둘뿐이다.
-   *   ① 이미 바닥 근처(`STICK_PX` 안)일 때 — 따라 내려가는 게 자연스럽다
-   *   ② 방금 **자기가 보낸 글**일 때 — 자기 글은 보고 싶어 한다
-   *
-   * 🔴 «바닥 근처인가» 는 **구르는 동안** 재 둔다. 효과가 도는 시점은 새 글이 이미
-   *    붙은 뒤라, 그때 재면 높이가 늘어 있어 언제나 «바닥이 아니다» 로 나온다.
-   *    그래서 상태가 아니라 `ref` 다 — 값이 바뀌어도 효과가 다시 돌면 안 된다.
+   * 알림 버튼만 «바닥에서 얼마나 떨어졌나» 를 본다. 🔴 효과가 도는 시점은 새 글이
+   * **이미 붙은 뒤**라 그대로 재면 늘어난 높이만큼 부풀려진다. 그래서 직전 높이
+   * (`seenHeight`)를 들고 있다가 **붙기 전의 틈**을 되살려 잰다.
    * ------------------------------------------------------------------ */
 
   const scroller = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
+  /** 마지막으로 본 판의 전체 높이. 새 글이 붙기 «전» 의 틈을 되살리는 데 쓴다. */
+  const seenHeight = useRef(0);
   const [unread, setUnread] = useState(false);
 
   function onScroll() {
     const el = scroller.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX;
-    //  바닥까지 내려왔으면 안내는 할 일이 없다
-    if (stick.current) setUnread(false);
+    seenHeight.current = el.scrollHeight;
+    //  바닥까지 내려왔으면 알릴 것이 없다 — 버튼은 스스로 사라진다
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX) setUnread(false);
   }
 
-  /** 바닥으로. 안내 버튼과 효과가 같이 쓴다 — `ref` 만 보므로 한 번 만들고 안 바꾼다. */
-  const toBottom = useCallback(() => {
-    stick.current = true;
-    setUnread(false);
+  /**
+   * 판을 바닥으로 민다.
+   *
+   * 🔴 **상태를 안 건드린다.** 효과 안에서 부르는 자리라, 여기서 `setUnread` 를
+   *    하면 `react-hooks/set-state-in-effect` 에 걸린다. 버튼은 아래 `onScroll` 이
+   *    바닥에 닿는 순간 스스로 지운다.
+   */
+  const scrollToTail = useCallback(() => {
     tail.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, []);
 
   useEffect(() => {
-    if (turns.length === 0) return;
-    if (turns.at(-1)?.kind === "me" || stick.current) {
-      toBottom();
-    } else {
-      //  위에서 읽는 중이다 — **자리는 그대로 두고** «새 글이 있다» 만 알린다.
-      setUnread(true);
-    }
-  }, [turns, toBottom]);
+    const el = scroller.current;
+    if (turns.length === 0 || !el) return;
+
+    //  새 글이 붙기 **전** 의 바닥까지 거리. `scrollTop` 은 아래에 붙는 동안
+    //  안 바뀌므로, 직전 높이로 재면 붙기 전의 틈이 그대로 나온다.
+    const gapBefore = seenHeight.current - el.scrollTop - el.clientHeight;
+    seenHeight.current = el.scrollHeight;
+
+    //  ① 내가 보낸 글이면 바닥으로. ② 그 밖에는 **판을 건드리지 않는다** —
+    //     바닥에서 멀면 «새 메시지» 만 알린다.
+    if (turns.at(-1)?.kind === "me") scrollToTail();
+    else if (gapBefore > STICK_PX) setUnread(true);
+  }, [turns, scrollToTail]);
 
   //  남은 초를 1초씩 깎는다. 0 이 되면 잠금이 풀린다 — 여기서 다시 보내지 않는다.
   useEffect(() => {
@@ -731,7 +743,10 @@ export function MasterConsole({ session }: { session: Session }) {
             {unread && (
               <button
                 type="button"
-                onClick={toBottom}
+                onClick={() => {
+                  setUnread(false);
+                  scrollToTail();
+                }}
                 className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-line
                   bg-surface px-3 py-1 text-xs text-muted shadow-[0_6px_18px_-8px_rgba(21,26,22,.5)]
                   transition hover:border-accent hover:text-accent-ink"
