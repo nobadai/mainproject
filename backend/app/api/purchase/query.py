@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from datetime import date, timedelta
 from typing import Any
@@ -608,6 +609,27 @@ def _demo(note: str) -> PurchaseTab:
 #  본체
 # ══════════════════════════════════════════════════════════════════════════
 
+def _한커넥션(fn):
+    """이 함수가 도는 동안 **읽기 커넥션을 하나만** 연다 (2026-09-17).
+
+    🔵 `_read` 4개 + `_records` 1개 = 한 판에 커넥션 5개였다 (원격 DB · 개당
+       14~22ms). 전부 SELECT 라 하나로 묶인다. 규칙과 경고는
+       `app/finance/db.py::read_connection_scope` 에 있다.
+
+    ★ 함수 본문을 한 칸도 안 옮기려고 감싸기로 한다 — 옮기면 diff 가 90줄이 되고,
+      그러면 «무엇이 바뀌었나» 를 아무도 못 읽는다.
+    """
+    @functools.wraps(fn)
+    def 감싼것(*args, **kwargs):
+        from app.finance.db import read_connection_scope
+
+        with read_connection_scope():
+            return fn(*args, **kwargs)
+
+    return 감싼것
+
+
+@_한커넥션
 def build(
     as_of: date, sim_run_id: str | None = None, window_days: int | None = None
 ) -> PurchaseTab:
