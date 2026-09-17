@@ -171,6 +171,7 @@ function Overview({ simRun, asOf, onTab }: { simRun: string; asOf: string; onTab
             <BasisGroup title="재무 상태" basis={state.state_date}>
               <button type="button" aria-label="현금흐름 보기" onClick={() => onTab("cash")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="현재 현금 · 현금흐름 보기" value={moneyWon(state.current_cash_krw)} /></button>
               <Metric label="최소 운영현금" value={moneyWon(state.minimum_operating_cash_krw)} />
+              <button type="button" aria-label="차입 상세 보기" onClick={() => onTab("loans")} className="cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"><Metric label="차입잔액 · 상세 보기" value={moneyWon(state.current_debt_krw)} /></button>
             </BasisGroup>
             {closing ? (
               <BasisGroup title="일마감" basis={closing.close_date}>
