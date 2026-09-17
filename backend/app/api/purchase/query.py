@@ -52,7 +52,9 @@ _PAY_COLS = [
     Column(key="amount", label="금액", align="right", mono=True),
 ]
 _COMMITTED_COLS = [
-    Column(key="approval", label="승인", mono=True),
+    #  🔴 칸 이름이 틀렸었다 — 「승인」인데 실린 값은 **매입 번호**(`purchase_id`)다 (2026-09-17).
+    #     화면은 이 칸을 **가린다** (`console/purchase/page.tsx`) · 값은 API 에 남긴다.
+    Column(key="approval", label="매입 번호", mono=True),
     Column(key="item", label="품목"),
     Column(key="buy", label="사는 날", mono=True),
     Column(key="arrive", label="도착", mono=True),
@@ -279,7 +281,9 @@ def _pick(
         aside = f". 계약 밖 품목({names})은 뺐습니다 — 지금 사는 것은 {'·'.join(ITEMS)} 입니다"
     #  🔴 거른 것을 조용히 없애지 않는다 — 계약 밖 품목과 같은 규율이다.
     if off_axis:
-        aside += f". 다른 걷기의 실행 {off_axis}건은 뺐습니다 — 지금 보는 것은 {sim_run_id} 입니다"
+        #  🔴 **뺀 건수만 적는다** (2026-09-17). 어느 걷기를 보는지는 `build` 가 안 목록
+        #     안내 끝에 **한 번만** 적는다 — 여기서 또 적으면 같은 이름이 두 번 나온다.
+        aside += f". 다른 걷기의 실행 {off_axis}건은 뺐습니다"
     #  🔴 **안 거를 때도 말한다** (마스터 청구 2026-09-10). 축이 없는 실행은 손으로
     #     돌린 것이거나 축이 생기기 전 기록인데, 걷기와 **같아 보이면** 보는 사람이
     #     둘을 한 세상으로 읽는다. 마스터가 실제로 그 오독을 했다 —
@@ -293,10 +297,14 @@ def _pick(
         )
     if not chosen:
         return [], f"그날 실행 {len(runs)}건 · 그중 안을 낸 계약 품목 실행 0건{aside}"
-    names = " · ".join(f"{r['item']} {r['request_id']}" for r in chosen)
+    #  🔴 **요청 ID 를 글에 안 싣는다** (2026-09-17). 무엇을 골랐는지는 「품목별 최신 하나」
+    #     라는 **규칙 문장**이 말하고(레슨 ①), 어느 실행인지는 안마다 `request_id` ·
+    #     `history_run_id` 칸에 남는다 — 말로 한 승인이 그 칸을 쓴다.
+    #  ★ 「환경이 선 것」은 `runtime_status=READY` 의 안쪽 말이라 풀어 쓴다. 수는 그대로다.
+    names = " · ".join(str(r["item"]) for r in chosen)
     return chosen, (
-        f"그날 실행 {len(runs)}건 중 환경이 선 것 {len(ready)}건 · "
-        f"안을 낸 것 {len(with_plans)}건 — 품목별 최신 하나를 보입니다 ({names}){aside}"
+        f"그날 실행 {len(runs)}건 중 {len(ready)}건이 돌았고 "
+        f"{len(with_plans)}건이 안을 냈습니다 — 품목별 최신 하나를 보입니다 ({names}){aside}"
     )
 
 
@@ -318,7 +326,7 @@ def _no_plan_note(
         if not runs:
             return Note(
                 tone="warn",
-                text=f"{picked_text}. 이 걷기({sim_run_id})의 실행이 그날 없습니다 —"
+                text=f"{picked_text}. 이 걷기의 실행이 그날 없습니다 —"
                 " 안이 죽은 것이 아니라 돌지 않았습니다.",
             )
     for run in runs:
@@ -749,6 +757,12 @@ def build(
 
     if plans:
         text = picked_text
+        #  🔴 **어느 걷기를 보는지는 이 한 자리에만 적는다** (2026-09-17). 실행 이름은 내부
+        #     식별자라 한 번 걷었다가, 화면에 어디에도 안 남아 되살렸다 — 두 세상을 섞어
+        #     읽지 않게 하는 것이 09-10 에 이 이름을 실은 이유다. 요청 ID 는 여전히 안 싣는다.
+        #  ⚠️ 확정 매입 안내 · 안 없는 날 안내에는 **안 넣는다** — 한 곳이면 된다.
+        if sim_run_id is not None:
+            text += f". 이 걷기({sim_run_id})를 봅니다"
         if skipped:
             text += f". 등급 배분이 비어 화면에 못 올린 안 {skipped}개"
         if no_cut:
@@ -764,7 +778,8 @@ def build(
 
     arrived_unknown = sum(1 for row in committed.rows if row["arrive"] is None)
     committed_text = (
-        "승인(MASTER_APPROVAL)으로 원장에 남은 매입만 봅니다 — "
+        #  🔴 `MASTER_APPROVAL` 은 원장의 안쪽 코드다 — 뜻만 적는다 (2026-09-17).
+        "승인을 거쳐 원장에 남은 매입만 봅니다 — "
         f"{as_of.isoformat()} 까지 {len(committed.rows)}줄."
     )
     if not arrivals_complete:
@@ -780,10 +795,8 @@ def build(
         committed_text += f" 도착일을 못 맞춘 줄 {arrived_unknown}개는 **공란**입니다."
     #  🔴 뺀 것을 조용히 없애지 않는다 — 이번 주 매입액이 왜 작은지가 여기 있다.
     if committed_off_axis:
-        committed_text += (
-            f" 다른 걷기의 줄 {committed_off_axis}개는 뺐습니다 —"
-            f" 지금 보는 것은 {sim_run_id} 입니다."
-        )
+        #  🔴 뺀 수는 남기고 실행 이름은 안 적는다 — `_pick` 의 안내문과 같은 규율이다.
+        committed_text += f" 다른 걷기의 줄 {committed_off_axis}개는 뺐습니다."
     #  🔴 ~~「⚠️ 지급일이 매입일과 같게 적재돼 있습니다 — 지급일 규칙이 아직 미결입니다」~~
     #     **걷었다** (2026-09-17). 지급일이 매입일과 같은 것은 경고할 일이 아니라 **확정값
     #     N5=0 의 결과**다 (재무 확정 2026-09-10). 「미결」이 거짓이었고, 줄이 있으면 무조건

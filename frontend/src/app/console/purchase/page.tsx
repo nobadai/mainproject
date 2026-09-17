@@ -147,12 +147,13 @@ function PlanCard({ plan }: { plan: Plan }) {
                   {r.source}
                 </span>
                 {r.carried && <Pill text="어제 기억" tone="sim" />}
+                {/*
+                  🔴 근거 꼬리표(`r.ref`)를 **화면에서만** 가린다 (2026-09-17).
+                     `FC-…` · `INV-LOT-RCPT-SIM-CHAIN-…` 같은 내부 식별자라 업무가 안 읽는다.
+                  ⚠️ API 에서는 빼지 않는다 — 모든 근거에 `ref_id` 가 있어야 한다 (규칙 4).
+                     되짚을 때는 API 응답에서 읽는다.
+                */}
                 <span className="min-w-0 flex-1">{r.text}</span>
-                {r.ref && (
-                  <span className="font-mono text-[10px]" style={{ color: "var(--color-mut2)" }}>
-                    {r.ref}
-                  </span>
-                )}
               </li>
             ))}
           </ul>
@@ -208,7 +209,20 @@ export default function PurchasePage() {
         마스터가 purchases.decision_id(FK)를 세운 뒤 조인해 읽기로 했다.
       */}
       <Panel title="확정된 매입" subtitle="승인을 거친 뒤에 생깁니다" footer="승인은 아래 서랍에서 합니다.">
-        <DataTable table={data.committed} />
+        {/*
+          🔴 매입 번호 칸(`approval`)을 **화면에서만** 가린다 (2026-09-17). 값은 API 에 남는다.
+             잰 것 — REH-0914 08-31 · FINAL-0918 09-14 · V13 01-26 세 실행에서
+             ① 줄이 (품목 · 사는 날)만으로 **겹침 0** (291 · 495 · 21줄) — 번호 없이도 줄이 갈린다
+             ② 번호 44~52자 · 끝이 전부 `D1-S1` — 다른 칸에 없는 정보가 없다
+             ③ 재무 API 도 `purchase_id` 를 싣지만 **재무 화면은 안 그린다** — 맞대 볼 화면이 없다
+          ⚠️ 이름을 고치는 쪽(「매입 번호」)은 API 가 했다 — 칸이 원래 「승인」으로 틀려 있었다.
+        */}
+        <DataTable
+          table={{
+            ...data.committed,
+            columns: data.committed.columns.filter((c) => c.key !== "approval"),
+          }}
+        />
         <Note note={data.committed_note} />
       </Panel>
     </>

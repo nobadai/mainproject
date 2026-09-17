@@ -178,7 +178,12 @@ def test_같은_날_실행이_여럿이면_무엇을_골랐는지_적는다(read
     ]))
     result = tab.build(AS_OF)
     assert len(result.plans) == 1  # 품목마다 하나
-    assert "REQ-NEW" in result.plans_note.text
+    #  🔴 **무엇을 골랐는지는 규칙 문장이 말하고, 어느 실행인지는 칸이 든다** (2026-09-17).
+    #     전에는 요청 ID(`REQ-NEW`)를 글에 실었다 — 화면에 내부 식별자가 나갔다.
+    #     ID 는 `request_id` 칸에 그대로 남는다 (말로 한 승인이 그 칸을 쓴다).
+    assert "품목별 최신 하나" in result.plans_note.text
+    assert "REQ-" not in result.plans_note.text
+    assert result.plans[0].request_id == "REQ-NEW"
     assert "3건" in result.plans_note.text  # 몇 개 중에 골랐는지
 
 

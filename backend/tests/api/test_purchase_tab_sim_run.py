@@ -155,6 +155,8 @@ def test_없는_축을_주면_0건이고_안이_죽은_것이_아니라고_적�
 
     assert tab.plans == []
     assert "돌지 않았습니다" in tab.plans_note.text
+    #  🔴 실행 이름은 글에 안 싣는다 (2026-09-17) — 「이 걷기」로 가리킨다
+    assert AXIS not in tab.plans_note.text
     assert "상한" not in tab.plans_note.text, "다른 걷기의 컷 사유를 가져오면 안 된다"
 
 
@@ -176,7 +178,12 @@ def test_빈_축은_전부가_아니다(inject):
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_뺀_건수와_축_이름을_화면_글에_적는다(inject):
-    """계약 밖 품목을 거를 때와 **같은 규율**이다."""
+    """계약 밖 품목을 거를 때와 **같은 규율**이다.
+
+    🔴 **실행 이름은 안 목록 안내 한 자리에만 싣는다** (2026-09-17 되살림). 09-10 에
+    *"어느 걷기를 보는지가 화면에 있어야 한다"* 로 세운 검사다. 09-17 에 내부 식별자를
+    걷으면서 한 번 뺐다가, 화면 어디에도 안 남아 **한 자리로** 되살렸다.
+    """
     inject(_data([
         _run("REQ-축있음", "배추", AXIS, minute=50),
         _run("REQ-다른축-1", "배추", OTHER, minute=40),
@@ -187,6 +194,50 @@ def test_뺀_건수와_축_이름을_화면_글에_적는다(inject):
 
     assert "다른 걷기의 실행 2건은 뺐습니다" in tab.plans_note.text
     assert AXIS in tab.plans_note.text, "어느 걷기를 보는지가 화면에 있어야 한다"
+    #  ★ 한 자리 — 두 번 적지 않는다
+    assert tab.plans_note.text.count(AXIS) == 1
+
+
+def test_화면_글에_내부_식별자를_안_싣는다(inject):
+    """🔴 요청 ID · 실행 이름 · 원장 코드가 **사람이 읽는 글**에 안 나간다 (2026-09-17).
+
+    ★ 대조군을 같이 본다 — 그 값들은 **API 칸에는 남아야** 한다 (화면에서 가리는 것이지
+      안 만드는 것이 아니다 · `request_id` 는 말로 한 승인이 쓴다).
+    """
+    inject(_data(
+        [
+            _run("REQ-축있음", "배추", AXIS, minute=50),
+            _run("REQ-다른축-1", "배추", OTHER, minute=40),
+        ],
+        buys=[_buy("PUR-이축", AXIS, 800_000), _buy("PUR-다른축", OTHER, 700_000)],
+    ))
+
+    tab = purchase_query.build(AS_OF, AXIS)
+    글 = [tab.plans_note.text, tab.committed_note.text, *(s.detail or "" for s in tab.stats)]
+
+    for 식별자 in ("REQ-", OTHER, "MASTER_APPROVAL"):
+        assert not any(식별자 in t for t in 글), (식별자, 글)
+    #  🔴 보는 걷기의 이름은 **안 목록 안내 한 자리에만** 있다 (`test_뺀_건수와_축_이름을_…`)
+    assert [t.count(AXIS) for t in 글] == [1] + [0] * (len(글) - 1), 글
+    #  🔴 뺀 수는 조용히 없애지 않는다
+    assert "다른 걷기의 실행 1건은 뺐습니다" in tab.plans_note.text
+    assert "다른 걷기의 줄 1개는 뺐습니다" in tab.committed_note.text
+    #  ★ 대조군 — 칸에는 남는다
+    assert tab.plans[0].request_id == "REQ-축있음"
+    assert tab.committed.rows[0]["approval"] == "PUR-이축"
+
+
+def test_매입_번호_칸은_이름이_승인이_아니다(inject):
+    """칸 이름이 틀렸었다 — 「승인」 칸에 실린 값은 매입 번호(`purchase_id`)다."""
+    inject(_data(
+        [_run("REQ-축있음", "배추", AXIS, minute=50)], buys=[_buy("PUR-이축", AXIS, 800_000)]
+    ))
+
+    columns = purchase_query.build(AS_OF, AXIS).committed.columns
+    col = next(c for c in columns if c.key == "approval")
+
+    assert col.label != "승인"
+    assert "매입" in col.label
 
 
 def test_축을_안_주면_뺐다는_말이_안_붙는다(inject):
