@@ -44,6 +44,52 @@ import {
  * 🔴 **모르는 낱말은 감추지 않고 그대로 보인다** (`neutral`). 서버가 어휘를 늘리는 날
  *    화면이 조용히 빈 배지를 내면, 사람은 상태가 없는 줄로 읽는다.
  */
+/*
+ * ══ 안 그리는 것 — 화면에서만 · API 는 그대로 (2026-09-17) ══════════════════════════
+ *
+ * 화면을 줄이려고 다섯을 뺐다. 🔴 **API 칸은 하나도 안 지웠다** — `GET /api/purchase`
+ * 응답에 그대로 있고, 되짚을 때는 거기서 읽는다.
+ *
+ *   ① 재고 근거의 로트 ID 괄호     「가용 29.0kg (로트 LOT-RCPT-SIM-CHAIN-…-1-1)」 에서
+ *                                  괄호만 걷는다 · 「가용 29.0kg」 은 남긴다
+ *      왜   로트 ID 가 50~80자 내부 식별자라 근거 한 줄을 세 줄로 민다
+ *      어디 `plans[].reasons[].text` 원문 (근거 꼬리표 `reasons[].ref` 도 로트를 든다)
+ *      ⚠️ 실측 — 세 실행에서 그 괄호는 **재고 근거에만** 있다 (REH 655 · FINAL 693 ·
+ *         V13 220줄 · 다른 근거 0). 그래서 `source === "재고"` 일 때만 걷는다
+ *
+ *   ② 「걸리는 것」 섹션 통째로      `plan.risks`
+ *      왜   안마다 5~8줄이라 카드가 길고, 에이전트 문장 안에 로트 ID · 내부 설명이 있다
+ *      어디 `plans[].risks` (세 실행 합계 REH 3,456 · FINAL 3,136 · V13 1,027줄)
+ *
+ *   ③ 안 목록 안내 블록              `plans_note`
+ *      왜   실행 수 · 뺀 건수 · 보는 걷기 같은 조회 설명이라 업무가 안 읽는다
+ *      어디 `plans_note.text`
+ *      🔴 **안이 0개인 날에는 그 글이 「왜 안이 없나」를 말하는 유일한 자리였다** —
+ *         REH-0914 23일 · V13 8일 · FINAL 0일. 예) 02-27 「가용재고 72kg 이 커버 2일
+ *         수요 29kg 을 이미 덮어 이날은 매입이 필요 없다」. 그날 화면은 빈 칸이고
+ *         「오늘 제안 0 안」 통계만 남는다
+ *
+ *   ④ 확정 매입 안내 블록            `committed_note`
+ *      왜   원장 줄 수 · 뺀 줄 수 같은 조회 설명이라 표 아래 소음이다
+ *      어디 `committed_note.text`
+ *      ⚠️ 도착일 「—」의 이유(「못 맞춘 줄 N개는 공란」)도 여기 있었다 — 세 실행 실데이터
+ *         에는 그런 줄이 0 이다
+ *
+ *   ⑤ 「승인은 아래 서랍에서 합니다」  확정 매입 판 꼬리말
+ *      왜   화면에만 있던 안내문이다 — 서랍은 모든 탭 아래에 늘 보인다
+ *      어디 **API 에는 원래 없었다** (이 파일의 글자였다)
+ */
+
+/**
+ * 근거 한 줄의 화면 글자. ① 재고 근거에서 **로트 ID 괄호만** 걷는다.
+ *
+ * ★ 괄호 모양이 정확히 맞을 때만 걷는다 — 「(로트 LOT-…)」. 다른 괄호 · 다른 근거는
+ *   원문 그대로다. 에이전트 문장을 화면에서 고쳐 쓰는 자리는 이 한 곳뿐이다.
+ */
+function reasonText(r: { source: string; text: string }): string {
+  return r.source === "재고" ? r.text.replace(/\s*\(로트 LOT-[^)]*\)/g, "") : r.text;
+}
+
 const STATE_TONE: Record<string, Tone> = {
   //  결정이 안 난 안. 🔴 ~~기다리는 것 — 사람이 아직 할 일이 남았다~~ 낡았다 (2026-09-17).
   //  같은 요청에서 다른 안이 결정되면 「후보」여도 **기다리지 않는다** — 기다리는지는
@@ -178,12 +224,26 @@ function PlanCard({ plan }: { plan: Plan }) {
           <DataTable table={plan.legs} />
         </section>
 
-        <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
-            지급
-          </h3>
-          <DataTable table={plan.payments} />
-        </section>
+        {/*
+          🔴 **지급 섹션은 나눠 사는 안(회차 2+)에서만 그린다** (2026-09-17 · 화면에서만).
+             한 번에 사는 안은 지급이 한 건이고 사는 날 · 금액이 위 회차 표에 이미 있다 —
+             그 자리에 빈 표와 「따로 만들지 않습니다」를 안마다 세우면 소음이다. 대신
+             **아무 줄도 안 남긴다** — 회차 표가 사실을 담는다.
+          ⚠️ 나눠 사는데 계획이 없는 경우는 **그대로 빈 표로** 그린다 — API 가 「나눠 사는
+             안인데 지급 계획이 실리지 않았습니다」로 적는 그 자리는 진짜 물을 자리다.
+          ★ API 의 `payments` 칸은 그대로다. 회차 수는 `plan.legs` 줄 수로 본다 — API 가
+            빈 표 문구를 가르는 기준(`split_plan` 길이)과 같은 목록이다.
+          🟡 실측 — REH-0914 · FINAL-0918 · V13 세 실행의 안이 **전부 1회차**다 (684 · 707 ·
+             231안). 이 섹션은 세 실행 화면에서 **아예 안 보인다.**
+        */}
+        {plan.legs.rows.length >= 2 && (
+          <section className="flex flex-col gap-2">
+            <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+              지급
+            </h3>
+            <DataTable table={plan.payments} />
+          </section>
+        )}
 
         <section className="flex flex-col gap-2">
           <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
@@ -205,27 +265,13 @@ function PlanCard({ plan }: { plan: Plan }) {
                   ⚠️ API 에서는 빼지 않는다 — 모든 근거에 `ref_id` 가 있어야 한다 (규칙 4).
                      되짚을 때는 API 응답에서 읽는다.
                 */}
-                <span className="min-w-0 flex-1">{r.text}</span>
+                <span className="min-w-0 flex-1">{reasonText(r)}</span>
               </li>
             ))}
           </ul>
         </section>
 
-        {plan.risks.length > 0 && (
-          <section className="flex flex-col gap-2">
-            <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-t-warn)" }}>
-              걸리는 것
-            </h3>
-            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
-              {plan.risks.map((r) => (
-                <li key={r} className="flex gap-2">
-                  <i aria-hidden style={{ color: "var(--color-t-warn)" }}>·</i>
-                  <span>{r}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        {/* ② 「걸리는 것」(`plan.risks`)은 그리지 않는다 — 머리 주석 「안 그리는 것」 참조 */}
       </div>
     </article>
   );
@@ -248,7 +294,7 @@ export default function PurchasePage() {
           <PlanCard key={p.key} plan={p} />
         ))}
       </div>
-      <Note note={data.plans_note} />
+      {/* ③ 안 목록 안내(`plans_note`)는 그리지 않는다 — 머리 주석 「안 그리는 것」 참조 */}
 
       {/*
         🔴 subtitle 에 «사람이» 라고 쓰지 않는다 (2026-09-10 · 마스터 통보 「백필 승인은
@@ -260,7 +306,8 @@ export default function PurchasePage() {
         🟡 «누가 승인했나» 를 표에 칸으로 더하는 것은 다음 판이다. 원장에 그 값이 없고,
         마스터가 purchases.decision_id(FK)를 세운 뒤 조인해 읽기로 했다.
       */}
-      <Panel title="확정된 매입" subtitle="승인을 거친 뒤에 생깁니다" footer="승인은 아래 서랍에서 합니다.">
+      {/* ⑤ 「승인은 아래 서랍에서 합니다」 꼬리말은 걷었다 — 머리 주석 「안 그리는 것」 참조 */}
+      <Panel title="확정된 매입" subtitle="승인을 거친 뒤에 생깁니다">
         {/*
           🔴 매입 번호 칸(`approval`)을 **화면에서만** 가린다 (2026-09-17). 값은 API 에 남는다.
              잰 것 — REH-0914 08-31 · FINAL-0918 09-14 · V13 01-26 세 실행에서
@@ -270,7 +317,7 @@ export default function PurchasePage() {
           ⚠️ 이름을 고치는 쪽(「매입 번호」)은 API 가 했다 — 칸이 원래 「승인」으로 틀려 있었다.
         */}
         <CommittedTable table={data.committed} />
-        <Note note={data.committed_note} />
+        {/* ④ 확정 매입 안내(`committed_note`)는 그리지 않는다 — 머리 주석 「안 그리는 것」 참조 */}
       </Panel>
     </>
   );
