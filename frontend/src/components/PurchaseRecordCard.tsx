@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
-import { ApiError, getPurchaseRecord, postPurchaseRecord } from "@/lib/api";
+import {
+  ApiError,
+  getPurchaseRecord,
+  postPurchaseRecord,
+  requestPlanChange,
+} from "@/lib/api";
 import { formatKoreanDateTime, userErrorText } from "@/lib/procurementLabels";
 import { serverSnapshot, sessionSnapshot, subscribeSession } from "@/lib/session";
 import type { PurchaseRecordLeg, PurchaseRecordOut, PurchaseRecordStatus } from "@/lib/types";
@@ -35,13 +40,18 @@ import type { PurchaseRecordLeg, PurchaseRecordOut, PurchaseRecordStatus } from 
 const STATUS_TEXT: Record<Exclude<PurchaseRecordStatus, "NOT_REQUIRED">, string> = {
   AWAITING_PURCHASE_RECORD: "기록 대기",
   APPLIED: "반영됨",
-  NOT_APPLIED: "반영되지 않음",
+  NOT_APPLIED: "입고 처리 중",
 };
 
+/**
+ * ★ **`NOT_APPLIED` 는 실패가 아니라 진행이다** (2026-09-17). 기록은 남았고 다음 개장
+ *   때 원장에 선다 — 경고색으로 칠하면 사람이 *"내가 뭘 잘못 적었나"* 로 읽는다.
+ *   그래서 기록 대기와 같은 진행 계열(`gold`)을 쓴다.
+ */
 const STATUS_STYLE: Record<Exclude<PurchaseRecordStatus, "NOT_REQUIRED">, string> = {
   AWAITING_PURCHASE_RECORD: "bg-gold-wash text-gold",
   APPLIED: "bg-accent-wash text-accent-ink",
-  NOT_APPLIED: "bg-warn-wash text-warn",
+  NOT_APPLIED: "bg-gold-wash text-gold",
 };
 
 const 원 = (value: number | null | undefined): string =>
@@ -111,13 +121,22 @@ export function PurchaseRecordCard({ requestId }: { requestId: string }) {
               일정이 섰습니다.
             </p>
           ) : (
+            // 원장에 아직 안 섰다는 말이다 — 진행 중이지 실패가 아니라 경고색을 쓰지 않는다.
             data.reason && (
-              <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
+              <p className="m-0 rounded-lg border border-gold/25 bg-gold-wash px-3 py-2 text-[12.5px] text-gold">
                 {data.reason}
               </p>
             )
           )}
         </>
+      )}
+      {/*
+        🔴 **이미 원장에 선 것(`APPLIED`)에는 안 보인다.** 실린 것을 되돌리려면 취소
+           경로가 따로 있어야 하고, 이 버튼은 그것을 하지 못한다 — 못 하는 일을
+           할 수 있는 것처럼 보이는 버튼이 제일 나쁘다.
+      */}
+      {(data.status === "AWAITING_PURCHASE_RECORD" || data.status === "NOT_APPLIED") && (
+        <ChangeRequest requestId={data.request_id} onRequested={reload} />
       )}
     </Shell>
   );
@@ -391,7 +410,7 @@ function RecordForm({
   );
 }
 
-/* ── 반영됨 · 반영되지 않음 · 기록값 표 ─────────────────────────────────── */
+/* ── 반영됨 · 입고 처리 중 · 기록값 표 ───────────────────────────────────── */
 
 function RecordTable({ data }: { data: PurchaseRecordOut }) {
   const record = data.record;
@@ -441,4 +460,187 @@ function RecordTable({ data }: { data: PurchaseRecordOut }) {
       </p>
     </>
   );
+}
+
+/* ── 승인 되돌리기 ───────────────────────────────────────────────────────── */
+
+/**
+ * 잘못 고른 안 · 잘못 적은 값을 **사람이 화면에서 되돌린다** (2026-09-17).
+ *
+ * ★ 백엔드에는 이미 있던 길이다 — 승인과 같은 `/decision` 에 조건을 붙인 재요청을
+ *   한 회차 더 적는다. 결정은 지워지지 않고 **최신 회차가 승인이 아니게 되는 것**으로
+ *   접힌다. 그러면 그 승인이 만든 실매입 기록은 다음 개장 때 원장에 서지 않는다.
+ *
+ * ★ **되돌린 사람은 승인한 사람과 같은 자리에서 온다** — 로그인 이름이다. 새로 짓거나
+ *   입력칸으로 받으면 승인 이력에 두 종류의 이름이 섞인다.
+ *
+ * ★ **확인을 한 번 더 받는다.** 장부를 바꾸는 요청이라 화면이 그렇게 약속했다.
+ */
+function ChangeRequest({
+  requestId,
+  onRequested,
+}: {
+  requestId: string;
+  onRequested: () => Promise<void>;
+}) {
+  const session = useSyncExternalStore(subscribeSession, sessionSnapshot, serverSnapshot);
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function close() {
+    setOpen(false);
+    setConfirming(false);
+    setReason("");
+    setError(null);
+  }
+
+  // 🔴 조건이 비면 **보내지 않는다.** 서버도 거절하지만, 거절을 받고 나서 알려 주는
+  //    것과 적는 자리에서 알려 주는 것은 다른 일이다.
+  function ask() {
+    if (reason.trim() === "") {
+      setError("무엇을 바꿔야 하는지 한 줄이라도 적어 주세요.");
+      return;
+    }
+    setError(null);
+    setConfirming(true);
+  }
+
+  async function send() {
+    if (!session) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await requestPlanChange({
+        requestId,
+        conditionText: reason.trim(),
+        decidedBy: session.name,
+      });
+      close();
+      // 상태의 주인은 서버다 — 응답을 믿지 않고 카드를 다시 읽는다.
+      await onRequested();
+    } catch (failure) {
+      // ★ 서버가 준 사유를 **그대로** 올린다. 덮으면 무엇을 고쳐야 하는지가 사라진다.
+      setError(serverReasonText(failure));
+      setConfirming(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open)
+    return (
+      <div className="flex flex-wrap items-center gap-2 border-t border-line-soft pt-3">
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-muted"
+        >
+          승인 되돌리기
+        </button>
+        <span className="text-[11.5px] text-faint">
+          안을 잘못 골랐거나 값을 잘못 적었으면 여기서 되돌리고 다시 고를 수 있습니다.
+        </span>
+      </div>
+    );
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-line bg-sunk p-3">
+      <p className="m-0 text-[12.5px] text-ink">
+        <b className="font-semibold">이 승인을 되돌립니다.</b> 되돌리면 적은 값은 매입 원장에
+        서지 않고, 안을 다시 골라야 합니다.
+      </p>
+      <label className="flex flex-col gap-1 text-[11.5px]">
+        <span className="text-muted">무엇을 바꿔야 하나요</span>
+        <textarea
+          rows={2}
+          value={reason}
+          onChange={(e) => {
+            setReason(e.target.value);
+            setConfirming(false);
+          }}
+          placeholder="예: 단가를 잘못 적었습니다. 12,000원이 아니라 1,200원입니다."
+          className="w-full resize-y rounded-md border border-line bg-surface px-2 py-1.5 text-[12.5px] text-ink"
+        />
+      </label>
+
+      {confirming ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[12.5px] text-ink">정말 되돌릴까요?</span>
+          <button
+            type="button"
+            onClick={() => void send()}
+            disabled={busy || !session}
+            className="rounded-lg bg-warn px-3 py-1.5 text-[12.5px] font-semibold text-white disabled:opacity-45"
+          >
+            {busy ? "되돌리는 중" : "네, 되돌립니다"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            disabled={busy}
+            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-muted"
+          >
+            아니요
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={ask}
+            disabled={!session}
+            className="rounded-lg border border-warn bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-warn disabled:opacity-45"
+          >
+            되돌리기
+          </button>
+          <button
+            type="button"
+            onClick={close}
+            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[12.5px] font-semibold text-muted"
+          >
+            그만두기
+          </button>
+          <span className="text-[11.5px] text-faint">
+            {session
+              ? `${session.name}님 이름으로 기록합니다`
+              : "로그인 정보를 읽지 못해 되돌릴 수 없습니다"}
+          </span>
+        </div>
+      )}
+
+      {error && (
+        <p className="m-0 rounded-lg border border-warn/25 bg-warn-wash px-3 py-2 text-[12.5px] text-warn">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 서버가 준 사유를 한 줄로 **그대로** 옮긴다.
+ *
+ * ★ `recordErrorText` 와 다르다 — 저쪽은 사람 말이 아니면 일반 문장으로 덮지만,
+ *   되돌리기는 막힌 이유(*"이미 다른 결정이 있다"* 같은 것)가 그 자리에서 보여야
+ *   사람이 다음 수를 고른다.
+ * ★ 본문 검사는 목록으로 오므로 문장만 뽑는다.
+ */
+function serverReasonText(error: unknown): string {
+  let message = error instanceof Error ? error.message : "";
+  try {
+    const parsed = JSON.parse(message) as unknown;
+    if (Array.isArray(parsed)) {
+      message = parsed
+        .map((item) => String((item as { msg?: unknown })?.msg ?? ""))
+        .map((msg) => msg.replace(/^Value error,\s*/, ""))
+        .filter(Boolean)
+        .join(" · ");
+    }
+  } catch {
+    /* 문장 그대로 */
+  }
+  return message.trim() === "" ? "되돌리지 못했습니다." : message;
 }
