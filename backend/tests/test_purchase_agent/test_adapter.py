@@ -166,8 +166,10 @@ def test_allowed_axes_carries_one_evidence_per_gate() -> None:
     """
     reply = purchase_port(_request("배추", SPREAD_WIDE))[0]
     axes_ev = _axes_evidence(reply)
-    # 신뢰도(CI) · 총량(VOL) · 편중(MIX) — 축을 여닫는 조건이 셋이라 근거도 셋이다.
-    assert {e.ref_ids[0].split("-")[1] for e in axes_ev} == {"CI", "VOL", "MIX"}
+    # 신뢰도(CI) · 총량(VOL) · 가격 경로(TREND) · 편중(MIX) — 축을 여닫는 조건마다 근거 하나.
+    # 🔴 TREND 는 2026-09-17 에 더했다 — 상승률 · 궤적 판정이 기록에 따로 안 남아
+    #   «상승률이 모자랐나 · 실제로 내려갔나 · 판정을 못 했나» 를 가를 수 없었다.
+    assert {e.ref_ids[0].split("-")[1] for e in axes_ev} == {"CI", "VOL", "TREND", "MIX"}
     assert not any(e.unit == "count" for e in axes_ev), "개수(count) 방식은 폐기됐다"
     assert not any(e.value == float(len(reply.payload["allowed_axes"])) for e in axes_ev)
 

@@ -1,0 +1,182 @@
+{
+ "_provenance": {
+  "kind": "ARTIFICIAL — 인위 조건 · 실측 아님",
+  "why": "실제 예측 배치 전수(v_ml_price_forecast · AUC · 528개 · 2025-12-31~2026-09-17)에서 stable · 상승률 10% 이상 · 지속 상승(2026-09-17 정의)을 함께 만족한 사례가 0건이라 만들었다",
+  "shape": "실제 배치 모양을 따른다 — 금요일 배치의 주말 복사 행 · 앞 두 장날 lead_time 게이트(= 앵커) · 모델 예측 보합 섞인 상승",
+  "values": "가격 수준은 mock_rising 배추(앵커 1,650)에 맞췄다 — mock 시세·재고·주문과 같이 돌리려는 것이다. 구간 ±3% 도 인위값이다",
+  "use": "로컬 검사·시연 입력 전용. 🔴 DB · 공용 .env · 인계 실행 · FINAL 에 넣지 않는다. 경제성 · 분할의 우수성 근거가 아니다",
+  "made_at": "2026-09-17"
+ },
+ "as_of": "2026-08-21",
+ "item": "배추",
+ "generated_at": "2026-08-21T06:00:00+09:00",
+ "unit": "원/kg",
+ "current_price": 1650,
+ "horizon_days": 18,
+ "model_version": "demo-artificial-v0",
+ "use_recommended": true,
+ "daily": [
+  {
+   "date": "2026-08-22",
+   "predicted": 1650,
+   "lower": 1600,
+   "upper": 1700,
+   "is_filled": true,
+   "is_gated": true,
+   "gate_reason": "lead_time"
+  },
+  {
+   "date": "2026-08-23",
+   "predicted": 1650,
+   "lower": 1600,
+   "upper": 1700,
+   "is_filled": true,
+   "is_gated": true,
+   "gate_reason": "lead_time"
+  },
+  {
+   "date": "2026-08-24",
+   "predicted": 1650,
+   "lower": 1600,
+   "upper": 1700,
+   "is_filled": false,
+   "is_gated": true,
+   "gate_reason": "lead_time"
+  },
+  {
+   "date": "2026-08-25",
+   "predicted": 1650,
+   "lower": 1600,
+   "upper": 1700,
+   "is_filled": false,
+   "is_gated": true,
+   "gate_reason": "lead_time"
+  },
+  {
+   "date": "2026-08-26",
+   "predicted": 1700,
+   "lower": 1649,
+   "upper": 1751,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-08-27",
+   "predicted": 1700,
+   "lower": 1649,
+   "upper": 1751,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-08-28",
+   "predicted": 1720,
+   "lower": 1668,
+   "upper": 1772,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-08-29",
+   "predicted": 1720,
+   "lower": 1668,
+   "upper": 1772,
+   "is_filled": true,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-08-30",
+   "predicted": 1720,
+   "lower": 1668,
+   "upper": 1772,
+   "is_filled": true,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-08-31",
+   "predicted": 1760,
+   "lower": 1707,
+   "upper": 1813,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-01",
+   "predicted": 1780,
+   "lower": 1727,
+   "upper": 1833,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-02",
+   "predicted": 1780,
+   "lower": 1727,
+   "upper": 1833,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-03",
+   "predicted": 1800,
+   "lower": 1746,
+   "upper": 1854,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-04",
+   "predicted": 1830,
+   "lower": 1775,
+   "upper": 1885,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-05",
+   "predicted": 1830,
+   "lower": 1775,
+   "upper": 1885,
+   "is_filled": true,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-06",
+   "predicted": 1830,
+   "lower": 1775,
+   "upper": 1885,
+   "is_filled": true,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-07",
+   "predicted": 1850,
+   "lower": 1794,
+   "upper": 1906,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  },
+  {
+   "date": "2026-09-08",
+   "predicted": 1860,
+   "lower": 1804,
+   "upper": 1916,
+   "is_filled": false,
+   "is_gated": false,
+   "gate_reason": null
+  }
+ ]
+}

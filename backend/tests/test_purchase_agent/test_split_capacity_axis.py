@@ -59,13 +59,18 @@ def _날(offset: int) -> str:
 def _평평한_예측(forecast: dict) -> dict:
     """④ 의 ``by_trend`` 를 **거짓**으로 만든다 — 수량 축만 남겨 진입 경로를 하나로 좁힌다.
 
-    🔴 ④ 는 ``is_sustained_rise`` 만 보고 ① 은 거기에 ``stable`` 과 상승률을 더 본다.
+    🔴 ④ 는 ``judge_sustained_rise`` 만 보고 ① 은 거기에 ``stable`` 과 상승률을 더 본다.
       예측이 단조 상승이면 ④ 가 수량과 무관하게 진입해 이 검사가 무엇을 쟀는지 흐려진다.
+
+    🔴 **기준 가격도 같은 값으로 맞춘다** (2026-09-17 정의 교체). 지금 궤적은 앵커
+      (``current_price``)에서 출발하고 보합을 허용한다 — 예측만 평평하게 두면 앵커보다
+      높은 첫 값에서 멈춘 «상승 후 보합» 이라 여전히 지속 상승이다.
     """
     사본 = copy.deepcopy(forecast)
     고정 = 사본["daily"][0]["predicted"]
     for row in 사본["daily"]:
         row["predicted"] = 고정
+    사본["current_price"] = 고정  # 마지막 예측 == 기준 가격 → 순상승 없음
     return 사본
 
 
