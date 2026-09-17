@@ -90,7 +90,7 @@ export default function SalesPage() {
   const [tab, setTab] = useState<Tab>("overview");
   const [salesRefresh, setSalesRefresh] = useState(0);
   return (
-    <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-4 sm:gap-5">
+    <div className="flex w-full flex-col gap-4 sm:gap-5">
       <DomainHeader title="판매" tabs={TABS} active={tab} onChange={setTab} />
       <DataBasis asOf={asOf} note={DATA_SOURCE_NOTE} />
       <Body simRun={simRun} asOf={asOf} tab={tab} salesRefresh={salesRefresh} onSalesConfirmed={() => setSalesRefresh((value) => value + 1)} />
@@ -241,14 +241,14 @@ function Overview({ simRun, asOf, salesRefresh }: { simRun: string; asOf: string
             setAppliedTrendRange({ from: trendFrom, to: trendTo });
           }}
         >
-          <label className="flex flex-col gap-1 text-[12px] text-ink2">시작일
+          <label className="flex flex-col gap-1 text-[16px] text-ink2">시작일
             <input type="date" value={trendFrom} onChange={(event) => setTrendFrom(event.target.value)} />
           </label>
-          <label className="flex flex-col gap-1 text-[12px] text-ink2">종료일
+          <label className="flex flex-col gap-1 text-[16px] text-ink2">종료일
             <input type="date" value={trendTo} onChange={(event) => setTrendTo(event.target.value)} />
           </label>
-          <button type="submit" className="rounded-lg border px-3 py-2 text-[12px] font-semibold" style={{ borderColor: "var(--color-hair)" }}>기간 적용</button>
-          {(appliedTrendRange.from || appliedTrendRange.to) && <button type="button" onClick={() => { setTrendFrom(""); setTrendTo(""); setAppliedTrendRange({ from: "", to: "" }); }} className="rounded-lg border px-3 py-2 text-[12px]">전체 기간</button>}
+          <button type="submit" className="rounded-lg border px-3 py-2 text-[16px] font-semibold" style={{ borderColor: "var(--color-hair)" }}>기간 적용</button>
+          {(appliedTrendRange.from || appliedTrendRange.to) && <button type="button" onClick={() => { setTrendFrom(""); setTrendTo(""); setAppliedTrendRange({ from: "", to: "" }); }} className="rounded-lg border px-3 py-2 text-[16px]">전체 기간</button>}
         </form>
         {trend.loading ? (
           <Skeleton what="매출 추이" />
@@ -393,7 +393,7 @@ function Partners({ simRun, asOf }: { simRun: string; asOf: string }) {
                 <button
                   key={row.partner_id}
                   onClick={() => setSelected(row.partner_id)}
-                  className="rounded-lg border px-3 py-1.5 text-[11.5px]"
+                  className="rounded-lg border px-3 py-1.5 text-[15.5px]"
                   style={{ borderColor: "var(--color-hair)" }}
                 >
                   {partnerText(row.partner_name, row.partner_id)} 상세
@@ -483,7 +483,7 @@ function PartnerDetailPanel({
           />
           <Metric label="미수금" value={moneyWon(data.summary.receivable_balance_krw)} />
         </Metrics>
-        <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+        <p className="mb-0 mt-3 text-[15.5px] text-ink2">
           여신 한도는 재무에서 관리합니다 — 판매 화면이 «한도 − 채권» 으로 만들지 않습니다.
         </p>
       </Panel>
@@ -581,7 +581,7 @@ function Badge({ text, tone }: { text: string; tone: "good" | "bad" | "neutral" 
   const background =
     tone === "neutral" ? "var(--color-grid)" : `var(--color-t-${tone === "good" ? "good" : "bad"}-bg)`;
   return (
-    <span className="rounded-full px-3 py-1 text-[11.5px]" style={{ color, background }}>
+    <span className="rounded-full px-3 py-1 text-[15.5px]" style={{ color, background }}>
       {text}
     </span>
   );
@@ -694,7 +694,7 @@ function Orders({ simRun, asOf }: { simRun: string; asOf: string }) {
                     type="button"
                     onClick={() => setSelected(row.sale_id)}
                     aria-pressed={selected === row.sale_id}
-                    className="rounded-md border px-2 py-1 text-[11px]"
+                    className="rounded-md border px-2 py-1 text-[15px]"
                     style={{
                       borderColor:
                         selected === row.sale_id ? "var(--color-t-info)" : "var(--color-hair)",
@@ -739,14 +739,14 @@ function Lifecycle({ simRun, asOf, saleId }: { simRun: string; asOf: string; sal
           { key: "detail", label: "설명", render: (row) => row.detail },
         ]}
       />
-      <p className="mb-0 mt-3 text-[11.5px] text-ink2">
+      <p className="mb-0 mt-3 text-[15.5px] text-ink2">
         {data.agent_lineage === "LIVE"
           ? "후보 → 판매 구간은 확정에 실린 업무 키로 이어졌습니다."
           : "이 판매에는 업무 키가 실려 있지 않아 후보 → 판매 구간을 잇지 못합니다. 날짜·품목으로 추정해 잇지 않습니다."}
       </p>
       <div className="mt-3">
         <TechDetails>
-          <p className="m-0 font-mono text-[11px] text-ink2">
+          <p className="m-0 font-mono text-[15px] text-ink2">
             {data.sale_id} · 확정 구간 {data.confirmed_lineage} · 후보 구간 {data.agent_lineage}
           </p>
           <div className="mt-2">
@@ -869,7 +869,7 @@ function Runs({ simRun }: { simRun: string }) {
                 setPage(0);
               }}
               placeholder="품목 또는 거래처 검색"
-              className="min-w-[190px] rounded-md border px-3 py-1.5 text-[12px]"
+              className="min-w-[190px] rounded-md border px-3 py-1.5 text-[16px]"
               style={{ borderColor: "var(--color-hair)" }}
             />
             <label className="sr-only" htmlFor="sales-run-date">기준일 필터</label>
@@ -880,7 +880,7 @@ function Runs({ simRun }: { simRun: string }) {
                 setAsOf(event.target.value);
                 setPage(0);
               }}
-              className="rounded-md border px-2 py-1.5 text-[12px]"
+              className="rounded-md border px-2 py-1.5 text-[16px]"
               style={{ borderColor: "var(--color-hair)" }}
             >
               <option value="">모든 기준일</option>
@@ -894,7 +894,7 @@ function Runs({ simRun }: { simRun: string }) {
                 setRuntime(event.target.value);
                 setPage(0);
               }}
-              className="rounded-md border px-2 py-1.5 text-[12px]"
+              className="rounded-md border px-2 py-1.5 text-[16px]"
               style={{ borderColor: "var(--color-hair)" }}
             >
               <option value="">모든 조회 상태</option>
@@ -902,7 +902,7 @@ function Runs({ simRun }: { simRun: string }) {
             </select>
           </div>
           {filteredRows.length === 0 ? (
-            <p className="m-0 rounded-lg border px-4 py-5 text-[12px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
+            <p className="m-0 rounded-lg border px-4 py-5 text-[16px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
               조건에 맞는 실행 이력이 없습니다. 검색어나 필터를 바꿔 보세요.
             </p>
           ) : (
@@ -927,7 +927,7 @@ function Runs({ simRun }: { simRun: string }) {
               },
                 ]}
               />
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[12px] text-ink2">
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[16px] text-ink2">
             <span>
               검색 결과 {filteredRows.length}건 중 {currentPage * pageSize + 1}–
               {Math.min((currentPage + 1) * pageSize, filteredRows.length)}건

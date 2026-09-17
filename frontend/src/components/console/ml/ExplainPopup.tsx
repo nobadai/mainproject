@@ -86,12 +86,12 @@ export function ExplainPopup({
           className="flex flex-wrap items-center gap-2 border-b px-4 py-3"
           style={{ borderColor: "var(--color-hair-soft)" }}
         >
-          <h4 className="m-0 text-[14px] font-semibold">
+          <h4 className="m-0 text-[18px] font-semibold">
             왜 이렇게 예측했나 — {en(ITEM, item)}
             {lead === 0 ? " · 기준일 당일" : ` · ${lead}영업일 뒤`}
           </h4>
           {targetDate && (
-            <span className="font-mono text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
+            <span className="font-mono text-[15.5px]" style={{ color: "var(--color-mut2)" }}>
               {targetDate}
             </span>
           )}
@@ -100,7 +100,7 @@ export function ExplainPopup({
             type="button"
             onClick={onClose}
             aria-label="닫기"
-            className="ml-auto rounded px-2 py-1 text-[13px] transition hover:bg-sunk"
+            className="ml-auto rounded px-2 py-1 text-[17px] transition hover:bg-sunk"
             style={{ color: "var(--color-mut)" }}
           >
             ✕
@@ -110,14 +110,14 @@ export function ExplainPopup({
         <div className="p-4">
           {err && (
             <p
-              className="m-0 rounded-lg px-3.5 py-3 text-[12.5px]"
+              className="m-0 rounded-lg px-3.5 py-3 text-[16.5px]"
               style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
             >
               {err}
             </p>
           )}
           {!rep && !err && (
-            <p className="m-0 text-[12.5px]" style={{ color: "var(--color-mut2)" }}>
+            <p className="m-0 text-[16.5px]" style={{ color: "var(--color-mut2)" }}>
               불러오는 중…
             </p>
           )}

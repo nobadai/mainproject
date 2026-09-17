@@ -73,9 +73,9 @@ function Frame({ title, body, tone }: { title: string; body: string; tone: strin
       className="rounded-xl border border-dashed bg-panel px-5 py-10 text-center"
       style={{ borderColor: "var(--color-hair)" }}
     >
-      <p className="m-0 text-[15px] font-semibold">{title}</p>
-      <p className="mb-0 mt-2 text-[12px] text-ink2">{body}</p>
-      <p className="mb-0 mt-3 font-mono text-[10px] tracking-[0.12em] text-ink2">{tone}</p>
+      <p className="m-0 text-[19px] font-semibold">{title}</p>
+      <p className="mb-0 mt-2 text-[16px] text-ink2">{body}</p>
+      <p className="mb-0 mt-3 font-mono text-[14px] tracking-[0.12em] text-ink2">{tone}</p>
     </section>
   );
 }
@@ -116,8 +116,8 @@ export function Failed({ what, message }: { what: string; message: string }) {
       className="rounded-xl border px-5 py-6"
       style={{ borderColor: "var(--color-hair)" }}
     >
-      <p className="m-0 text-[13px] font-semibold">{what} 조회 실패</p>
-      <p className="mb-0 mt-2 whitespace-pre-wrap font-mono text-[11.5px] text-ink2">{message}</p>
+      <p className="m-0 text-[17px] font-semibold">{what} 조회 실패</p>
+      <p className="mb-0 mt-2 whitespace-pre-wrap font-mono text-[15.5px] text-ink2">{message}</p>
     </section>
   );
 }
@@ -168,7 +168,7 @@ export function Table<T>({
   return (
     <div>
       {controls && (
-        <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px]">
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-[16px]">
           <label className="sr-only">표 검색</label>
           <input
             value={search}
@@ -197,18 +197,18 @@ export function Table<T>({
         </div>
       )}
       {controls && filtered.length === 0 ? (
-        <p className="m-0 rounded-lg border px-4 py-5 text-[12px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
+        <p className="m-0 rounded-lg border px-4 py-5 text-[16px] text-ink2" style={{ borderColor: "var(--color-hair)" }}>
           조건에 맞는 항목이 없습니다. 검색어 또는 검색 항목을 바꿔 보세요.
         </p>
       ) : (
         <div className="thin-scroll overflow-x-auto">
-          <table className="w-full border-collapse text-[12px]">
+          <table className="w-full border-collapse text-[16px]">
         <thead>
           <tr>
             {columns.map((column) => (
               <th
                 key={column.key}
-                className={`border-b px-2 py-2 text-[11px] font-semibold text-ink2 ${
+                className={`border-b px-2 py-2 text-[15px] font-semibold text-ink2 ${
                   column.align === "right" ? "text-right" : "text-left"
                 }`}
                 style={{ borderColor: "var(--color-hair)" }}
@@ -225,7 +225,7 @@ export function Table<T>({
                 <td
                   key={column.key}
                   className={`border-b px-2 py-2 ${column.align === "right" ? "text-right tabular-nums" : ""} ${
-                    column.mono ? "font-mono text-[11px]" : ""
+                    column.mono ? "font-mono text-[15px]" : ""
                   }`}
                   style={{ borderColor: "var(--color-hair)" }}
                 >
@@ -239,7 +239,7 @@ export function Table<T>({
         </div>
       )}
       {controls && filtered.length > 0 && (
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[12px] text-ink2">
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[16px] text-ink2">
           <span>
             {currentPage * pageSize + 1}–{Math.min((currentPage + 1) * pageSize, filtered.length)} / {filtered.length}건
           </span>
@@ -258,9 +258,9 @@ export function Table<T>({
 export function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="rounded-lg border p-3" style={{ borderColor: "var(--color-hair)" }}>
-      <span className="text-[11.5px] text-ink2">{label}</span>
-      <b className="mt-1 block text-[15px] tabular-nums">{value}</b>
-      {hint && <span className="mt-1 block text-[11px] text-ink2">{hint}</span>}
+      <span className="text-[15.5px] text-ink2">{label}</span>
+      <b className="mt-1 block text-[19px] tabular-nums">{value}</b>
+      {hint && <span className="mt-1 block text-[15px] text-ink2">{hint}</span>}
     </div>
   );
 }

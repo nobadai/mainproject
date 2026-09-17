@@ -31,7 +31,7 @@ export function Verdict({ level }: { level: string }) {
   const t = TONE[level] ?? { fg: "var(--color-mut)", bg: "var(--color-sunk)" };
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1.5 rounded px-2 py-0.5 text-[11px] font-semibold"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded px-2 py-0.5 text-[15px] font-semibold"
       style={{ color: t.fg, background: t.bg }}
     >
       <i aria-hidden className="inline-block size-1.5 rounded-full" style={{ background: t.fg }} />
@@ -49,11 +49,11 @@ export function FindingCard({ f, compact = false }: { f: Finding; compact?: bool
     >
       <div className="flex items-start gap-2.5">
         {f.level && <Verdict level={f.level} />}
-        <p className="m-0 flex-1 text-[13px] font-semibold leading-snug">{f.title}</p>
+        <p className="m-0 flex-1 text-[17px] font-semibold leading-snug">{f.title}</p>
       </div>
       {f.detail && (
         <p
-          className="m-0 mt-2 whitespace-pre-line text-[12px] leading-relaxed"
+          className="m-0 mt-2 whitespace-pre-line text-[16px] leading-relaxed"
           style={{ color: "var(--color-mut)" }}
         >
           {f.detail}
@@ -66,17 +66,17 @@ export function FindingCard({ f, compact = false }: { f: Finding; compact?: bool
         >
           {nums.map(([k, v], i) => (
             <div key={i} className="contents">
-              <dt className="m-0 truncate text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+              <dt className="m-0 truncate text-[15.5px]" style={{ color: "var(--color-mut)" }}>
                 {k}
               </dt>
-              <dd className="tabular m-0 text-right font-mono text-[11.5px]">{v}</dd>
+              <dd className="tabular m-0 text-right font-mono text-[15.5px]">{v}</dd>
             </div>
           ))}
         </dl>
       )}
       {f.advice && (
         <p
-          className="m-0 mt-2.5 rounded px-2.5 py-1.5 text-[11.5px]"
+          className="m-0 mt-2.5 rounded px-2.5 py-1.5 text-[15.5px]"
           style={{ background: "var(--color-sunk)", color: "var(--color-t-good)" }}
         >
           → {f.advice}
@@ -91,20 +91,20 @@ export function ReportBody({ report, subtitle }: { report: AgentReport; subtitle
     <section className="flex flex-col gap-2.5">
       <header className="flex flex-wrap items-center gap-2">
         <Verdict level={report.verdict} />
-        <h3 className="m-0 text-[13.5px] font-semibold">{report.name}</h3>
+        <h3 className="m-0 text-[17.5px] font-semibold">{report.name}</h3>
         {subtitle && (
-          <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+          <span className="text-[15.5px]" style={{ color: "var(--color-mut)" }}>
             {subtitle}
           </span>
         )}
         {report.at && (
-          <span className="ml-auto font-mono text-[11px]" style={{ color: "var(--color-mut2)" }}>
+          <span className="ml-auto font-mono text-[15px]" style={{ color: "var(--color-mut2)" }}>
             {report.at}
           </span>
         )}
       </header>
       {report.findings.length === 0 ? (
-        <p className="m-0 text-[12px]" style={{ color: "var(--color-mut2)" }}>
+        <p className="m-0 text-[16px]" style={{ color: "var(--color-mut2)" }}>
           보고할 내용이 없습니다 — 데이터와 시스템에 아무 문제가 없다는 뜻입니다.
         </p>
       ) : (

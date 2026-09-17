@@ -239,7 +239,12 @@ function RequestFrame({ group }: { group: RequestGroup }) {
       }}
     >
       <header className="flex flex-wrap items-center gap-2 px-1">
-        <h2 className="m-0 text-[15px] font-semibold">{group.item}</h2>
+        {/*
+          ★ 틀 머리는 카드 제목(18px)보다 **한 단 크다** — 19px. 글자 +4px 판(`#815`)이 모든
+            크기를 **같은 폭(+4px)** 으로 올렸고, 이 줄은 그 판 뒤에 합쳐져 못 올라갔었다
+            (15px → 19px). 카드 제목과의 차이(+1px)도 그 판 전과 같다.
+        */}
+        <h2 className="m-0 text-[19px] font-semibold">{group.item}</h2>
         <Pill
           text={group.pending ? "승인 대기" : "승인 완료"}
           tone={group.pending ? "warn" : "good"}
@@ -270,16 +275,16 @@ function PlanCard({ plan }: { plan: Plan }) {
         style={{ borderColor: "var(--color-hair-soft)" }}
       >
         {/* 🔴 품목은 요청 틀 머리에 있다 — 카드 제목은 안 이름만 (`plan.key` 는 안 바꾼다) */}
-        <strong className="text-[14px] font-semibold">{splitPlanKey(plan.key).label}</strong>
+        <strong className="text-[18px] font-semibold">{splitPlanKey(plan.key).label}</strong>
         <Pill text={plan.knob} tone="info" />
         <PlanState plan={plan} />
-        <span className="ml-auto text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+        <span className="ml-auto text-[15.5px]" style={{ color: "var(--color-mut)" }}>
           {plan.coverage}
         </span>
       </header>
 
       <div className="flex flex-col gap-3.5 p-4">
-        <dl className="m-0 flex flex-col gap-1.5 text-[12.5px]">
+        <dl className="m-0 flex flex-col gap-1.5 text-[16.5px]">
           {[
             ["사는 양", `${plan.qty_kg.toLocaleString("ko-KR")} kg`, true],
             ["예상 금액", `${plan.amount_krw.toLocaleString("ko-KR")} 원`, false],
@@ -289,7 +294,7 @@ function PlanCard({ plan }: { plan: Plan }) {
               <dt className="m-0" style={{ color: "var(--color-mut)" }}>
                 {k}
               </dt>
-              <dd className={`tabular m-0 font-mono ${hero ? "text-[19px]" : "text-[13px]"}`}>{v}</dd>
+              <dd className={`tabular m-0 font-mono ${hero ? "text-[23px]" : "text-[17px]"}`}>{v}</dd>
             </div>
           ))}
           {/*
@@ -306,7 +311,7 @@ function PlanCard({ plan }: { plan: Plan }) {
             style={{ background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
           >
             <dt className="m-0 font-semibold">이보다 비싸면 안 산다</dt>
-            <dd className="tabular m-0 font-mono text-[14px] font-semibold">
+            <dd className="tabular m-0 font-mono text-[18px] font-semibold">
               {plan.cut_unit_price === null
                 ? "이 실행에는 기준이 없습니다"
                 : `${plan.cut_unit_price.toLocaleString("ko-KR")} 원/kg`}
@@ -315,7 +320,7 @@ function PlanCard({ plan }: { plan: Plan }) {
         </dl>
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             회차
           </h3>
           <DataTable table={plan.legs} />
@@ -335,7 +340,7 @@ function PlanCard({ plan }: { plan: Plan }) {
         */}
         {plan.legs.rows.length >= 2 && (
           <section className="flex flex-col gap-2">
-            <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+            <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
               지급
             </h3>
             <DataTable table={plan.payments} />
@@ -343,14 +348,14 @@ function PlanCard({ plan }: { plan: Plan }) {
         )}
 
         <section className="flex flex-col gap-2">
-          <h3 className="m-0 text-[11.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
+          <h3 className="m-0 text-[15.5px] font-semibold" style={{ color: "var(--color-mut)" }}>
             근거
           </h3>
-          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[11.5px] leading-relaxed">
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[15.5px] leading-relaxed">
             {plan.reasons.map((r, i) => (
               <li key={i} className="flex flex-wrap items-baseline gap-1.5">
                 <span
-                  className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                  className="shrink-0 rounded px-1.5 py-0.5 text-[14px] font-semibold"
                   style={{ background: "var(--color-sunk)", color: "var(--color-ink2)" }}
                 >
                   {r.source}

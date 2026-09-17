@@ -45,21 +45,21 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
       disabled={!row.open}
       onClick={() => onSelect(row.key)}
       title={row.open ? undefined : "이 역할에는 안 보입니다 — 화면에서만 가린 것이고 서버는 막지 않습니다"}
-      className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[13.5px] ${
+      className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[17.5px] ${
         active === row.key
           ? "bg-surface font-semibold text-ink shadow-[0_1px_2px_rgba(21,26,22,.06)]"
           : "text-muted"
       } ${row.open ? "hover:bg-surface/70" : "cursor-not-allowed opacity-40"}`}
     >
-      <span className="w-4 text-center text-[13px] opacity-75">{row.icon}</span>
+      <span className="w-4 text-center text-[17px] opacity-75">{row.icon}</span>
       {row.label}
       {row.badge && row.open && (
-        <span className="ml-auto rounded-full bg-accent-wash px-1.5 py-px text-[10.5px] font-semibold text-accent-ink">
+        <span className="ml-auto rounded-full bg-accent-wash px-1.5 py-px text-[14.5px] font-semibold text-accent-ink">
           {row.badge}
         </span>
       )}
       {!row.open && (
-        <span className="ml-auto rounded-full border border-line px-1.5 py-px text-[10.5px] text-faint">
+        <span className="ml-auto rounded-full border border-line px-1.5 py-px text-[14.5px] text-faint">
           권한
         </span>
       )}
@@ -81,40 +81,40 @@ export function Sidebar({ session, active, onSelect, onSignOut }: Props) {
         title="첫 화면으로"
         className="flex cursor-pointer items-center gap-2.5 rounded-lg px-1.5 py-1 text-left hover:bg-surface/70"
       >
-        <span className="grid size-[26px] place-items-center rounded-[7px] bg-accent text-[13px] font-bold text-white">
+        <span className="grid size-[26px] place-items-center rounded-[7px] bg-accent text-[17px] font-bold text-white">
           햇
         </span>
-        <b className="text-[14.5px] font-semibold">운영 콘솔</b>
+        <b className="text-[18.5px] font-semibold">운영 콘솔</b>
       </button>
 
       <div>
-        <p className="mb-1.5 px-2 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">
+        <p className="mb-1.5 px-2 text-[14.5px] font-semibold uppercase tracking-[0.12em] text-faint">
           에이전트
         </p>
         <nav className="flex flex-col gap-px">{agents.map(item)}</nav>
       </div>
 
       <div>
-        <p className="mb-1.5 px-2 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">
+        <p className="mb-1.5 px-2 text-[14.5px] font-semibold uppercase tracking-[0.12em] text-faint">
           기록
         </p>
         <nav className="flex flex-col gap-px">{records.map(item)}</nav>
       </div>
 
       <div className="mt-auto flex items-center gap-2.5 border-t border-line px-2 pt-3">
-        <span className="grid size-7 shrink-0 place-items-center rounded-full bg-accent-wash text-[11.5px] font-bold text-accent-ink">
+        <span className="grid size-7 shrink-0 place-items-center rounded-full bg-accent-wash text-[15.5px] font-bold text-accent-ink">
           {session.name.slice(0, 2)}
         </span>
         <div className="min-w-0">
-          <b className="block truncate text-[13px] font-semibold">{session.name}</b>
-          <small className="block text-[11px] leading-tight text-faint">
+          <b className="block truncate text-[17px] font-semibold">{session.name}</b>
+          <small className="block text-[15px] leading-tight text-faint">
             {ROLE_LABEL[session.role]}
           </small>
         </div>
         <button
           type="button"
           onClick={onSignOut}
-          className="ml-auto text-[11px] text-faint hover:text-muted"
+          className="ml-auto text-[15px] text-faint hover:text-muted"
         >
           나가기
         </button>

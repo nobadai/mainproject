@@ -77,7 +77,7 @@ export function DateRange({
 
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex flex-wrap items-center gap-1.5 text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
+      <div className="flex flex-wrap items-center gap-1.5 text-[15.5px]" style={{ color: "var(--color-mut2)" }}>
         <input
           type="date"
           aria-label="시작일"
@@ -85,7 +85,7 @@ export function DateRange({
           //  ★ 빈 값(달력을 지운 상태)은 무시합니다. `layout.tsx` 의 기준일
           //    선택기와 같은 규칙입니다 — 빈 날짜로는 물어볼 것이 없습니다.
           onChange={(e) => e.target.value && setFrom(e.target.value)}
-          className="rounded-md border px-2 py-1 font-mono text-[11.5px]"
+          className="rounded-md border px-2 py-1 font-mono text-[15.5px]"
           style={box}
         />
         <span aria-hidden>~</span>
@@ -94,13 +94,13 @@ export function DateRange({
           aria-label="끝일"
           value={effTo}
           onChange={(e) => e.target.value && setTo(e.target.value)}
-          className="rounded-md border px-2 py-1 font-mono text-[11.5px]"
+          className="rounded-md border px-2 py-1 font-mono text-[15.5px]"
           style={box}
         />
-        {hint && <span className="text-[11px]">{hint}</span>}
+        {hint && <span className="text-[15px]">{hint}</span>}
       </div>
       {reversed && (
-        <p className="m-0 text-[11.5px]" style={{ color: "var(--color-t-warn)" }}>
+        <p className="m-0 text-[15.5px]" style={{ color: "var(--color-t-warn)" }}>
           시작일이 끝일보다 뒤입니다 — 날짜를 다시 고르세요. (아직 아무것도 받아오지 않았습니다)
         </p>
       )}

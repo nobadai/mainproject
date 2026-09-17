@@ -60,10 +60,10 @@ export function ApprovedPlan({
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-accent/35 bg-accent-wash/40 p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="m-0 text-base font-semibold text-accent-ink">
+        <h3 className="m-0 text-[20px] font-semibold text-accent-ink">
           ‘{String(scenario.label ?? "")}’ 안으로 결정했습니다
         </h3>
-        <span className="text-[11.5px] text-faint">
+        <span className="text-[15.5px] text-faint">
           {decision.decided_by}님 승인
           {formatKoreanDateTime(decision.created_at) && ` · ${formatKoreanDateTime(decision.created_at)}`}
         </span>
@@ -77,8 +77,8 @@ export function ApprovedPlan({
           { k: "커버", v: scenario.coverage_days ? `${scenario.coverage_days}일` : "—" },
         ].map((cell) => (
           <div key={cell.k} className="rounded-lg border border-line bg-surface px-3 py-2">
-            <p className="m-0 text-[10.5px] uppercase tracking-[0.1em] text-faint">{cell.k}</p>
-            <p className="m-0 mt-0.5 font-mono text-[14.5px] font-semibold tabular-nums">
+            <p className="m-0 text-[14.5px] uppercase tracking-[0.1em] text-faint">{cell.k}</p>
+            <p className="m-0 mt-0.5 font-mono text-[18.5px] font-semibold tabular-nums">
               {cell.v}
             </p>
           </div>
@@ -128,7 +128,7 @@ export function ApprovedPlan({
       )}
 
       {/* 🔴 이 화면이 무엇이 아닌지 적는다 — 안 적으면 "오늘 산 것" 으로 읽힌다 */}
-      <p className="m-0 rounded-lg border border-line-soft bg-sunk px-3 py-2 text-[12.5px] text-muted">
+      <p className="m-0 rounded-lg border border-line-soft bg-sunk px-3 py-2 text-[16.5px] text-muted">
         <b className="text-ink">여기 있는 것은 전부 계획입니다.</b> 승인은 기록이고 실제
         발주는 별도로 진행합니다.
       </p>
@@ -139,7 +139,7 @@ export function ApprovedPlan({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <p className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-faint">
+      <p className="mb-1.5 text-[14.5px] font-semibold uppercase tracking-[0.12em] text-faint">
         {title}
       </p>
       {children}
@@ -150,9 +150,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Table({ head, rows }: { head: string[]; rows: string[][] }) {
   return (
     <div className="overflow-x-auto rounded-lg border border-line bg-surface">
-      <table className="w-full min-w-[380px] border-collapse text-[12.5px]">
+      <table className="w-full min-w-[380px] border-collapse text-[16.5px]">
         <thead>
-          <tr className="bg-sunk text-[10.5px] uppercase tracking-wide text-muted">
+          <tr className="bg-sunk text-[14.5px] uppercase tracking-wide text-muted">
             {head.map((h) => (
               <th key={h} className="px-3 py-1.5 text-left font-semibold">
                 {h}

@@ -51,6 +51,7 @@ const DOMAIN_ACTION_LABEL: Record<DomainAction, string> = {
   SALES_PROPOSALS_TODAY: "오늘 판매안 조회",
   SALES_CONFIRMED_TODAY: "확정 판매 조회",
   SALES_REPORT_GENERATE: "판매 보고서 생성",
+  LOGISTICS_REPORT_GENERATE: "재고·물류 보고서 생성",
   PARTNER_LIST: "거래처 목록 조회",
   PARTNER_CREATE: "거래처 등록",
   PARTNER_DETAIL_GET: "거래처 상세 조회",
@@ -121,7 +122,7 @@ export function LlmTrace({ trace }: { trace: Trace }) {
       : CONFIDENCE[trace.intent.confidence];
 
   return (
-    <details className="mt-2 border-t border-line-soft pt-2 text-[12px] text-muted">
+    <details className="mt-2 border-t border-line-soft pt-2 text-[16px] text-muted">
       <summary className="cursor-pointer select-none text-faint marker:text-faint">
         요청 해석 보기
       </summary>
@@ -131,12 +132,12 @@ export function LlmTrace({ trace }: { trace: Trace }) {
         {trace.intent.domain_action && (
           <>
             <dt className="text-faint">내부 동작</dt>
-            <dd className="m-0 font-mono text-[11px] text-muted">{trace.intent.domain_action}</dd>
+            <dd className="m-0 font-mono text-[15px] text-muted">{trace.intent.domain_action}</dd>
           </>
         )}
         <dt className="text-faint">인식 신뢰도</dt>
         <dd className="m-0">
-          <span className={`rounded px-1.5 py-px text-[11px] font-medium ${confidence.style}`}>
+          <span className={`rounded px-1.5 py-px text-[15px] font-medium ${confidence.style}`}>
             {confidence.text.replace("확신 ", "")}
           </span>
         </dd>
@@ -144,7 +145,7 @@ export function LlmTrace({ trace }: { trace: Trace }) {
 
       {/* 개발/지원 시에는 남기되, 기본 결과 흐름을 방해하지 않는다. */}
       {trace.llm_fallback_used && (
-        <p className="m-0 mt-2 text-[11.5px] text-warn">
+        <p className="m-0 mt-2 text-[15.5px] text-warn">
           요청을 정확히 알아듣지 못해 기본 규칙으로 정했습니다
         </p>
       )}

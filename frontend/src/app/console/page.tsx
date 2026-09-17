@@ -38,7 +38,7 @@ export default function DashboardPage() {
     <>
       <div className="flex flex-wrap items-center gap-2.5">
         <Badges items={data.badges} />
-        <span className="ml-auto font-mono text-[11.5px]" style={{ color: "var(--color-mut2)" }}>
+        <span className="ml-auto font-mono text-[15.5px]" style={{ color: "var(--color-mut2)" }}>
           기준일 {data.axis.as_of}
         </span>
       </div>
@@ -67,13 +67,13 @@ export default function DashboardPage() {
                   className="flex min-w-0 flex-col gap-2 rounded-xl border px-3.5 py-3"
                   style={{ borderColor: "var(--color-hair)" }}
                 >
-                  <span className="flex items-center justify-between gap-2 text-[12.5px] font-semibold">
+                  <span className="flex items-center justify-between gap-2 text-[16.5px] font-semibold">
                     {c.item}
                     <Pill text={c.grade} tone="info" />
                   </span>
-                  <span className="tabular font-mono text-[20px] leading-none">
+                  <span className="tabular font-mono text-[24px] leading-none">
                     {c.predicted.toLocaleString("ko-KR")}
-                    <span className="ml-1 font-sans text-[10.5px]" style={{ color: "var(--color-mut)" }}>
+                    <span className="ml-1 font-sans text-[14.5px]" style={{ color: "var(--color-mut)" }}>
                       {c.unit} · {c.target_date.slice(5)}
                     </span>
                   </span>
@@ -85,7 +85,7 @@ export default function DashboardPage() {
                       style={{ left: `${Math.min(100, Math.max(0, at))}%`, background: "var(--color-t-info)" }}
                     />
                   </div>
-                  <span className="text-[10.5px]" style={{ color: "var(--color-mut)" }}>
+                  <span className="text-[14.5px]" style={{ color: "var(--color-mut)" }}>
                     구간 {c.lower.toLocaleString("ko-KR")}–{c.upper.toLocaleString("ko-KR")} · 폭{" "}
                     {c.ci_width}
                     {c.review && " · 검토"}

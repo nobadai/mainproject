@@ -846,6 +846,20 @@ class ConsoleInboundReceipt(ConsoleModel):
     in_move_id: str | None
     #: Lot 과 원장 IN 이 **둘 다** 있을 때만 참.
     stock_applied: bool
+    #: 그날까지 **수용 0 으로 재고 없이 입고 처리가 끝났나** (#805).
+    #:
+    #: 🔴 **이 판정을 여기서 만들지 않는다.** 정본은
+    #:    `inbound_schedules.InboundScheduleView.settled_without_stock` 하나이고,
+    #:    콘솔은 그 일정 한 벌에서 `inbound_id` 로 받아 적기만 한다. 같은 규칙을 두 벌
+    #:    두면(예: 화면이 `accepted_qty_kg == 0` 으로 다시 판정) 경계에서 갈린다.
+    #:
+    #: 🔴 **`None` 은 «모른다» 다 — `False` 가 아니다.** 그날 입고 일정을 못 읽었으면
+    #:    「반영 대기」인지 「반영할 재고 없음」인지 가릴 수 없다. 0 과 공란을 안 섞는
+    #:    이 계약의 규율 그대로다.
+    #:
+    #: ★ `stock_applied` 와 **다른 사실이다.** 재고가 선 완료와 «만들 재고가 0 이라
+    #:   끝난 완료» 는 둘 다 완료지만 재고는 한쪽에만 생긴다.
+    settled_without_stock: bool | None = None
 
 
 class ConsoleArrivalSummary(ConsoleModel):

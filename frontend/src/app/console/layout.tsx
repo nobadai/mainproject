@@ -29,7 +29,9 @@ const TABS = [
   { href: "/console", label: "대시보드", mark: "D", group: "top" },
   { href: "/console/forecast", label: "가격 예측", mark: "ML", group: "dept" },
   { href: "/console/purchase", label: "매입", mark: "PU", group: "dept" },
-  { href: "/console/inventory", label: "재고 · 물류", mark: "LG", group: "dept" },
+  //  ★ 「재고 · 물류」 → 「재고」 (`#812`). 옆 메뉴가 전부 두 글자(매입 · 재무 · 판매)인데
+  //    여기만 길어 줄이 튀었고, 사용자가 이 화면을 부르는 말도 「재고」다.
+  { href: "/console/inventory", label: "재고", mark: "LG", group: "dept" },
   { href: "/console/finance", label: "재무", mark: "FN", group: "dept" },
   { href: "/console/sales", label: "판매", mark: "SL", group: "dept" },
 ] as const;
@@ -45,7 +47,7 @@ function DemoAsOfPicker() {
   return (
     <span className="ml-auto flex items-center gap-2">
       <label
-        className="flex items-center gap-1.5 text-[11.5px]"
+        className="flex items-center gap-1.5 text-[15.5px]"
         style={{ color: "var(--color-mut2)" }}
       >
         기준일
@@ -57,7 +59,7 @@ function DemoAsOfPicker() {
             //    — 개장일 판정 같은 규칙을 화면에 새로 만들지 않는다.
             if (e.target.value) setDemoAsOf(e.target.value);
           }}
-          className="rounded-md border px-2 py-1 font-mono text-[11.5px]"
+          className="rounded-md border px-2 py-1 font-mono text-[15.5px]"
           style={{ borderColor: "var(--color-hair)", background: "var(--color-panel)" }}
         />
       </label>
@@ -105,17 +107,17 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
       >
         <div className="flex items-center gap-2.5 md:px-1.5">
           <span
-            className="grid size-[26px] shrink-0 place-items-center rounded-[7px] font-mono text-[12px]"
+            className="grid size-[26px] shrink-0 place-items-center rounded-[7px] font-mono text-[16px]"
             style={{ background: "var(--color-nav-on)", color: "#a8cbb2" }}
           >
             햇
           </span>
           <span className="min-w-0">
-            <b className="block text-[14px] font-semibold" style={{ color: "#f0f2ec" }}>
+            <b className="block text-[18px] font-semibold" style={{ color: "#f0f2ec" }}>
               햇들농산
             </b>
             <small
-              className="block text-[9.5px] uppercase tracking-[0.16em]"
+              className="block text-[13.5px] uppercase tracking-[0.16em]"
               style={{ color: "var(--color-nav-cap)" }}
             >
               운영 콘솔
@@ -128,7 +130,7 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
             <div key={group} className="flex flex-row gap-0.5 md:flex-col">
               {group === "dept" && (
                 <div
-                  className="hidden px-3 pb-1.5 pt-1 text-[9.5px] uppercase tracking-[0.16em] md:block"
+                  className="hidden px-3 pb-1.5 pt-1 text-[13.5px] uppercase tracking-[0.16em] md:block"
                   style={{ color: "var(--color-nav-cap)" }}
                 >
                   영역별 화면
@@ -141,7 +143,7 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
                     key={t.href}
                     href={t.href}
                     aria-current={on ? "page" : undefined}
-                    className="flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-[12.5px] font-medium transition"
+                    className="flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-[16.5px] font-medium transition"
                     style={{
                       background: on ? "var(--color-nav-on)" : "transparent",
                       color: on ? "#f0f2ec" : "var(--color-nav-ink)",
@@ -149,7 +151,7 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
                   >
                     <span className="flex-1">{t.label}</span>
                     <span
-                      className="font-mono text-[9.5px] tracking-wider"
+                      className="font-mono text-[13.5px] tracking-wider"
                       style={{ color: on ? "#a8cbb2" : "var(--color-nav-cap)" }}
                     >
                       {t.mark}
@@ -167,16 +169,16 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
             style={{ background: "rgba(255,255,255,.05)" }}
           >
             <span
-              className="grid size-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold"
+              className="grid size-7 shrink-0 place-items-center rounded-full text-[15px] font-semibold"
               style={{ background: "var(--color-nav-on)", color: "#a8cbb2" }}
             >
               {session.name.slice(0, 1)}
             </span>
             <span className="min-w-0 flex-1">
-              <b className="block truncate text-[12px]" style={{ color: "#f0f2ec" }}>
+              <b className="block truncate text-[16px]" style={{ color: "#f0f2ec" }}>
                 {session.name}
               </b>
-              <small className="block text-[10px]" style={{ color: "var(--color-nav-cap)" }}>
+              <small className="block text-[14px]" style={{ color: "var(--color-nav-cap)" }}>
                 {ROLE_LABEL[session.role]}
               </small>
             </span>
@@ -186,7 +188,7 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
                 clearSession();
                 router.replace("/");
               }}
-              className="rounded-md px-2 py-1 text-[10.5px] transition hover:bg-white/10"
+              className="rounded-md px-2 py-1 text-[14.5px] transition hover:bg-white/10"
               style={{ color: "var(--color-nav-cap)" }}
             >
               나가기
@@ -200,7 +202,7 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
           className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-5 py-3.5"
           style={{ borderColor: "var(--color-hair)", background: "var(--color-panel)" }}
         >
-          <h1 className="m-0 text-[17px] font-semibold tracking-[-0.02em]">{active.label}</h1>
+          <h1 className="m-0 text-[21px] font-semibold tracking-[-0.02em]">{active.label}</h1>
           <DemoAsOfPicker />
         </header>
 

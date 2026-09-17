@@ -88,7 +88,11 @@ from app.master.envelope import ExecutionContext
 from app.master.llm.answer_runtime import NarrativeService, get_narrative_service
 from app.master.llm.runtime import IntentService, get_intent_service
 from app.master.llm.schemas import DomainSlots, Intent, IntentResult
-from app.master.report import render_finance_chat_report, render_sales_chat_report
+from app.master.report import (
+    render_finance_chat_report,
+    render_logistics_chat_report,
+    render_sales_chat_report,
+)
 from app.master.runner import MasterRunner
 from app.master.schemas import ProcurementRunRequest, ProcurementRunResponse, SalesRunRequest
 from app.master.service import get_run_history, make_request_id, run_procurement, run_sales
@@ -112,6 +116,8 @@ _DOMAIN_READ_ACTIONS = frozenset(
         "SALES_PROPOSALS_TODAY",
         "SALES_CONFIRMED_TODAY",
         "SALES_REPORT_GENERATE",
+        #: 보고서 생성은 **조회다.** 쓰기 목록에 넣지 않는다.
+        "LOGISTICS_REPORT_GENERATE",
         "PARTNER_LIST",
         "PARTNER_DETAIL_GET",
     }
@@ -368,6 +374,20 @@ def _period(intent: Intent, *, as_of: date) -> tuple[date, date]:
         except ValueError:  # 2월 29일의 전년은 2월 28일
             return as_of.replace(year=as_of.year - 1, day=28), as_of
     raise _DomainClarification("기간을 확인해 주세요.")
+
+
+#: 화면이 **직접 고른 날짜 범위**(`date_from`/`date_to`)를 슬롯으로 받는 보고서.
+#:
+#: ★ **집합의 주인을 하나로 둔다.** 종전에는 `ask()` 안에 문자열 집합이 박혀 있어
+#:   보고서가 늘 때마다 그 자리를 찾아 고쳐야 했고, 실제로 물류가 빠져 화면에서 고른
+#:   기간이 물류 보고서에만 안 먹었다.
+#:
+#: ⚠️ **기간 누락 되묻기(`_has_report_period`)와는 다른 집합이다.** 그쪽은 아직
+#:    `FINANCE_REPORT_GENERATE` 한 곳에만 걸려 있고(판매도 빠져 있다), 공용 규칙으로
+#:    넓힐지는 별도 결정이라 여기서 같이 묶지 않는다.
+_REPORT_DATE_RANGE_ACTIONS = frozenset(
+    {"FINANCE_REPORT_GENERATE", "SALES_REPORT_GENERATE", "LOGISTICS_REPORT_GENERATE"}
+)
 
 
 def _has_report_period(intent: Intent) -> bool:
@@ -647,6 +667,19 @@ def _domain_read(
             text=f"{start} ~ {end} 판매 보고서를 만들었습니다.",
             data=report,
             report_kind="SALES",
+        )
+
+    if action == "LOGISTICS_REPORT_GENERATE":
+        start, end = _period(intent, as_of=as_of)
+        report = render_logistics_chat_report(
+            sim_run_id=SHOWN_SIM_RUN_ID, as_of=as_of, start_date=start, end_date=end
+        )
+        return DomainActionAnswer(
+            domain="logistics",
+            action=action,
+            text=f"{start} ~ {end} 재고·물류 보고서를 만들었습니다.",
+            data=report,
+            report_kind="LOGISTICS",
         )
 
     if action == "PARTNER_LIST":
@@ -1076,7 +1109,7 @@ def ask(
         if request.date_from > request.date_to:
             raise ValueError("시작일은 종료일보다 늦을 수 없습니다.")
         intent = result.intent
-        if intent.domain_action in {"FINANCE_REPORT_GENERATE", "SALES_REPORT_GENERATE"}:
+        if intent.domain_action in _REPORT_DATE_RANGE_ACTIONS:
             slots = _slots(intent).model_copy(update={
                 "start_date": request.date_from.isoformat(),
                 "end_date": request.date_to.isoformat(),

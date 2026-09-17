@@ -40,7 +40,7 @@ export function ProcurementResult({
   return (
     <div className="flex flex-col gap-3.5">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className={`m-0 text-base font-semibold ${END_TONE[run.end_code] ?? ""}`}>{headline}</h3>
+        <h3 className={`m-0 text-[20px] font-semibold ${END_TONE[run.end_code] ?? ""}`}>{headline}</h3>
       </div>
 
       {/*
@@ -61,7 +61,7 @@ export function ProcurementResult({
               이력에는 그대로 있고, 화면에서만 구조화된 쪽을 보여준다.
           */}
           {run.reason && run.blocked_failures.length === 0 && (
-            <p className="m-0 text-[13px] leading-relaxed">{run.reason}</p>
+            <p className="m-0 text-[17px] leading-relaxed">{run.reason}</p>
           )}
           {/*
             🔴 **막은 부서가 왜 막았는지** (2026-09-02). 전에는 `run.reason` 한 줄이
@@ -75,7 +75,7 @@ export function ProcurementResult({
           {run.blocked_failures.length > 0 && (
             <ul className="m-0 list-none space-y-1 p-0">
               {run.blocked_failures.map((f) => (
-                <li key={f.agent} className="text-[12.5px] text-warn">
+                <li key={f.agent} className="text-[16.5px] text-warn">
                   <b className="font-semibold">{AGENT_LABEL[f.agent] ?? "부서"}</b>
                   {/* 부서가 쓴 문장 그대로 — 화면이 다시 쓰지 않는다 */}
                   <span className="ml-1.5">{f.detail}</span>
@@ -84,14 +84,14 @@ export function ProcurementResult({
             </ul>
           )}
           {run.judgment?.no_proposal_reason && (
-            <p className="m-0 mt-2 text-[13px] leading-relaxed text-warn">
+            <p className="m-0 mt-2 text-[17px] leading-relaxed text-warn">
               매입: {run.judgment.no_proposal_reason}
             </p>
           )}
           {(run.judgment?.rejected_reasons ?? []).length > 0 && (
             <ul className="m-0 mt-2 list-none space-y-1 p-0">
               {run.judgment.rejected_reasons!.map((r, i) => (
-                <li key={i} className="text-[12.5px] text-muted">
+                <li key={i} className="text-[16.5px] text-muted">
                   <b className="font-semibold text-ink">{r.label ?? "안"}</b> — {r.reason}
                 </li>
               ))}
@@ -117,7 +117,7 @@ export function ProcurementResult({
         <button
           type="button"
           onClick={onRerun}
-          className="self-start rounded-lg border border-line bg-sunk px-3 py-1.5 text-[12.5px] text-muted hover:border-accent hover:text-accent-ink"
+          className="self-start rounded-lg border border-line bg-sunk px-3 py-1.5 text-[16.5px] text-muted hover:border-accent hover:text-accent-ink"
         >
           ↻ 조건을 붙여 다시 만들기
         </button>
@@ -159,20 +159,20 @@ function ScenarioCard({
         recommended ? "border-accent bg-accent-wash" : "border-line bg-surface"
       }`}
     >
-      <h4 className="m-0 text-sm font-semibold">{scenario.label ?? "이름 없음"}</h4>
-      <p className="tabular m-0 mt-0.5 font-mono text-[22px] font-semibold tracking-tight">
+      <h4 className="m-0 text-[18px] font-semibold">{scenario.label ?? "이름 없음"}</h4>
+      <p className="tabular m-0 mt-0.5 font-mono text-[26px] font-semibold tracking-tight">
         {/* 🔴 값이 없으면 0 으로 채우지 않는다 — 0 과 모름은 다르다 */}
         {qty == null ? "—" : won(qty)}
-        <span className="ml-1 text-[13px] font-normal">kg</span>
+        <span className="ml-1 text-[17px] font-normal">kg</span>
       </p>
-      <small className="tabular block text-xs text-muted">
+      <small className="tabular block text-[16px] text-muted">
         {amount == null ? "금액 미산출" : `${won(amount)}원`}
         {rounds > 0 && ` · ${rounds}회 분할`}
       </small>
       <button
         type="button"
         onClick={onPick}
-        className={`mt-2.5 w-full rounded-md border px-2 py-1.5 text-[12.5px] ${
+        className={`mt-2.5 w-full rounded-md border px-2 py-1.5 text-[16.5px] ${
           recommended
             ? "border-accent bg-accent font-semibold text-white"
             : "border-line bg-surface text-muted"

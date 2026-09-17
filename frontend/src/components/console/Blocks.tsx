@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 /**
  * 화면 부품 — 백엔드가 내려준 조각을 그린다.
@@ -16,7 +16,6 @@ import type {
   Card as TCard,
   Cell,
   Chart as TChart,
-  Column,
   Day,
   Note as TNote,
   Stat as TStat,
@@ -65,7 +64,7 @@ function Rich({ text }: { text: string }) {
 export function Pill({ text, tone = "neutral" }: { text: string; tone?: Tone }) {
   return (
     <span
-      className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold"
+      className="inline-flex items-center rounded-full px-2.5 py-1 text-[15px] font-semibold"
       style={{ color: FG[tone], background: BG[tone] }}
     >
       {text}
@@ -87,7 +86,7 @@ export function Note({ note }: { note: TNote | null }) {
   if (!note) return null;
   return (
     <p
-      className="m-0 rounded-lg border px-3.5 py-3 text-[12px] leading-relaxed"
+      className="m-0 rounded-lg border px-3.5 py-3 text-[16px] leading-relaxed"
       style={{
         color: note.tone === "neutral" ? "var(--color-ink2)" : FG[note.tone],
         background: note.tone === "neutral" ? "var(--color-sunk)" : BG[note.tone],
@@ -109,7 +108,7 @@ export function StatRow({ items }: { items: TStat[] }) {
           className="flex min-w-0 flex-col gap-1 rounded-xl border bg-panel px-4 py-3.5"
           style={{ borderColor: "var(--color-hair)" }}
         >
-          <span className="flex items-center gap-1.5 text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+          <span className="flex items-center gap-1.5 text-[15.5px]" style={{ color: "var(--color-mut)" }}>
             {s.tone !== "neutral" && (
               <i
                 aria-hidden
@@ -124,20 +123,20 @@ export function StatRow({ items }: { items: TStat[] }) {
           <span
             className={
               /^[-+]?[\d,.]+$/.test(s.value)
-                ? "tabular font-mono text-[21px] leading-tight"
-                : "text-[15px] font-semibold leading-snug"
+                ? "tabular font-mono text-[25px] leading-tight"
+                : "text-[19px] font-semibold leading-snug"
             }
             style={{ color: s.tone === "neutral" ? undefined : FG[s.tone] }}
           >
             {s.value}
             {s.unit && (
-              <span className="ml-1 font-sans text-[10.5px]" style={{ color: "var(--color-mut)" }}>
+              <span className="ml-1 font-sans text-[14.5px]" style={{ color: "var(--color-mut)" }}>
                 {s.unit}
               </span>
             )}
           </span>
           {s.detail && (
-            <span className="text-[10.5px] leading-snug" style={{ color: "var(--color-mut2)" }}>
+            <span className="text-[14.5px] leading-snug" style={{ color: "var(--color-mut2)" }}>
               {s.detail}
             </span>
           )}
@@ -155,31 +154,83 @@ function cellText(v: Cell): { text: string; blank: boolean } {
   return { text: typeof v === "number" ? v.toLocaleString("ko-KR") : String(v), blank: false };
 }
 
-function align(c: Column) {
-  return c.align === "right" ? "text-right" : c.align === "center" ? "text-center" : "text-left";
-}
+/**
+ * 칸 안에서 글자를 어디에 붙일까.
+ *
+ * 🔴 **우측정렬을 쓰지 않는다** (`#812`).
+ *
+ *   칸 폭이 같은 표(`table-fixed`)에서 우측정렬 값은 **제 칸의 오른쪽 끝**에 서고 다음
+ *   값은 **제 칸의 왼쪽 끝**에 선다. 그래서 둘이 서로 들러붙고, 그 앞은 그만큼 벌어진다.
+ *   실측(Lot 별 신선도 · 1,400px):
+ *
+ *   ```text
+ *   품목 → 등급          186px
+ *   등급 → 잔량          350px
+ *   잔량 ↔ 입고일         14px   ← 붙는다
+ *   입고일 → 신선도 잔여  356px
+ *   신선도 ↔ 필요한 조치  14px   ← 붙는다
+ *   ```
+ *
+ *   전부 왼쪽에 붙이면 값이 **칸 폭만큼 일정한 간격**으로 선다 — 판매 탭 표가 그렇게
+ *   서 있고, 이 화면도 같은 모양이어야 한다.
+ *
+ * ★ `align` 계약은 그대로 둔다 — 백엔드가 칸의 뜻을 계속 말하게 두고, **그리는 쪽에서만**
+ *   전부 왼쪽에 붙인다. 숫자 칸은 `mono`(고정폭)라 자릿수는 여전히 맞는다.
+ */
+const CELL_ALIGN = "text-left";
 
+/**
+ * 표 하나.
+ *
+ * 🔴 **칸 폭은 균등하고(`table-fixed`) 값은 전부 왼쪽에 붙인다** (`CELL_ALIGN` · `#812`).
+ *
+ *   둘이 같이 있어야 값이 **일정한 간격**으로 선다. 하나만 해서는 안 된다 — 균등 폭인데
+ *   우측정렬이 섞이면 칸 안에서 값이 양끝으로 갈려 앞은 벌어지고 뒤는 붙는다.
+ *
+ *   여기 오기까지 네 번 헛짚었고 전부 **«남는 폭을 어떻게 나눌까»** 를 풀고 있었다.
+ *   문제는 배분이 아니라 **칸 안에서 값이 어디에 서는가** 였다.
+ *
+ *   ```text
+ *   w-full · 내용 비례      우측정렬 칸이 다음 칸에 들러붙는다        🔴
+ *   w-full · width:1%       값 전부 왼쪽 · 오른쪽에 빈 띠             🔴
+ *   w-auto                  표가 안 늘어나 왼쪽으로 쏠린다            🔴
+ *   table-fixed · 정렬 혼재  붙는 자리와 벌어지는 자리가 그대로 남는다 🔴
+ *   table-fixed · 전부 왼쪽  간격이 일정하다 (실측 182·185·183·187)   ✅
+ *   ```
+ *
+ * ★ 카드가 화면 끝까지 늘어나던 것은 별개 원인이고 따로 잡았다 — 재고 탭에만 없던
+ *   `max-w-[1400px]` 래퍼(`console/inventory/page.tsx`)다. 둘이 같이 있어야 한다.
+ *
+ * ⚠️ **`table-fixed` 와 `text-[16px]` 는 서로 다른 판의 결정이다** (2026-09-17 병합).
+ *    앞은 `#812`(칸 간격), 뒤는 `style/frontend-font-plus4_jh`(글자 +4px) — 같은 줄에서
+ *    충돌했을 뿐 고치는 것이 달라 **둘 다 남긴다.**
+ */
 export function DataTable({ table }: { table: TTable }) {
   return (
     <div className="flex flex-col gap-2.5">
       <div className="thin-scroll -mx-1 overflow-x-auto px-1">
         {table.rows.length === 0 ? (
           <p
-            className="m-0 rounded-lg border border-dashed px-4 py-6 text-center text-[12px]"
+            className="m-0 rounded-lg border border-dashed px-4 py-6 text-center text-[16px]"
             style={{ borderColor: "var(--color-hair)", color: "var(--color-mut2)" }}
           >
             {table.empty_text}
           </p>
         ) : (
-          <table className="w-full border-collapse text-[12px]">
+          <table className="w-full table-fixed border-collapse text-[16px]">
             <thead>
               <tr>
                 {table.columns.map((c) => (
                   <th
                     key={c.key}
                     scope="col"
-                    className={`whitespace-nowrap border-b px-2.5 py-2 font-medium ${align(c)}`}
-                    style={{ borderColor: "var(--color-hair)", color: "var(--color-mut)" }}
+                    className={`border-b px-2.5 py-2 font-medium ${CELL_ALIGN}`}
+                    style={{
+                      borderColor: "var(--color-hair)",
+                      color: "var(--color-mut)",
+                      //  ★ 이 표가 정한 너비. 안 주면 `table-fixed` 가 균등 배분한다.
+                      width: c.width ?? undefined,
+                    }}
                   >
                     {c.label}
                   </th>
@@ -194,7 +245,7 @@ export function DataTable({ table }: { table: TTable }) {
                     return (
                       <td
                         key={c.key}
-                        className={`whitespace-nowrap border-b px-2.5 py-2 ${align(c)} ${
+                        className={`border-b px-2.5 py-2 ${CELL_ALIGN} ${
                           c.mono ? "tabular font-mono" : ""
                         }`}
                         style={{
@@ -308,7 +359,7 @@ export function LineChart({ chart, days, asOfIndex = -1, height = 250 }: {
               y={y(t) + 3}
               textAnchor="end"
               className="tabular font-mono"
-              fontSize="10"
+              fontSize="14"
               fill="var(--color-mut2)"
             >
               {/* ★ 백엔드가 준 글자가 있으면 그걸 쓴다. 값의 단위와 보이는
@@ -356,7 +407,7 @@ export function LineChart({ chart, days, asOfIndex = -1, height = 250 }: {
           stroke="var(--color-mut2)"
           strokeDasharray="2 3"
         />
-        <text x={x(asOfIndex) + 5} y={PAD.t + 9} fontSize="10.5" fill="var(--color-ink2)">
+        <text x={x(asOfIndex) + 5} y={PAD.t + 9} fontSize="14.5" fill="var(--color-ink2)">
           오늘
         </text>
         </>
@@ -404,7 +455,7 @@ export function LineChart({ chart, days, asOfIndex = -1, height = 250 }: {
                 x={x(m.index)}
                 y={y(m.value) + 19}
                 textAnchor="middle"
-                fontSize="10.5"
+                fontSize="14.5"
                 fill="var(--color-ink2)"
               >
                 {m.label}
@@ -420,7 +471,7 @@ export function LineChart({ chart, days, asOfIndex = -1, height = 250 }: {
                 y={H - 16}
                 textAnchor="middle"
                 className="tabular font-mono"
-                fontSize="10"
+                fontSize="14"
                 fill="var(--color-mut2)"
               >
                 {d.text}
@@ -431,7 +482,7 @@ export function LineChart({ chart, days, asOfIndex = -1, height = 250 }: {
                   y={H - 5}
                   textAnchor="middle"
                   className="font-mono"
-                  fontSize="9.5"
+                  fontSize="13.5"
                   fill="var(--color-mut2)"
                   opacity={0.8}
                 >
@@ -443,7 +494,7 @@ export function LineChart({ chart, days, asOfIndex = -1, height = 250 }: {
         )}
       </svg>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px]" style={{ color: "var(--color-mut)" }}>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[15px]" style={{ color: "var(--color-mut)" }}>
         {chart.series.map((s) => (
           <span key={s.name} className="inline-flex items-center gap-1.5">
             <i
@@ -499,9 +550,9 @@ export function Panel({
           className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-4 py-3"
           style={{ borderColor: "var(--color-hair-soft)" }}
         >
-          <h2 className="m-0 text-[13.5px] font-semibold">{title}</h2>
+          <h2 className="m-0 text-[17.5px] font-semibold">{title}</h2>
           {subtitle && (
-            <span className="text-[11.5px]" style={{ color: "var(--color-mut)" }}>
+            <span className="text-[15.5px]" style={{ color: "var(--color-mut)" }}>
               {subtitle}
             </span>
           )}
@@ -511,7 +562,7 @@ export function Panel({
       <div className="flex flex-col gap-3.5 p-4">{children}</div>
       {footer && (
         <p
-          className="m-0 border-t px-4 py-2.5 text-[11px]"
+          className="m-0 border-t px-4 py-2.5 text-[15px]"
           style={{ borderColor: "var(--color-hair-soft)", color: "var(--color-mut)" }}
         >
           {footer}
@@ -524,7 +575,7 @@ export function Panel({
 export function Flow({ steps }: { steps: string[] }) {
   if (steps.length === 0) return null;
   return (
-    <div className="thin-scroll flex items-center gap-1.5 overflow-x-auto pb-1 text-[11.5px]">
+    <div className="thin-scroll flex items-center gap-1.5 overflow-x-auto pb-1 text-[15.5px]">
       {steps.map((s, i) => (
         <span key={s} className="flex shrink-0 items-center gap-1.5">
           {i > 0 && <i aria-hidden style={{ color: "var(--color-mut2)" }}>→</i>}
@@ -540,21 +591,24 @@ export function Flow({ steps }: { steps: string[] }) {
   );
 }
 
-/** 백엔드가 목록으로 준 카드 하나. 채워진 것만 그린다. */
+/**
+ * 백엔드가 목록으로 준 카드 하나. 채워진 것만 그린다.
+ *
+ * 🔴 **`source_ref` 를 그리지 않는다** (`#812`). 그 값은 «어느 표를 읽었나» 라서
+ *    `inventory_reservations · inventory_lots` 같은 **DB 표 이름**이 그대로 들어 있다.
+ *    카드 여섯 개면 첫 화면이 통째로 DB 스키마가 된다.
+ *
+ * ★ **응답에서 지운 것이 아니다.** 값은 `/api/logistics` 본문에 그대로 있어 값이
+ *   틀렸을 때 «어디서 왔나» 를 여전히 물을 수 있다 — 안 그릴 뿐이다. 접는 상자로
+ *   옮기는 것도 답이 아니었다. 카드마다 상자가 하나씩 더 생길 뿐이다.
+ *
+ * ⚠️ **`dev` 병합 때 되살리지 않는다** (2026-09-17). `style/frontend-font-plus4_jh` 가
+ *    이 자리의 `source_ref` **글자 크기만** 올려(+4px) 충돌이 났다 — 글자를 키운 DB 표
+ *    이름은 여전히 DB 표 이름이라, 지운 쪽을 남겼다.
+ */
 export function CardBlock({ card }: { card: TCard }) {
   return (
-    <Panel
-      title={card.title}
-      subtitle={card.subtitle}
-      footer={card.footer}
-      right={
-        card.source_ref ? (
-          <span className="font-mono text-[10.5px]" style={{ color: "var(--color-mut2)" }}>
-            {card.source_ref}
-          </span>
-        ) : undefined
-      }
-    >
+    <Panel title={card.title} subtitle={card.subtitle} footer={card.footer}>
       <Note note={card.lead} />
       <Flow steps={card.flow} />
       <StatRow items={card.stats} />
@@ -562,7 +616,7 @@ export function CardBlock({ card }: { card: TCard }) {
       {card.chart && <LineChart chart={card.chart} />}
       {card.table && <DataTable table={card.table} />}
       {card.bullets.length > 0 && (
-        <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[12px] leading-relaxed">
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-[16px] leading-relaxed">
           {card.bullets.map((b) => (
             <li key={b} className="flex gap-2">
               <i aria-hidden style={{ color: "var(--color-mut2)" }}>·</i>
@@ -583,7 +637,7 @@ export function SourceTag({ sources }: { sources: { filled: boolean; owner: stri
   if (unfilled.length === 0) return null;
   return (
     <div
-      className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-lg border px-3.5 py-2.5 text-[11.5px]"
+      className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-lg border px-3.5 py-2.5 text-[15.5px]"
       style={{ borderColor: "var(--color-t-warn)", background: "var(--color-t-warn-bg)", color: "var(--color-t-warn)" }}
     >
       <b className="font-semibold">예시값</b>
@@ -598,7 +652,7 @@ export function SourceTag({ sources }: { sources: { filled: boolean; owner: stri
 export function ErrorBox({ message }: { message: string }) {
   return (
     <p
-      className="m-0 rounded-lg px-4 py-3.5 text-[12.5px]"
+      className="m-0 rounded-lg px-4 py-3.5 text-[16.5px]"
       style={{ background: "var(--color-t-bad-bg)", color: "var(--color-t-bad)" }}
     >
       {message}
@@ -608,7 +662,7 @@ export function ErrorBox({ message }: { message: string }) {
 
 export function Loading({ what }: { what: string }) {
   return (
-    <p className="m-0 py-10 text-center text-[12.5px]" style={{ color: "var(--color-mut2)" }}>
+    <p className="m-0 py-10 text-center text-[16.5px]" style={{ color: "var(--color-mut2)" }}>
       {what}을(를) 읽는 중…
     </p>
   );
@@ -633,7 +687,7 @@ export function TabButtons<T extends string>({
             type="button"
             onClick={() => onChange(it.key)}
             aria-pressed={on}
-            className="rounded-lg border px-3 py-1.5 text-[12px] font-medium transition"
+            className="rounded-lg border px-3 py-1.5 text-[16px] font-medium transition"
             style={{
               borderColor: on ? "var(--color-nav)" : "var(--color-hair)",
               background: on ? "var(--color-nav)" : "var(--color-panel)",
