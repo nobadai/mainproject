@@ -22,10 +22,10 @@ export function FinanceReport({ facts }: { facts: ReportFacts }) {
   return <div className="space-y-5">
     <ReportChrome title="재무 운영 보고서" subtitle="재무 상태와 현금 흐름" facts={facts} page={1}>
       <div className="grid grid-cols-4 gap-3">
-        {states.map((state) => <Metric key={text(state.financing_mode)} label="현재 현금" value={won(state.current_cash_krw)} detail={`가용 현금 필드는 제공되지 않음 · 기준 ${text(facts.as_of)}`} />)}
-        <Metric label="받을 돈" value={won(receivableSummary.total_outstanding_krw)} detail="아직 받을 금액" />
-        <Metric label="지급 예정 금액" value={won(payableSummary.total_outstanding_krw)} detail="확정 채무 기준" />
-        <Metric label="차입 잔액" value={states.length ? won(states[0].current_debt_krw) : "기록 없음"} detail="기준일 현재" />
+        {states.map((state) => <Metric key={text(state.financing_mode)} label="기말 현금" value={won(state.current_cash_krw)} detail={`가용 현금 필드는 제공되지 않음 · ${text(facts.end_date)} 기준`} />)}
+        <Metric label="기말 미수금" value={won(receivableSummary.total_outstanding_krw)} detail={`${text(facts.end_date)} 기준`} />
+        <Metric label="기말 지급 예정" value={won(payableSummary.total_outstanding_krw)} detail={`${text(facts.end_date)} 기준`} />
+        <Metric label="기말 차입" value={states.length ? won(states[0].current_debt_krw) : "기록 없음"} detail={`${text(facts.end_date)} 기준`} />
       </div>
       <Section title="기간 Cash Trend"><div className="h-64 rounded-lg border border-[#dbe7e0] p-3"><ResponsiveContainer width="100%" height="100%"><LineChart data={closings}><XAxis dataKey="close_date" tick={{ fontSize: 10 }} /><YAxis tick={{ fontSize: 10 }} /><Tooltip /><Line type="monotone" dataKey="base_net_cash_krw" stroke="#1d6b48" dot={false} /></LineChart></ResponsiveContainer></div></Section>
       <Section title="주요 상태"><div className="grid grid-cols-2 gap-3">{states.map((state) => <div key={text(state.financing_mode)} className="rounded-lg border border-[#dbe7e0] p-3 text-sm"><b>{text(state.financing_mode)}</b><br />운영 여유 {won(state.operating_cash_buffer_krw)} · 차입 {won(state.current_debt_krw)}</div>)}</div></Section>

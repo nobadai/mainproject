@@ -370,6 +370,12 @@ def _period(intent: Intent, *, as_of: date) -> tuple[date, date]:
     raise _DomainClarification("기간을 확인해 주세요.")
 
 
+def _has_report_period(intent: Intent) -> bool:
+    """Report generation must not silently turn an omitted period into TODAY."""
+    slots = _slots(intent)
+    return bool(slots.period or slots.start_date or slots.end_date)
+
+
 def _partner_id(intent: Intent, *, as_of: date) -> str:
     slots = _slots(intent)
     ref = (slots.partner_id or slots.partner_ref or "").strip()
@@ -971,6 +977,15 @@ def _ask_domain_action(
     *, request_id: str, request: AskRequest, result: IntentResult
 ) -> AskResponse:
     intent = result.intent
+    if intent.domain_action == "FINANCE_REPORT_GENERATE" and not _has_report_period(intent):
+        return _response(
+            request_id,
+            request,
+            result,
+            outcome="NEEDS_CLARIFICATION",
+            clarification="어느 기간의 재무 보고서를 생성할까요?",
+            note="보고 기간이 정해지기 전에는 재무 보고서를 생성하지 않았다.",
+        )
     missing = _missing_domain_slots(intent)
     if missing:
         return _response(

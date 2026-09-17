@@ -660,7 +660,8 @@ def render_finance_chat_report(*, sim_run_id: str, as_of, start_date, end_date) 
         to_date=end_date,
     )
     credit = get_console_credit(sim_run_id=sim_run_id, as_of=end_date)
-    days = max(1, min(400, (end_date - start_date).days + 1))
+    # Exact report range: do not silently cap a user-selected period to a recent horizon.
+    days = max(1, (end_date - start_date).days + 1)
     cashflow = get_finance_cashflow(sim_run_id=sim_run_id, as_of=end_date, days=days)
     cashflow_dates = [row.close_date for row in getattr(cashflow, "cashflow", [])]
     dashboard_meta = getattr(dashboard, "meta", None)
@@ -680,7 +681,9 @@ def render_finance_chat_report(*, sim_run_id: str, as_of, start_date, end_date) 
         "data_mode": getattr(dashboard_meta, "data_type", None),
         "summary": dashboard.model_dump(mode="json"),
         "cashflow": cashflow.model_dump(mode="json"),
-        "closings": [row.model_dump(mode="json") for row in dashboard.recent_closings],
+        # The chart/table must use the same exact report-range read as the availability
+        # metadata. Dashboard recent_closings is intentionally a short console preview.
+        "closings": [row.model_dump(mode="json") for row in getattr(cashflow, "cashflow", [])],
         "receivables": receivables.model_dump(mode="json"),
         "payables": payables.model_dump(mode="json"),
         "expenses": expenses.model_dump(mode="json"),

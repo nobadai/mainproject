@@ -367,17 +367,6 @@ export function MasterConsole({ session }: { session: Session }) {
   async function send(text: string, context?: { dateFrom?: string; dateTo?: string }) {
     const utterance = text.trim();
     if (!utterance || locked) return;
-    // Sales/영업 report requests retain their own domain route. A generic report request
-    // follows the Finance period prompt used by this console's report controls.
-    const report = /보고서|리포트|pdf/i.test(utterance) && !/판매|영업/i.test(utterance);
-    const hasPeriod = /최근\s*\d+일|\d+개월|\d+년|이번\s*(주|달)|부터|까지/.test(utterance) || Boolean(context?.dateFrom && context?.dateTo);
-    if (report && !hasPeriod && !context?.dateFrom) {
-      setDraft("");
-      setReportDates({ from: "", to: "" });
-      push({ kind: "me", text: utterance }, { kind: "bot", text: "어느 기간의 재무 보고서를 생성할까요?" });
-      setReportPeriod("awaiting");
-      return;
-    }
     setReportPeriod("idle");
     setReportDates({ from: "", to: "" });
     setDraft("");
@@ -387,7 +376,18 @@ export function MasterConsole({ session }: { session: Session }) {
       const res: AskResponse = await ask(utterance, { simRunId: simRun || undefined, dateFrom: context?.dateFrom, dateTo: context?.dateTo });
       //  분류가 못 돌았으면 연달아 누르지 못하게 몇 초 더 잠근다.
       if (classifyFailed(res)) setCooldown(FALLBACK_COOLDOWN_SEC);
-      if (res.confirm_required) {
+      const slots = res.intent.slots;
+      const awaitingReportPeriod =
+        res.outcome === "NEEDS_CLARIFICATION" &&
+        res.intent.domain_action === "FINANCE_REPORT_GENERATE" &&
+        !context?.dateFrom &&
+        !slots?.period &&
+        !slots?.start_date &&
+        !slots?.end_date;
+      if (awaitingReportPeriod) {
+        setReportPeriod("awaiting");
+        push({ kind: "bot", text: clarificationText(res, "어느 기간의 재무 보고서를 생성할까요?") });
+      } else if (res.confirm_required) {
         push({
           kind: "confirm",
           text: clarificationText(res, "진행할까요?"),
