@@ -353,8 +353,11 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Literal
+from decimal import Decimal
+from typing import Any, Literal, get_args
 
+from app.finance.db import get_connection
+from app.finance.expenses import ExpenseSettlement, settle_due_expenses
 from app.master import clock, persistence
 from app.master.backfill import BackfillOut, SalesTermsRule, backfill_decisions
 from app.master.clock import SCHEDULE_DEADLINE, SCHEDULE_INTERVAL, SCHEDULE_START
@@ -389,12 +392,14 @@ from app.master.service import run_procurement, run_sales
 
 __all__ = [
     "DAILY_POLICY_VERSION",
+    "EXPENSE_SETTLEMENT_STATUSES",
     "SCHEDULE_DEADLINE",
     "SCHEDULE_INTERVAL",
     "SCHEDULE_START",
     "WALK_BUSINESS_MODE",
     "DayRunOutcome",
     "DayScope",
+    "ExpenseSettlementStatus",
     "ItemRunOutcome",
     "ScheduledAction",
     "SchedulerAction",
@@ -422,6 +427,15 @@ logger = logging.getLogger(__name__)
 
 #: 하루 실행이 싣는 정책 판. **부르는 쪽이 바꿀 수 있게 인자로도 열어 둔다.**
 DAILY_POLICY_VERSION = "v1.3-PROVISIONAL"
+
+#: 운영비 지급 한 칸의 결과 어휘 (2026-09-17). 🔴 **주인은 이 한 줄이다** —
+#: `_settle_expenses` 가 내는 값도 이것이고, 걷기 요약이 0건을 채울 때도 이것을 읽는다
+#: (`inspection.INSPECTION_STATUSES` 와 같은 모양).
+#:
+#: ⚠️ **`NOT_ATTEMPTED` 가 여기 없다.** 그 말은 단계를 안 탄 날 `DayRunOutcome` 이 두는
+#:   기본값이지 지급이 낸 값이 아니다 — 읽는 쪽이 기본값을 그대로 읽어 붙인다.
+ExpenseSettlementStatus = Literal["RAN", "NOTHING_DUE", "FAILED"]
+EXPENSE_SETTLEMENT_STATUSES: frozenset[str] = frozenset(get_args(ExpenseSettlementStatus))
 
 #: `NO_ML_BATCH` 사유에 반드시 들어가는 문장.
 #:
@@ -986,6 +1000,32 @@ class DayRunOutcome:
     #:   나머지 셋은 이 클래스가 이미 쓴다. 판매 품목별 결과는 `OutboundOut.items` 가
     #:   나르고, 여기 다시 담지 않는다 — 같은 사실의 주인은 하나다.
     outbound_status: str = "NOT_ATTEMPTED"
+    #: 운영비 지급 단계 (2026-09-17). 🔴 **마감 바로 앞이다 — 출고·점검 #2 뒤다.**
+    #:
+    #: ★★ **여기가 없어서 `operating_expense_cash_out_krw` 가 늘 0원이었다.**
+    #:   `create_expense()` 도 `settle_expense()` 도 재무 원장에 이미 있었고,
+    #:   **부르는 자리 하나**가 없었다 — 유지보수·전이 재시도 때와 같은 모양이다.
+    #:
+    #: ★ **어휘를 새로 만들지 않았다.** `maintenance_status` · `pending_transition_status`
+    #:   가 쓰는 넷 그대로다. `SETTLED` 같은 말을 여기서 짓지 않는다 — 지으면 같은
+    #:   사실을 부르는 이름이 단계마다 달라진다.
+    #:
+    #: ```text
+    #: NOT_ATTEMPTED   안 켰다 — auto_settle_expenses 가 거짓이었다 · 거기까지 못 갔다
+    #:                 · 장부 관문이 막은 날이다
+    #: RAN             지급한 건이 있었다 — 몇 건 얼마인지는 expense_settlements 가 말한다
+    #: NOTHING_DUE     확인했고 지급할 것이 없었다 — 🟢 정상이다
+    #: FAILED          하려다 터졌다 — 🔴 **그날 마감을 BLOCKED 로 막는다**
+    #: ```
+    #:
+    #: 🔴 **`FAILED` 만 앞의 셋과 태도가 다르다.** 유지보수·전이·점검은 터져도 하루가
+    #:   계속 가는데 이 칸은 **마감을 막는다**. 지급은 현금을 건드리기 때문이다 —
+    #:   그냥 넘기면 그날이 정상 `CLOSED` 로 서고 **«현금은 줄었는데 비용은 0원»** 인
+    #:   기록이 손익 곡선의 확정값으로 앉는다.
+    #:
+    #: 🔴 **`NOT_ATTEMPTED` 와 `NOTHING_DUE` 를 접지 않는다.** 앞은 *"안 켰다"* 이고
+    #:   뒤는 *"켰는데 지급일이 된 것이 없었다"* 다 — 지급 0건의 이유가 그 둘로 갈린다.
+    expense_settlement_status: str = "NOT_ATTEMPTED"
     #: 마감 단계. 🔴 **하루의 맨 끝이다 — 출고 뒤다.**
     #:
     #: ★ **어휘를 새로 만들지 않았다.** `ClosingOut.status` 의 다섯 값
@@ -1056,6 +1096,14 @@ class DayRunOutcome:
     #: 가리킬 뿐이다. 걷기 요약이 FAILED 품목마다 한 줄을 찍으려고 싣는다.
     #: 출고 단계를 안 탔거나 터져서 값이 없으면 `None`.
     outbound: OutboundOut | None = None
+    #: 운영비 지급이 낸 값 그대로 (2026-09-17). 🔴 **여기서 다시 세지 않는다** —
+    #: 몇 건이 얼마 나갔는지의 주인은 `ExpenseSettlement` 하나이고, 여기는 그것을
+    #: 가리킬 뿐이다 (`outbound` · `closing` 과 같은 모양). 걷기 요약이 지급이 있던
+    #: 날마다 한 줄을 찍으려고 싣는다.
+    #:
+    #: ⚠️ **빈 튜플이 두 가지 뜻이 아니다.** *"안 켰다"* 와 *"켰는데 없었다"* 는
+    #:   `expense_settlement_status` 가 가른다 — 이 칸은 **낸 값**만 든다.
+    expense_settlements: tuple[ExpenseSettlement, ...] = ()
     #: 마감이 낸 값 그대로 (2026-09-16). 🔴 **여기서 사유를 다시 짓지 않는다** — 사유의
     #: 주인은 `ClosingOut.reason` 하나이고, 여기는 그것을 가리킬 뿐이다. 걷기 요약이
     #: 첫 마감 실패의 사유를 찍으려고 싣는다 (`outbound` 와 같은 모양).
@@ -1100,13 +1148,16 @@ def run_scheduled_day(
     approve_fn: Callable[..., BackfillOut] = backfill_decisions,
     sales_terms: SalesTermsRule | None = None,
     auto_maintain: bool = False,
+    settle_expenses_fn: Callable[..., Any] = settle_due_expenses,
+    auto_settle_expenses: bool = False,
+    connect: Any = None,
 ) -> DayRunOutcome:
     """결정을 따른다. **여기에는 판단이 없다.**
 
     ```text
     개장 → 물류 유지보수 → 미적용 전이 재시도 → 입고 → **물류 점검 #1** → 채권 → 수금
          → [장부 관문] → 매입 판단 → 매입 승인 → 판매 판단 → 판매 승인 → 출고
-         → **물류 점검 #2** → 마감
+         → **물류 점검 #2** → **운영비 지급** → 마감
     ```
 
     🔴 **물류 유지보수가 개장 바로 뒤다** (2026-09-11).
@@ -1192,6 +1243,27 @@ def run_scheduled_day(
           없음 · 실사 제외)"* 고 못박았다.
     :param maintain_fn: 🔴 **물류 경계.** 기본이 `run_auto_maintenance` 자체다 —
         `None` 을 안 받는다. `auto_maintain` 이 거짓이면 **한 번도 안 쓰인다.**
+    :param auto_settle_expenses: 🔴 **기본이 거짓이다. 거짓이면 지급 함수가 이름조차
+        안 불린다** (2026-09-17). 켜는 것은 **명시로만** — `--auto-settle-expenses` 를
+        준 걷기 하나다 (`auto_approve` · `auto_maintain` 과 같은 규율).
+
+        ★★ **돈이 실제로 나가는 자리다.** 지급은 `expenses.status` 를 `PAID` 로 바꾸고
+          같은 거래에서 현금을 줄인다 — 되돌리는 경로가 재무에 없다 (`PAID → CANCELLED`
+          는 없다고 `expenses.py` 가 못박았다).
+    :param settle_expenses_fn: 🔴 **재무 경계.** 기본이 `settle_due_expenses` 자체다 —
+        `None` 을 안 받는다 (`maintain_fn` · `approve_fn` 과 같은 규율).
+        `auto_settle_expenses` 가 거짓이면 이 값은 **한 번도 안 쓰인다.**
+
+        🔴 **새 지급 경로를 만들지 않는다.** `settle_expense` 를 여기서 직접 부르면
+          그 순간 「지급」이 두 종류가 되고, 한 트랜잭션에 묶는 규율도 이 자리만 안
+          지나게 된다 — `backfill_decisions` 를 두고 `record_decision` 을 직접 안
+          부르는 것과 같은 이유다.
+    :param connect: 지급이 쓸 커넥션 팩토리. 안 주면 `app.finance.db.get_connection`
+        이다 (`close_day` · `collect_receipts` 와 같은 모양).
+
+        🔴 **커넥션의 주인이 부르는 쪽이라 이 인자가 있다.** `settle_due_expenses` 는
+          commit 도 rollback 도 안 한다고 적어 뒀다 — 그 반대편이 이 함수다. 여러
+          건을 지급하다 중간에 터지면 앞선 지급까지 같이 되돌아가야 한다.
 
     🔴 **판매 상업 조건은 규칙 파일이 말한다** (2026-09-11 · 걷기 실측).
 
@@ -1245,6 +1317,27 @@ def run_scheduled_day(
 
       🔴 **`NOTHING_DUE` 는 막지 않는다.** *"확인했고 낼 것이 없다"* 는 정상이고,
         막으면 대부분의 날이 멈춘다.
+
+    🔴 **운영비 지급이 마감 바로 앞이다** (2026-09-17).
+
+      ★★ **여기가 없어서 `operating_expense_cash_out_krw` 가 늘 0원이었다.**
+        발생(`create_expense`)도 지급(`settle_expense`)도 재무 원장에 이미 있었고,
+        **부르는 자리 하나**가 없었다.
+
+      🔴 **마감보다 앞이어야 한다.** 마감이 그날 `PAID` 인 비용을 읽어
+        `operating_expense_cash_out_krw` 를 적는다 — 뒤로 밀면 오늘 나간 돈이
+        **내일 장부에** 적히고, 그날의 `Δ잔액` 과 `Σ순현금` 이 그만큼 어긋난다.
+
+      🔴 **장부 관문이 막은 날에는 지급하지 않는다.** 그 날은 어차피 마감이 안 서므로
+        (`BLOCKED`), 현금만 줄이면 **«현금은 줄었는데 마감은 BLOCKED»** 인 불일치가
+        남는다 — 그 판은 되돌릴 자리가 없다.
+
+      🔴 **지급이 터지면 그날을 `BLOCKED` 로 닫는다.** 다른 단계처럼 `FAILED` 만 적고
+        넘기지 않는다 — 그러면 마감이 정상 `CLOSED` 로 서고 **«현금은 줄었는데 비용은
+        0원»** 인 기록이 손익 곡선의 확정값으로 앉는다. 막는 수단은 **이미 있는 것**을
+        쓴다 (`close_day` 의 판정 순서 ② · `ledger_gap` 이 있으면 `BLOCKED`).
+
+      🔴 **기본이 꺼짐이다** (`auto_settle_expenses` 참고).
 
     🔴 **마감이 맨 끝이다. 마감이 터져도 그날 결과를 안 바꾼다.**
 
@@ -1508,6 +1601,28 @@ def run_scheduled_day(
     )
     notes.append(note)
 
+    # ── 운영비 지급 — 🔴 **마감 바로 앞** (2026-09-17) ──────────────
+    #
+    # ★★ **여기가 없어서 `operating_expense_cash_out_krw` 가 늘 0원이었다.** 발생도
+    #   지급도 재무 원장에 이미 있었고 **부르는 자리 하나**가 없었다.
+    #
+    # 🔴 **마감 앞이어야 한다.** 마감이 그날 `PAID` 인 비용을 읽어 운영비 칸을 적는다 —
+    #    뒤로 밀면 오늘 나간 돈이 **내일 장부에** 적히고 그날의 현금 항등식이 어긋난다.
+    #
+    # 🔴 **관문이 막은 날에는 여기 안 온다.** 위에서 이미 돌아섰다 — 그 날은 마감이
+    #    `BLOCKED` 라, 현금만 줄이면 «현금은 줄었는데 마감은 BLOCKED» 가 남는다.
+    #
+    # 🔴 **`auto_settle_expenses` 가 거짓이면 이 블록이 통째로 안 돈다.**
+    expense_settlement_status, expense_settlements, expense_note = _settle_expenses(
+        as_of=as_of,
+        sim_run_id=sim_run_id,
+        settle_expenses_fn=settle_expenses_fn,
+        enabled=auto_settle_expenses,
+        connect=connect,
+    )
+    if expense_note is not None:
+        notes.append(expense_note)
+
     # ── 마감 — 🔴 **하루의 맨 끝. 출고 뒤다** ───────────────────────
     #
     # ★ **왜 출고 뒤인가.** 출고가 재고를 움직인다. 앞에서 닫으면 그날 재고가
@@ -1519,7 +1634,26 @@ def run_scheduled_day(
     #
     # 🔴 **`sim_run_id` 를 흘려 준다.** 마감이 그 값을 `daily_closings` 의 PK 절반
     #    (`(sim_run_id, close_date)`)으로 쓴다 — 여기서 상수를 다시 적지 않는다.
-    closing_status, closing, note = _closing(as_of=as_of, sim_run_id=sim_run_id, close_fn=close_fn)
+    if expense_settlement_status == "FAILED":
+        # 🔴 **지급이 터진 날은 닫지 않는다. 막혔다고 적는다** (2026-09-17).
+        #
+        # ★★ **그냥 `FAILED` 만 적고 넘기면 마감이 정상 `CLOSED` 로 선다.** 그러면
+        #   «현금은 줄었는데 비용은 0원» 인 기록이 손익 곡선의 확정값으로 앉고, 그
+        #   숫자는 되돌릴 자리가 없다. 절반만 나간 지급은 아래에서 이미 rollback 됐지만
+        #   **어디까지 나갔는지를 모르는 것**이 이 날의 사실이다.
+        #
+        # 🔴 **새 차단 수단을 만들지 않는다.** 장부 관문이 쓰는 그 길
+        #    (`close_day` 판정 순서 ② · `ledger_gap` 이 있으면 `BLOCKED`)을 그대로 탄다.
+        #
+        # ★ **사유를 다시 짓지 않는다.** `_settle_expenses` 가 만든 그 한 줄을 그대로
+        #   넘긴다 — 두 벌이 되면 한쪽만 고치는 날 note 와 마감 사유가 갈린다.
+        closing_status, closing, note = _closing(
+            as_of=as_of, sim_run_id=sim_run_id, close_fn=close_fn, ledger_gap=expense_note
+        )
+    else:
+        closing_status, closing, note = _closing(
+            as_of=as_of, sim_run_id=sim_run_id, close_fn=close_fn
+        )
     notes.append(note)
 
     return DayRunOutcome(
@@ -1544,6 +1678,11 @@ def run_scheduled_day(
         procurement_status=judged.procurement_status,
         sales_status=judged.sales_status,
         outbound_status=outbound_status,
+        # 🔴 **지급 두 칸을 여기서 떨어뜨리면 «나갔는데 안 나갔다» 가 된다** (2026-09-17).
+        #    돈은 이미 원장에서 빠졌고, 그 사실이 결과에 안 실리면 요약이 그날을
+        #    *"지급할 것이 없었다"* 로 읽는다 — 점검 두 칸과 같은 자리·같은 이유다.
+        expense_settlement_status=expense_settlement_status,
+        expense_settlements=expense_settlements,
         closing_status=closing_status,
         closing=closing,
         items=judged.items,
@@ -2068,6 +2207,67 @@ def _outbound(
     status, note = _stage("출고", lambda: _kept(낸값, outbound_fn(as_of, sim_run_id=sim_run_id)))
     out = 낸값[0] if 낸값 and isinstance(낸값[0], OutboundOut) else None
     return status, out, note
+
+
+def _settle_expenses(
+    *,
+    as_of: date,
+    sim_run_id: str,
+    settle_expenses_fn: Callable[..., Any],
+    enabled: bool,
+    connect: Any = None,
+) -> tuple[str, tuple[ExpenseSettlement, ...], str | None]:
+    """지급일이 된 운영비를 **한 트랜잭션으로** 지급한다 (2026-09-17).
+
+    🔴 **`enabled` 이 거짓이면 `settle_expenses_fn` 이 이름조차 안 불린다.** 이 한 줄이
+      「지급한다 / 안 한다」가 갈리는 **유일한 자리**다 — `_maintain` · `_approve` 와
+      같은 모양이고, **더 센 이유**가 있다. 승인은 append-only 표에 한 줄이 남고 폐기는
+      물건이 없어지는데, 지급은 **현금이 줄고 되돌리는 경로가 재무에 없다**
+      (`PAID → CANCELLED` 는 없다고 `expenses.py` 가 못박았다).
+
+    🔴 **커넥션은 이 함수가 연다.** `settle_due_expenses` 는 commit 도 rollback 도 안
+      한다고 적어 뒀다 — 그 반대편이 여기다. 여러 건을 지급하다 중간에서 터지면 앞선
+      지급까지 같이 되돌아가야 하므로, **한 사이클이 한 커밋**이다
+      (`close_day` · `collect_receipts` 와 같은 모양·같은 자리).
+
+    🔴 **마감보다 먼저 커밋된다.** 부르는 쪽이 이 함수를 마감 앞에 두었고, 마감은
+      그날 `PAID` 인 비용을 **다른 커넥션으로** 읽는다 — 여기서 커밋을 미루면 마감이
+      방금 나간 돈을 못 본다.
+
+    🔴 **터지면 하루가 계속 가지 않는다.** `_stage` · `_maintain` 과 태도가 다른 유일한
+      칸이다. 사유를 돌려주고, **부르는 쪽이 그 문장으로 그날 마감을 `BLOCKED` 로**
+      막는다 — 그냥 넘기면 «현금은 줄었는데 비용은 0원» 이 확정값으로 앉는다.
+
+    🔴 **금액도 지급일도 여기서 안 정한다.** 무엇이 얼마나 언제 나가는지의 주인은
+      `expenses` 표이고, 이 함수가 넘기는 것은 **실행 축과 기준일 둘**뿐이다.
+
+    :returns: `(단계 상태, 지급한 건들, 사유 한 줄)`. 안 켠 날은
+        `("NOT_ATTEMPTED", (), None)` — 🔴 **note 도 안 남긴다.** 안 켠 것은 사건이
+        아니라 기본값이고, 매일 한 줄씩 남기면 진짜 사유가 안 읽힌다
+        (`_maintain` · `_approve` 와 같은 규율).
+    """
+    if not enabled:
+        return "NOT_ATTEMPTED", (), None
+    open_connection = get_connection if connect is None else connect
+    try:
+        conn = open_connection()
+    except Exception as exc:  # noqa: BLE001 - 못 붙은 것도 «지급을 못 했다» 는 사실이다.
+        # 🔴 **못 붙은 날을 조용히 «지급할 것이 없었다» 로 적지 않는다.** 그 날도
+        #    마감을 막는다 — 안 막으면 그날 나갔어야 할 돈이 0원으로 확정된다.
+        return "FAILED", (), f"운영비 지급이 터졌다: {type(exc).__name__}: {exc}"
+    try:
+        settlements = tuple(settle_expenses_fn(conn, sim_run_id=sim_run_id, as_of=as_of))
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 - 절반만 나간 지급을 장부에 남기지 않는다.
+        conn.rollback()
+        return "FAILED", (), f"운영비 지급이 터졌다: {type(exc).__name__}: {exc}"
+    finally:
+        conn.close()
+    if not settlements:
+        # ⚠️ **`NOT_ATTEMPTED` 와 접지 않는다** — *"켰는데 지급일이 된 것이 없었다"* 다.
+        return "NOTHING_DUE", (), "운영비 지급: NOTHING_DUE 지급일이 된 비용이 없다"
+    합계 = sum((one.amount_krw for one in settlements), Decimal(0))
+    return "RAN", settlements, f"운영비 지급: RAN {len(settlements)}건 / {합계}원"
 
 
 def _closing(
