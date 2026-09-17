@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { Panel } from "@/components/Badges";
 import { DecisionModal } from "@/components/DecisionModal";
@@ -166,6 +166,14 @@ function clarificationText(
 /** 분류가 못 돈 뒤 보내기를 더 잠가 두는 시간(초). **자동 재시도는 없다 — 사람이 누른다.** */
 const FALLBACK_COOLDOWN_SEC = 5;
 
+/**
+ * 바닥에서 이만큼 안이면 «바닥을 보고 있다» 로 본다(px).
+ *
+ * 딱 0 으로 두면 안 된다 — 한 줄 반쯤 남은 자리, 소수점 높이, 확대 배율 때문에
+ * 바닥까지 내려도 1~2px 이 남는 일이 흔하다. 그러면 따라 내려가지 않는다.
+ */
+const STICK_PX = 40;
+
 function traceOf(res: AskResponse): LlmTraceData {
   return {
     intent: res.intent,
@@ -250,9 +258,53 @@ export function MasterConsole({ session }: { session: Session }) {
   const tail = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLInputElement>(null);
 
+  /* ── 새 글이 와도 읽던 자리를 뺏지 않는다 ──────────────────────────────
+   *
+   * 예전엔 `turns` 가 늘 때마다 **무조건** 바닥으로 내려갔다. 위로 올려 지난 답을
+   * 읽는 중에 새 글이 하나만 붙어도 읽던 자리가 끌려 내려갔다.
+   *
+   * ★ 새 글은 **아래에 붙는다.** 그러면 브라우저가 `scrollTop` 을 그대로 두므로
+   *   위에 보이던 내용은 한 픽셀도 안 움직인다 — **아무것도 안 하는 것**이
+   *   자리를 지키는 것이다. 그래서 «늘어난 높이만큼 빼 준다» 는 보정을 두지 않는다.
+   *   (윗쪽에 끼워 넣는 일이 생기면 그때 보정이 필요해진다. 지금은 없다.)
+   *
+   * 내려가는 자리는 둘뿐이다.
+   *   ① 이미 바닥 근처(`STICK_PX` 안)일 때 — 따라 내려가는 게 자연스럽다
+   *   ② 방금 **자기가 보낸 글**일 때 — 자기 글은 보고 싶어 한다
+   *
+   * 🔴 «바닥 근처인가» 는 **구르는 동안** 재 둔다. 효과가 도는 시점은 새 글이 이미
+   *    붙은 뒤라, 그때 재면 높이가 늘어 있어 언제나 «바닥이 아니다» 로 나온다.
+   *    그래서 상태가 아니라 `ref` 다 — 값이 바뀌어도 효과가 다시 돌면 안 된다.
+   * ------------------------------------------------------------------ */
+
+  const scroller = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const [unread, setUnread] = useState(false);
+
+  function onScroll() {
+    const el = scroller.current;
+    if (!el) return;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX;
+    //  바닥까지 내려왔으면 안내는 할 일이 없다
+    if (stick.current) setUnread(false);
+  }
+
+  /** 바닥으로. 안내 버튼과 효과가 같이 쓴다 — `ref` 만 보므로 한 번 만들고 안 바꾼다. */
+  const toBottom = useCallback(() => {
+    stick.current = true;
+    setUnread(false);
+    tail.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, []);
+
   useEffect(() => {
-    tail.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns]);
+    if (turns.length === 0) return;
+    if (turns.at(-1)?.kind === "me" || stick.current) {
+      toBottom();
+    } else {
+      //  위에서 읽는 중이다 — **자리는 그대로 두고** «새 글이 있다» 만 알린다.
+      setUnread(true);
+    }
+  }, [turns, toBottom]);
 
   //  남은 초를 1초씩 깎는다. 0 이 되면 잠금이 풀린다 — 여기서 다시 보내지 않는다.
   useEffect(() => {
@@ -616,7 +668,14 @@ export function MasterConsole({ session }: { session: Session }) {
           </div>
         ) : (
           <>
-            <div className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4">
+            {/* 안내 버튼이 구르는 판 위에 떠야 해서 `relative` 한 겹을 덧댄다.
+                높이 규칙(`min-h-0 flex-1`)은 덧댄 겹과 안쪽 판이 그대로 이어받는다. */}
+            <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={scroller}
+              onScroll={onScroll}
+              className="min-h-0 flex-1 space-y-3.5 overflow-y-auto px-4 py-4"
+            >
               {turns.length === 0 && <Empty onPick={send} />}
 
               {turns.map((turn, i) => (
@@ -666,6 +725,20 @@ export function MasterConsole({ session }: { session: Session }) {
                 </p>
               )}
               <div ref={tail} />
+            </div>
+
+            {/* 위에서 읽는 동안 새 글이 오면 여기서만 알린다 — 판은 안 움직인다. */}
+            {unread && (
+              <button
+                type="button"
+                onClick={toBottom}
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-line
+                  bg-surface px-3 py-1 text-xs text-muted shadow-[0_6px_18px_-8px_rgba(21,26,22,.5)]
+                  transition hover:border-accent hover:text-accent-ink"
+              >
+                새 메시지 ↓
+              </button>
+            )}
             </div>
 
             <div className="border-t border-line px-4 py-3">
