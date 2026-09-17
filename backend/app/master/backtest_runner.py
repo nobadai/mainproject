@@ -222,6 +222,9 @@ from app.master.ml_batch_calendar import MlBatchCalendar, get_ml_batch_calendar
 from app.master.sales_terms import read_run_sales_terms
 from app.master.scheduler import (
     DAILY_POLICY_VERSION,
+    # 🔴 **지급 어휘의 주인에서 읽는다** (2026-09-17). 여기서 세 낱말을 손으로 적으면
+    #   어휘가 바뀌는 날 요약만 옛 말을 세고, 그 줄이 0 을 못 채운다.
+    EXPENSE_SETTLEMENT_STATUSES,
     DayRunOutcome,
     DayScope,
     # 🔴 **마감의 주인에서 읽는다. 여기서 10:30 을 다시 적지 않는다** (2026-09-13).
@@ -283,6 +286,14 @@ _OBSERVED_AT_LABELS: tuple[str, str] = ("실었다", "안쟀다")
 _CLOSING_STATUSES: tuple[str, ...] = (
     *get_args(ClosingOut.model_fields["status"].annotation),
     DayRunOutcome.closing_status,
+)
+
+#: 운영비 지급 줄이 찍는 어휘 (2026-09-17). 🔴 **여기서 이름을 안 적는다** —
+#: `scheduler.EXPENSE_SETTLEMENT_STATUSES` 의 셋과, 단계를 안 탄 날 `DayRunOutcome` 이
+#: 두는 기본값 그대로다 (`_CLOSING_STATUSES` · `inspection_statuses` 와 같은 결).
+_EXPENSE_SETTLEMENT_STATUSES: tuple[str, ...] = (
+    *EXPENSE_SETTLEMENT_STATUSES,
+    DayRunOutcome.expense_settlement_status,
 )
 
 
@@ -1006,6 +1017,35 @@ class WalkResult:
         return tuple(out)
 
     @property
+    def expense_settlement_statuses(self) -> Mapping[str, int]:
+        """운영비 지급 **단계** 분포 (2026-09-17). 🔴 **넷을 접지 않는다 · 0 도 든다.**
+
+        ```text
+        NOT_ATTEMPTED  안 켰다 — --auto-settle-expenses 를 안 줬다 · 관문이 막은 날이다
+        RAN            지급한 건이 있었다
+        NOTHING_DUE    확인했고 지급일이 된 것이 없었다 — 🟢 정상이다
+        FAILED         하려다 터졌다 — 🔴 **그날 마감이 BLOCKED 다** (`_incident_reason`)
+        ```
+
+        ★★ **날짜 줄 하나로는 「안 켰다」와 「켰는데 0건」이 안 갈린다.** 둘 다
+          `expense_settlement_lines` 가 빈 튜플이고, 그러면 성적표를 보는 사람이
+          *"지급할 것이 없었구나"* 로 읽는다 — 실제로는 안 켠 것일 수 있다.
+          `maintenance` 가 `유지보수`·`유지어휘` 두 줄인 것과 같은 이유로 여기도 둘이다.
+
+        🔴 **`FAILED` 0 을 빼지 않는다.** 여기서 묻는 것은 *"지급이 터진 날이 없었다"*
+          이고, 키가 안 보이면 *"없었다"* 와 *"안 셌다"* 가 같아진다 — 마감 줄이
+          03-06 뒤로 멈춘 것을 아무도 못 본 그 모양(`closing_statuses`)을 되풀이하지
+          않으려고 처음부터 채운다.
+
+        ★ **여기서 금액을 세지 않는다.** 얼마가 나갔나의 주인은 `ExpenseSettlement` 이고
+          `expense_settlement_lines` 가 그것을 나른다 — 이 줄은 **날을 센다.**
+        """
+        total: Counter[str] = Counter(dict.fromkeys(_EXPENSE_SETTLEMENT_STATUSES, 0))
+        for day in self.days:
+            total[day.expense_settlement_status] += 1
+        return total
+
+    @property
     def expense_settlement_lines(self) -> tuple[str, ...]:
         """운영비가 **실제로 나간 날마다** 한 줄 (2026-09-17).
 
@@ -1579,6 +1619,7 @@ def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
                                             🔴 scope 가 FULL 이든 LEDGER_ONLY 든 같다
     failed_items 가 비지 않았다              품목이 터졌다 (나머지는 돌았다)
     outbound_status == FAILED               나가려다 못 나갔다
+    expense_settlement_status == FAILED     운영비를 못 지급했다 (2026-09-17)
     closing_status == FAILED                마감이 닫아 보다 터졌다 (2026-09-16)
     ```
 
@@ -1587,8 +1628,28 @@ def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
       다음 날 판단은 안 닫힌 장부 위에서 돈다 — 조용히 계속 가는 것보다 연속 사고
       상한에 걸려 멈추는 쪽이 낫다.
 
-    ⚠️ **마감 `BLOCKED` · `NOT_OPENED` 는 여기서 안 센다.** 그 둘은 앞 단계(개장 · 장부
-      관문)가 이미 막힌 날의 결과이고, 그 사실은 위 줄이 이미 사고로 잡았다.
+    🔴 **운영비 지급 `FAILED` 도 사고다** (2026-09-17). 마감 `FAILED` 와 **같은 이유**다 —
+      지급이 터진 날은 그날 마감이 `BLOCKED` 로 닫히고(`scheduler`), 다음 날 판단은
+      **안 닫힌 장부 위에서** 돈다. 조용히 계속 가면 첫날 지급이 터진 판이 179일을
+      `BLOCKED` 로 걷고 **끝에서야** 그 사실이 보인다.
+
+      ★ **지급 단계의 어휘 중 `FAILED` 만 본다.** `NOT_ATTEMPTED` 는 안 켠 날이고
+        `NOTHING_DUE` 는 지급일이 된 것이 없던 날이라 둘 다 정상이다 — 그 분포는
+        `expense_settlement_statuses` 가 요약에 따로 찍는다.
+
+    ⚠️ **마감 `BLOCKED` · `NOT_OPENED` 는 여기서 안 센다.**
+
+      ```text
+      개장이 막혀서 BLOCKED         앞 줄이 procurement_status 로 이미 잡는다
+      장부 관문이 막아서 BLOCKED    앞 줄이 procurement_status 로 이미 잡는다
+      지급이 터져서 BLOCKED         🔴 **위 줄이 지급 상태로 직접 잡는다** (2026-09-17)
+      ```
+
+      🔴 **세 번째 줄이 종전 전제를 깬다.** 마감 `BLOCKED` 를 안 세는 근거는 *"앞
+        단계가 이미 막힌 날이라 그 사실을 앞 줄이 잡았다"* 였는데, 지급이 터진 날은
+        **판단이 이미 `RAN`** 이라 앞 줄에 안 걸린다. 그래서 마감 어휘가 아니라
+        **지급 어휘로** 잡는다 — 마감 상태를 여기서 다시 읽으면 앞의 두 줄이 사고
+        둘로 세진다.
 
     ⚠️ **`WAIT` 은 사고가 아니다.** *"아직"* 이지 *"못"* 이 아니다. 그 구분이
       `scheduler` 가 다섯 어휘를 가른 이유이고, 여기서 접으면 그게 무의미해진다.
@@ -1628,6 +1689,15 @@ def _incident_reason(outcome: DayRunOutcome, *, scope: DayScope) -> str | None:
         # ★ **사유를 여기서 짓지 않는다.** 무엇이 못 나갔는지는 `OutboundOut.reason`
         #   이 알고, `_stage` 가 그것을 note 로 실어 보냈다 — 그 값을 그대로 나른다.
         return "출고가 못 나갔다" + (f" — {'; '.join(outcome.notes)}" if outcome.notes else "")
+    if outcome.expense_settlement_status == "FAILED":
+        # ★ **사유를 여기서 짓지 않는다.** 무엇이 터졌는지는 `_settle_expenses` 가 만든
+        #   그 한 줄이 알고, 같은 문장이 마감의 `ledger_gap` 으로도 갔다 — note 를 그대로 나른다.
+        #
+        # 🔴 **마감 줄보다 앞이다.** 지급이 터진 날은 마감이 `BLOCKED` 라 아래 줄에 안
+        #    걸린다. 여기서 잡지 않으면 그 날은 **어느 줄에도 안 걸리고** 사고 0건이 된다.
+        return "운영비를 못 지급했다" + (
+            f" — {'; '.join(outcome.notes)}" if outcome.notes else ""
+        )
     if outcome.closing_status == "FAILED":
         # ★ **사유를 여기서 짓지 않는다.** `_stage` 가 `ClosingOut.reason` 을 note 로 실었다.
         return "마감이 못 섰다" + (f" — {'; '.join(outcome.notes)}" if outcome.notes else "")
@@ -1966,6 +2036,11 @@ def format_summary(result: WalkResult) -> str:
         # 🔴 **마감 줄을 현금 줄 바로 위에 둔다** (2026-09-16). 현금 합이 어느 날들의
         #    합인지가 이 줄에 있다 — 이 줄이 없어서 03-06 뒤로 마감이 0행인 판을
         #    「사고 0건 · 현금항등식 🟢」 으로 읽었다.
+        # 🔴 **운영비 줄을 마감 줄과 현금 줄 사이에 둔다** (2026-09-17). 지급은 마감
+        #    바로 앞 단계이고, 현금 줄의 운영비 칸이 그 결과다 — 이 줄이 없으면 그 칸이
+        #    0 일 때 «안 켰다» 와 «지급할 것이 없었다» 와 «지급이 터졌다» 가 한 글자로
+        #    접힌다. 마감 줄이 없어서 03-06 뒤를 아무도 못 본 그 모양과 같다.
+        f"운영비    {dict(sorted(result.expense_settlement_statuses.items()))}",
         _closing_line(result),
         *_cash_lines(result),
         f"사고      {len(result.incidents)}건",

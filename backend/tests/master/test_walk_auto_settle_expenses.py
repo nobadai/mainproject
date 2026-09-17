@@ -37,7 +37,7 @@ import inspect
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -47,6 +47,7 @@ from psycopg import sql
 from app.finance.closing_adapter import FinanceClosingAdapter
 from app.finance.db import get_connection, get_db_schema
 from app.finance.expenses import ExpenseSettlement, settle_due_expenses, settle_expense
+from app.master import backtest_runner
 from app.master import closing as master_closing
 from app.master.backtest_runner import WalkResult, format_summary, walk
 from app.master.clock import SEOUL
@@ -55,6 +56,7 @@ from app.master.forecast_gate import DayForecastReadiness, ItemForecastGate
 from app.master.maintenance import MaintenanceOut
 from app.master.pending_transition import RetryOut
 from app.master.scheduler import (
+    EXPENSE_SETTLEMENT_STATUSES,
     DayRunOutcome,
     ScheduledAction,
     plan_next_action,
@@ -796,6 +798,161 @@ def test_지급이_0건인_날은_줄이_안_는다() -> None:
     결과 = WalkResult(start=AS_OF, end=AS_OF, days=(안켠날, 빈날))
 
     assert 결과.expense_settlement_lines == ()
+
+
+def test_요약이_안_켠_것과_0건을_가른다() -> None:
+    """🔴 **날짜 줄 하나로는 둘이 안 갈린다.**
+
+    ```text
+    안 켰다          운영비 줄이 없다   ← --auto-settle-expenses 를 안 줬다
+    켰는데 0건       운영비 줄이 없다   ← 지급일이 된 것이 없었다
+    ```
+
+    ★★ 성적표를 보는 사람이 뒤엣것으로 읽는다. 실제로는 앞엣것일 수 있고, **그 둘은
+      다음 걸음이 다르다** — 마감 줄이 없어서 03-06 뒤를 아무도 못 본 그 모양이다.
+    """
+
+    def _결과(*상태: str) -> WalkResult:
+        날들 = tuple(
+            DayRunOutcome(
+                as_of=AS_OF + timedelta(days=자리),
+                action="RUN_NOW",
+                reason="",
+                expense_settlement_status=하나,
+            )
+            for 자리, 하나 in enumerate(상태)
+        )
+        return WalkResult(start=AS_OF, end=날들[-1].as_of, days=날들)
+
+    안켠것 = _결과("NOT_ATTEMPTED", "NOT_ATTEMPTED")
+    켠것 = _결과("NOTHING_DUE", "NOTHING_DUE")
+
+    assert 안켠것.expense_settlement_lines == 켠것.expense_settlement_lines, (
+        "이 검사의 전제가 깨졌다 — 날짜 줄이 둘을 이미 가르면 이 줄은 필요 없다"
+    )
+    assert 안켠것.expense_settlement_statuses != 켠것.expense_settlement_statuses
+    assert 안켠것.expense_settlement_statuses["NOT_ATTEMPTED"] == 2
+    assert 켠것.expense_settlement_statuses["NOTHING_DUE"] == 2
+
+
+def test_지급_분포_줄이_FAILED_0_도_찍는다() -> None:
+    """🔴 **키가 안 보이면 «없었다» 와 «안 셌다» 가 같아진다** (`closing_statuses` 규율).
+
+    ★ 이 줄에서 묻는 것은 *"지급이 터진 날이 없었다"* 이고, 그 답이 보이려면 `FAILED 0`
+      이 찍혀야 한다.
+    """
+    결과 = WalkResult(
+        start=AS_OF,
+        end=AS_OF,
+        days=(DayRunOutcome(as_of=AS_OF, action="RUN_NOW", reason=""),),
+    )
+
+    분포 = 결과.expense_settlement_statuses
+    요약 = _NFC(format_summary(결과))
+
+    assert set(분포) == {"NOT_ATTEMPTED", "RAN", "NOTHING_DUE", "FAILED"}
+    assert 분포["FAILED"] == 0
+    assert _NFC("운영비    {'FAILED': 0,") in 요약
+
+
+def test_분포_어휘를_걷기가_제_손으로_안_짓는다() -> None:
+    """🔴 **셋의 주인은 `scheduler.EXPENSE_SETTLEMENT_STATUSES` 하나다.**
+
+    ⚠️ `NOT_ATTEMPTED` 는 거기 없다 — 단계를 안 탄 날 `DayRunOutcome` 이 두는
+      기본값이고, 요약은 그 기본값을 그대로 읽어 붙인다.
+    """
+    assert EXPENSE_SETTLEMENT_STATUSES == {"RAN", "NOTHING_DUE", "FAILED"}
+    assert DayRunOutcome.expense_settlement_status == "NOT_ATTEMPTED"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⑥ 🔴 지급이 터진 날은 **사고로 세지고 · 걷기가 멈춘다**
+# ══════════════════════════════════════════════════════════════════════
+#
+# 🔴 **앞의 두 줄(개장 · 장부 관문)이 이 날을 못 잡는다.** 지급은 판단 뒤라 그 날
+#    `procurement_status` 가 이미 `RAN` 이다 — 사고로 세는 자리가 지급 어휘뿐이다.
+
+
+def _터진하루(as_of: date) -> DayRunOutcome:
+    """지급이 터져 마감이 `BLOCKED` 로 닫힌 날. **판단은 이미 돌았다.**"""
+    return DayRunOutcome(
+        as_of=as_of,
+        action="RUN_NOW",
+        reason="",
+        day_open_status="OPENED",
+        inbound_status="RECEIVED",
+        receivable_status="ISSUED",
+        collection_status="COLLECTED",
+        procurement_status="RAN",
+        sales_status="RAN",
+        outbound_status="NOTHING_DUE",
+        expense_settlement_status="FAILED",
+        closing_status="BLOCKED",
+        notes=("운영비 지급이 터졌다: RuntimeError: 원장이 안 열린다",),
+    )
+
+
+def test_지급이_터진_날이_사고로_세진다() -> None:
+    """🔴🔴 **조용히 계속 가면 179일을 BLOCKED 로 걷고 끝에서 안다.**
+
+    ★ 마감 `FAILED` 를 사고로 센 것과 같은 이유다 — 그날 장부가 안 닫혔으면 다음 날
+      판단은 **안 닫힌 장부 위에서** 돈다.
+    """
+    사유 = backtest_runner._incident_reason(_터진하루(AS_OF), scope="FULL")
+
+    assert 사유 is not None, "지급이 터진 날이 사고로 안 세졌다"
+    assert _NFC("운영비를 못 지급했다") in _NFC(사유)
+    assert "RuntimeError" in 사유
+
+
+def test_지급이_선_날은_사고가_아니다() -> None:
+    """🟢 **위 검사가 아무 날에나 사고를 만들지 않음**을 같이 잠근다 — 자기 생존 검사다.
+
+    ★ `NOT_ATTEMPTED` 도 `NOTHING_DUE` 도 정상이다. 안 켠 걷기가 날마다 사고면
+      사고 목록이 아무것도 안 가리킨다.
+    """
+    for 상태 in ("NOT_ATTEMPTED", "NOTHING_DUE", "RAN"):
+        하루 = DayRunOutcome(
+            as_of=AS_OF,
+            action="RUN_NOW",
+            reason="",
+            day_open_status="OPENED",
+            procurement_status="RAN",
+            expense_settlement_status=상태,
+            closing_status="CLOSED",
+        )
+        assert backtest_runner._incident_reason(하루, scope="FULL") is None, 상태
+
+
+def test_지급이_날마다_터지면_걷기가_연속_사고_상한에_걸려_멈춘다() -> None:
+    """🔴 **첫날 지급이 터진 판이 179일을 걷고 끝에서 발견되면 안 된다.**
+
+    ★★ 이 줄이 잠그는 것은 «사고로 센다» 가 실제로 **걷기를 멈추는 데까지** 이어지는가다 —
+      센 것이 상한에 안 걸리면 세나 마나다.
+    """
+
+    def 하루(action: ScheduledAction, **kwargs: Any) -> DayRunOutcome:
+        return _터진하루(action.as_of)
+
+    결과 = walk(
+        sim_run_id=실행,
+        start=AS_OF,
+        end=AS_OF + timedelta(days=30),
+        now=지금,
+        calendar=lambda: _달력(),
+        ml_batch=lambda: _배치가_도는_날(),
+        readiness=_준비,
+        run_day_fn=하루,
+        max_consecutive_failures=3,
+        auto_settle_expenses=True,
+        closings_of=lambda **kwargs: [],
+        ticks=lambda: 0.0,
+    )
+
+    assert not 결과.completed, "지급이 날마다 터지는데 끝까지 걸었다"
+    assert 결과.stopped_at == AS_OF + timedelta(days=2)
+    assert len(결과.incidents) == 3
+    assert _NFC("운영비를 못 지급했다") in _NFC(결과.incidents[0].reason)
 
 
 def test_걷기가_받은_스위치를_그대로_하루에_넘긴다() -> None:

@@ -354,7 +354,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from app.finance.db import get_connection
 from app.finance.expenses import ExpenseSettlement, settle_due_expenses
@@ -392,12 +392,14 @@ from app.master.service import run_procurement, run_sales
 
 __all__ = [
     "DAILY_POLICY_VERSION",
+    "EXPENSE_SETTLEMENT_STATUSES",
     "SCHEDULE_DEADLINE",
     "SCHEDULE_INTERVAL",
     "SCHEDULE_START",
     "WALK_BUSINESS_MODE",
     "DayRunOutcome",
     "DayScope",
+    "ExpenseSettlementStatus",
     "ItemRunOutcome",
     "ScheduledAction",
     "SchedulerAction",
@@ -425,6 +427,15 @@ logger = logging.getLogger(__name__)
 
 #: 하루 실행이 싣는 정책 판. **부르는 쪽이 바꿀 수 있게 인자로도 열어 둔다.**
 DAILY_POLICY_VERSION = "v1.3-PROVISIONAL"
+
+#: 운영비 지급 한 칸의 결과 어휘 (2026-09-17). 🔴 **주인은 이 한 줄이다** —
+#: `_settle_expenses` 가 내는 값도 이것이고, 걷기 요약이 0건을 채울 때도 이것을 읽는다
+#: (`inspection.INSPECTION_STATUSES` 와 같은 모양).
+#:
+#: ⚠️ **`NOT_ATTEMPTED` 가 여기 없다.** 그 말은 단계를 안 탄 날 `DayRunOutcome` 이 두는
+#:   기본값이지 지급이 낸 값이 아니다 — 읽는 쪽이 기본값을 그대로 읽어 붙인다.
+ExpenseSettlementStatus = Literal["RAN", "NOTHING_DUE", "FAILED"]
+EXPENSE_SETTLEMENT_STATUSES: frozenset[str] = frozenset(get_args(ExpenseSettlementStatus))
 
 #: `NO_ML_BATCH` 사유에 반드시 들어가는 문장.
 #:
