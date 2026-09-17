@@ -62,6 +62,25 @@ walk(sim_run_id=..., start=..., end=..., now=...)   start..end 를 하루씩 걷
 
 ---
 
+🔴 **운영비 지급도 명시로만 켠다** (2026-09-17).
+
+```text
+--auto-settle-expenses 를 **안 주면**   지급 함수가 이름조차 안 불린다 · 현금이 안 움직인다
+--auto-settle-expenses 를 주면          **마감 바로 앞**에 지급일이 된 비용을 지급한다
+```
+
+★★ **이 자리가 없어서 `operating_expense_cash_out_krw` 가 늘 0원이었다.** 발생도
+  지급도 재무 원장에 이미 있었고, **부르는 자리 하나**가 없었다.
+
+🔴 **지급이 터진 날은 그날 마감이 `BLOCKED` 다.** 유지보수·전이와 태도가 다르다 —
+  저쪽은 터져도 하루가 계속 가지만, 이쪽은 현금이 움직인 뒤라 그냥 넘기면
+  **«현금은 줄었는데 비용은 0원»** 인 기록이 손익 곡선의 확정값으로 앉는다.
+
+⚠️ **켰는데 지급할 것이 없어도 막지 않는다.** `--auto-maintain` 과 같은 축이다 —
+  그 날은 사고가 아니라 `NOTHING_DUE` 다.
+
+---
+
 🔴 **`now` 를 인자로 받는다. 시계를 안 읽는다.**
 
   `plan_next_action` 이 마감(10:30)과 비교하는 값이 `now` 다. 이 파일이 시계를
@@ -987,6 +1006,32 @@ class WalkResult:
         return tuple(out)
 
     @property
+    def expense_settlement_lines(self) -> tuple[str, ...]:
+        """운영비가 **실제로 나간 날마다** 한 줄 (2026-09-17).
+
+        ```text
+        2026-01-10  운영비 지급 1건 / 3,855,000원
+        ```
+
+        🔴 **0건인 날은 줄이 안 는다.** 179일 중 지급이 있는 날은 몇 날뿐이고, 없는
+          날까지 찍으면 그 몇 줄이 179줄 사이에 묻힌다 — `출고실패` 줄과 같은 규율이다.
+
+        ★ **값을 새로 만들지 않는다.** 건수와 금액의 주인은 `ExpenseSettlement` 이고
+          여기는 세어 옮겨 적는다. 지급을 안 켠 날과 켰는데 없던 날은 둘 다 줄이 안
+          느는데, 그 둘을 가르는 것은 `DayRunOutcome.expense_settlement_status` 다.
+        """
+        out: list[str] = []
+        for day in self.days:
+            if not day.expense_settlements:
+                continue
+            합계 = sum((one.amount_krw for one in day.expense_settlements), Decimal(0))
+            out.append(
+                f"{day.as_of.isoformat()}  운영비 지급"
+                f" {len(day.expense_settlements)}건 / {_krw(합계)}원"
+            )
+        return tuple(out)
+
+    @property
     def confirmation_reasons(self) -> tuple[str, ...]:
         """확정이 못 선 이유들. **`CONFIRMED` 가 아닌 것만.**
 
@@ -1209,6 +1254,7 @@ def walk(
     rules_of: Callable[[str], BackfillRules] = read_run_rules,
     terms_of: Callable[[str], SalesTermsRule | None] = read_run_sales_terms,
     auto_maintain: bool = False,
+    auto_settle_expenses: bool = False,
     closings_of: Callable[..., Sequence[Mapping[str, Any]]] = read_walk_closings,
     walked_now: str | None = None,
     record_now: Callable[..., WalkedNowStamp] = record_walked_now,
@@ -1265,6 +1311,17 @@ def walk(
 
         ⚠️ **`auto_approve` 처럼 걷기 전에 막는 관문이 없다.** 확인할 규칙 파일이
           없기 때문이다 — 버릴 것이 없는 날은 사고가 아니라 `NOTHING_DUE` 다.
+    :param auto_settle_expenses: 🔴 **기본이 거짓이다. 안 주면 지급 함수가 이름조차
+        안 불린다** (2026-09-17). 켜면 **마감 바로 앞**에 지급일이 된 운영비를 지급한다.
+
+        ★★ **폐기보다 더 조심할 자리다.** 폐기는 물건이 없어지고 지급은 **현금이
+          줄어드는데**, 되돌리는 경로가 재무에 없다 (`PAID → CANCELLED` 는 없다).
+
+        🔴 **지급이 터진 날은 그날 마감이 `BLOCKED` 다.** 하루가 계속 가지 않는
+          유일한 칸이고, 그 이유는 `scheduler.run_scheduled_day` 가 적어 뒀다.
+
+        ⚠️ **`auto_maintain` 과 같은 축이다** — 걷기 전에 막는 관문이 없다. 확인할
+          설정 파일이 없고, 지급할 것이 없는 날은 사고가 아니라 `NOTHING_DUE` 다.
     :param closings_of: 그 구간의 마감행을 읽는 자리 (2026-09-12). 🔴 **걷기 한
         판에 한 번, 다 걷고 나서 부른다** — 날마다 읽으면 같은 표를 179번 다시
         읽고, 그 중 하루만 다른 답이 오는 날이 오면 왜인지를 못 읽는다.
@@ -1412,6 +1469,9 @@ def walk(
                 # 🔴 **받은 스위치를 그대로 넘긴다.** 여기서 다시 정하지 않는다 —
                 #    그러면 폐기를 켜고 끄는 자리가 둘이 된다.
                 auto_maintain=auto_maintain,
+                # 🔴 **받은 스위치를 그대로 넘긴다** (2026-09-17). 여기서 다시 정하지
+                #    않는다 — 그러면 현금이 나가고 안 나가고를 정하는 자리가 둘이 된다.
+                auto_settle_expenses=auto_settle_expenses,
             )
         except Exception as exc:  # noqa: BLE001 - 하루가 터져도 다음 날은 걷는다.
             # ★ **터진 날도 사고로 남고 걷기는 이어진다.** 여기서 raise 하면 나머지
@@ -1628,6 +1688,16 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "🔴 개장 바로 뒤에 그날 창고 자리를 비운다 · 폐기대기 Lot 이 없어진다"
             " (되돌릴 경로 없음) · 안 주면 한 Lot 도 건드리지 않는다"
+        ),
+    )
+    parser.add_argument(
+        "--auto-settle-expenses",
+        action="store_true",
+        default=False,
+        help=(
+            "🔴 마감 바로 앞에 지급일이 된 운영비를 지급한다 · 현금이 줄고 expenses 가"
+            " PAID 로 바뀐다 (되돌릴 경로 없음) · 지급이 터진 날은 마감이 BLOCKED 다"
+            " · 안 주면 한 건도 지급하지 않는다"
         ),
     )
     return parser
@@ -1908,6 +1978,11 @@ def format_summary(result: WalkResult) -> str:
     #    이 줄은 품목 단위다 — 고아 예약 미설명 6건을 되짚으려면 터진 순간의 후보가
     #    몇 개 · 몇 kg 이었는지가 한 줄에 있어야 한다.
     lines += [f"  출고실패  {줄}" for 줄 in result.outbound_failure_lines]
+    # 🔴 **운영비가 나간 날은 요약에 보여야 한다** (2026-09-17). 이 줄이 없으면 걷기를
+    #    다 걷고도 *"지급이 돌긴 했나"* 를 성적표만 보고는 못 답한다 — 현금 줄의
+    #    운영비 칸은 마감이 적은 값이라, 그 칸이 0 일 때 «안 켰다» 와 «지급할 것이
+    #    없었다» 와 «지급은 했는데 마감이 못 읽었다» 가 한 글자로 접힌다.
+    lines += [f"  {줄}" for 줄 in result.expense_settlement_lines]
     lines += [f"  사고 {one.as_of.isoformat()}  {one.reason}" for one in result.incidents]
     if result.stopped_reason is not None:
         lines.append(f"멈춤      {result.stopped_at} — {result.stopped_reason}")
@@ -1971,6 +2046,7 @@ def main(argv: Sequence[str]) -> int:
         max_consecutive_failures=args.max_consecutive_failures,
         auto_approve=args.auto_approve,
         auto_maintain=args.auto_maintain,
+        auto_settle_expenses=args.auto_settle_expenses,
         # 🔴 **받은 문자열 그대로 넘긴다** (2026-09-13). 위 `now` 는 파싱한 값이라
         #    `16:00` 이 `16:00:00` 이 되고, 사람이 준 것이 원장에서 사라진다.
         walked_now=args.now,
