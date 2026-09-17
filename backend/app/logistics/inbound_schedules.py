@@ -498,6 +498,7 @@ def assert_cancellable(
 # ETA 도달 · Receipt 없음        O        O          O
 # Receipt 있음 · Lot 없음        X        O          O    ← 여기가 갈리는 자리다
 # Lot + IN Move 완료             X        X          X    (그때부터 on_hand 가 센다)
+# 수용 0 검수 · PUTAWAY_DONE     X        X          X    (만들 재고가 없다 · 검수일부터)
 # 취소됨                        X        X          X
 # ```
 #
@@ -535,6 +536,10 @@ class InboundScheduleView:
     #: 그날까지 **재고가 실제로 섰나** — Lot 과 원장 IN 이 **둘 다** 있어야 참이다.
     #: 🔴 Receipt 존재로 대신하지 않는다. 그 둘은 다른 사건이다.
     stock_applied: bool
+    #: 그날까지 **수용 0 으로 입고 처리가 끝났나** — 수용 0 검수가 그날까지 있었고
+    #: (`inspected_at < (as_of+1) 00:00 KST`) Receipt 가 `PUTAWAY_DONE` · `CLOSED` 다.
+    #: 🔴 재고가 선 것이 아니다 — `stock_applied` 와 다른 사실이다.
+    settled_without_stock: bool = False
 
     def as_in_transit(self) -> InTransitItem:
         """Legacy 계약 그대로의 운송 중 한 줄. **DTO 를 새로 만들지 않는다.**"""
@@ -634,6 +639,13 @@ def load_schedule_views(
        `received_at <= as_of`, 원장 IN 은 `moved_at <= as_of` 다 — 오늘 상태를
        과거 날짜 답에 섞으면 Historical 조회가 거짓말을 한다.
 
+       ★ **수용 0 완료는 검수 사건으로 자른다** (`inspected_at < timestamp_cutoff(as_of)`
+         — `historical_repository.receipt_state_at` 의 INSPECTED 와 같은 규칙).
+         `PUTAWAY_DONE` 에는 날짜가 없지만, 수용 0 이면 재고화가 쓰는 것이 Receipt
+         상태뿐이고 그것이 검수 기록과 **한 트랜잭션**에서 선다
+         (`inbound_execution._receive_one`). `receipt_status` 는 «재고화가 이미 돌았나»
+         만 본다 — 되돌아가지 않는 상태라 과거 날짜를 앞당기지 않는다.
+
     🔴 **계보는 `EXISTS` 로 묻는다. `LEFT JOIN` 으로 끌어오지 않는다.**
 
     ```text
@@ -674,6 +686,10 @@ def _load_schedule_views(
     conn: Any, *, sim_run_id: str, as_of: date
 ) -> tuple[InboundScheduleView, ...]:
     """질의 한 번. **`load_schedule_views` 의 알맹이이고 범위를 모른다.**"""
+    # ★ 함수 안에서 가져온다 — `historical_repository → repository → inbound_schedules`
+    #   순환이라 모듈 머리에 둘 수 없고, 규칙을 옮겨 적으면 두 곳이 갈린다.
+    from app.logistics.historical_repository import timestamp_cutoff
+
     schema = _schema()
     rows = _rows(
         conn,
@@ -703,7 +719,19 @@ def _load_schedule_views(
                         WHERE r.sim_run_id = s.sim_run_id
                           AND r.inbound_id = s.inbound_id
                           AND r.arrived_at <= %(as_of)s
-                   ) AS stock_applied
+                   ) AS stock_applied,
+                   EXISTS (
+                       SELECT 1
+                         FROM {schema}.inbound_receipts r
+                         JOIN {schema}.inbound_inspections ins
+                           ON ins.receipt_id = r.receipt_id
+                          AND ins.accepted_qty_kg = 0
+                          AND ins.inspected_at < %(cutoff)s
+                        WHERE r.sim_run_id = s.sim_run_id
+                          AND r.inbound_id = s.inbound_id
+                          AND r.arrived_at <= %(as_of)s
+                          AND r.receipt_status IN ('PUTAWAY_DONE', 'CLOSED')
+                   ) AS settled_without_stock
             FROM {schema}.inbound_schedules s
             LEFT JOIN {schema}.purchase_items pi
                    ON pi.purchase_item_id = s.purchase_item_id
@@ -714,7 +742,7 @@ def _load_schedule_views(
             ORDER BY s.expected_arrival_date, s.inbound_id
             """
         ).format(schema=schema),
-        {"sim": sim_run_id, "as_of": as_of},
+        {"sim": sim_run_id, "as_of": as_of, "cutoff": timestamp_cutoff(as_of)},
     )
     _reject_broken_reference(rows, sim_run_id=sim_run_id, as_of=as_of)
     views = tuple(
@@ -730,6 +758,7 @@ def _load_schedule_views(
             created_as_of=row["created_as_of"],
             has_receipt=bool(row["has_receipt"]),
             stock_applied=bool(row["stock_applied"]),
+            settled_without_stock=bool(row["settled_without_stock"]),
         )
         for row in rows
     )
@@ -874,11 +903,20 @@ def in_transit_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]
     return [view.as_in_transit() for view in views if not view.has_receipt]
 
 
+def _receiving_completed(view: InboundScheduleView) -> bool:
+    """도착 처리 · 미래 점유의 종료조건. **재고가 섰거나, 수용 0 으로 처리가 끝났다.**
+
+    🔴 `Receipt 존재` 는 여기에 없다 — 처리 중(`ARRIVED` · `INSPECTED`)인 건은 끝난 것이 아니다.
+    """
+    return view.stock_applied or view.settled_without_stock
+
+
 def receivable_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]:
     """**도착 처리 대상** — 아직 재고가 서지 않은 입고. `receivable_at` 의 거르기 규칙.
 
     ```text
     종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다
+               수용 0 으로 PUTAWAY_DONE · CLOSED 가 되면 빠진다 (만들 재고가 없다)
     ```
 
     🔴 **Receipt 존재로 빼지 않는다.** 검수에서 막힌 건(`Receipt=ARRIVED` · Lot 없음)은
@@ -890,7 +928,7 @@ def receivable_from(views: Sequence[InboundScheduleView]) -> list[InTransitItem]
       네 갈래(`due` · `blocked` · `not_due` · `unresolved`)로 나누며 소유한다.
       여기서 미리 자르면 *"아직 안 온 것"* 과 *"못 받은 것"* 이 구별되지 않는다.
     """
-    return [view.as_in_transit() for view in views if not view.stock_applied]
+    return [view.as_in_transit() for view in views if not _receiving_completed(view)]
 
 
 def pending_inbound_from(views: Sequence[InboundScheduleView]) -> list[ScheduledQuantity]:
@@ -898,6 +936,7 @@ def pending_inbound_from(views: Sequence[InboundScheduleView]) -> list[Scheduled
 
     ```text
     종료조건   Lot 과 원장 IN 이 둘 다 서면 빠진다 (그때부터 on_hand 가 센다)
+               수용 0 으로 PUTAWAY_DONE · CLOSED 가 되면 빠진다 (셀 재고가 없다)
     ```
 
     🔴 **한 번만 계상하기 위한 경계다.**
@@ -914,7 +953,7 @@ def pending_inbound_from(views: Sequence[InboundScheduleView]) -> list[Scheduled
     ⚠️ `receivable_from` 과 **같은 행**을 고른다 — 다른 것은 DTO 모양뿐이다
        (`ScheduledQuantity.date` vs `InTransitItem.expected_arrival_date`).
     """
-    return [view.as_scheduled_quantity() for view in views if not view.stock_applied]
+    return [view.as_scheduled_quantity() for view in views if not _receiving_completed(view)]
 
 
 def in_transit_at(conn: Any, *, sim_run_id: str, as_of: date) -> list[InTransitItem]:
