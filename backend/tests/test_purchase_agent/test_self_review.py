@@ -542,3 +542,19 @@ def test_어미_선언을_바꾸면_판정이_따라_바뀐다(monkeypatch: pyte
     }
     monkeypatch.setattr(rr, "load_constraints", lambda: 사본)
     assert rr.claim_strength(문장) == "NEUTRAL"
+
+
+def test_도달_불가한_예시가_지시문에_없다() -> None:
+    """🔴 **작업 4 ② 회귀** (2026-09-18 · 검증설계 v0.2 §4).
+
+    예시가 *"라벨이 SPREAD_NORMAL·SHELF_TIGHT 인데"* 였는데 ⑤ 가 도는 날의 스프레드는
+    언제나 ``SPREAD_WIDE`` 라 그 조합이 **안 온다.** 검토자에게는 「이런 것을 찾아라」로
+    읽히므로 예시만 걷고 **보는 것은 남겼다.**
+    """
+    from app.purchase_agent.llm import self_review as sr
+
+    assert "SPREAD_NORMAL" not in sr.SYSTEM_PROMPT
+    assert "mix_reason 이 mix_labels 와 맞는가" in sr.SYSTEM_PROMPT
+    # 🔴 ``timing`` × ``SINGLE`` 줄은 **그대로 둔다** — 중복이지 도달 불가가 아니다
+    assert "round_count 가 SINGLE" in sr.SYSTEM_PROMPT
+    assert sr.ROLE.prompt_version == "self-review-2"

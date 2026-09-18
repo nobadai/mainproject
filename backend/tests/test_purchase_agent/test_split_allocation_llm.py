@@ -11,6 +11,7 @@ from datetime import date
 
 import pytest
 
+from app.purchase_agent.config import load_constraints
 from app.purchase_agent.llm import split_allocation as sa
 from app.purchase_agent.llm.split_schemas import (
     SplitAllocationChoice,
@@ -19,6 +20,20 @@ from app.purchase_agent.llm.split_schemas import (
 )
 
 ITEM = "배추"
+
+#: 🔴 **사유 상한은 선언이 소유한다** (2026-09-18 · 규칙 7). 전에는 ④ 가 코드 상수를
+#: 들고 있어 ⑤ 와 같은 뜻의 값이 두 곳에 살았다. 여기에 ``300`` 을 베끼면 선언을 옮겨도
+#: 검사가 옛 값을 계속 시험한다 — 값 비교로는 「검사가 그 상한을 쓰는가」를 못 증명한다.
+상한 = load_constraints()["grade"]["mix_reason_max_chars"]
+
+
+def _검증(
+    응답: str, context: sa.SplitAllocationContext, *, 쓸_상한: int | None = None
+) -> SplitAllocationChoice:
+    """검증기를 부르는 한 자리. 상한을 안 주면 **선언값**으로 부른다."""
+    return sa.validate_choice(
+        응답, context, reason_max_chars=상한 if 쓸_상한 is None else 쓸_상한
+    )
 
 
 def _context(*ids: str) -> sa.SplitAllocationContext:
@@ -57,13 +72,13 @@ def test_응답_스키마에_숫자_필드가_없다() -> None:
 def test_모르는_후보는_거부한다() -> None:
     """후보 밖 id 는 **비율을 지어낸 것과 같다** — 노드가 그 id 로 비율을 못 찾는다."""
     with pytest.raises(sa.SplitAllocationInvalid) as 잡힘:
-        sa.validate_choice(_reply("SIDEWAYS"), _context("BASE_EQUAL", "FRONT_LOADED"))
+        _검증(_reply("SIDEWAYS"), _context("BASE_EQUAL", "FRONT_LOADED"))
     assert "UNKNOWN_CANDIDATE" in 잡힘.value.issues
 
 
 def test_사유에_든_숫자는_거부한다() -> None:
     with pytest.raises(sa.SplitAllocationInvalid) as 잡힘:
-        sa.validate_choice(
+        _검증(
             _reply("FRONT_LOADED", "앞 회차에 60% 싣는다"),
             _context("BASE_EQUAL", "FRONT_LOADED"),
         )
@@ -75,7 +90,7 @@ def test_숫자가_든_후보_id_는_거부하지_않는다() -> None:
 
     여기 숫자 검사를 걸면 정상 선택이 매번 fallback 으로 떨어진다 (⑤ 와 같은 경계).
     """
-    해석 = sa.validate_choice(
+    해석 = _검증(
         _reply("FRONT_LOADED_3"), _context("BASE_EQUAL", "FRONT_LOADED_3")
     )
     assert 해석.chosen_candidate_id == "FRONT_LOADED_3"
@@ -84,7 +99,7 @@ def test_숫자가_든_후보_id_는_거부하지_않는다() -> None:
 def test_JSON_이_아니면_거부한다() -> None:
     for 쓰레기 in ('{"chosen": "X"}', "[]", "not json"):
         with pytest.raises(sa.SplitAllocationInvalid):
-            sa.validate_choice(쓰레기, _context("BASE_EQUAL", "FRONT_LOADED"))
+            _검증(쓰레기, _context("BASE_EQUAL", "FRONT_LOADED"))
 
 
 def test_후보가_하나면_안_부른다() -> None:
@@ -114,7 +129,7 @@ class _됨:
         return self.응답
 
 
-def _설정(*, enabled: bool = True):
+def _설정(*, enabled: bool = True, reason_max_chars: int | None = None):
     return type(
         "S",
         (),
@@ -123,7 +138,8 @@ def _설정(*, enabled: bool = True):
             "max_retries": 1,
             "provider": "anthropic",
             "model": "haiku",
-            "reason_max_chars": 300,
+            # 🔴 ``300`` 을 안 베낀다 — 기본은 **선언값**이다 (위 ``상한``).
+            "reason_max_chars": 상한 if reason_max_chars is None else reason_max_chars,
         },
     )()
 
@@ -232,7 +248,7 @@ def test_빈_칸은_거부한다() -> None:
         _reply("BASE_EQUAL", "   \n\t "),
     ):
         with pytest.raises(sa.SplitAllocationInvalid) as 잡힘:
-            sa.validate_choice(응답, _context("BASE_EQUAL", "FRONT_LOADED"))
+            _검증(응답, _context("BASE_EQUAL", "FRONT_LOADED"))
         assert "EMPTY_FIELD" in 잡힘.value.issues
 
 
@@ -244,7 +260,7 @@ def test_유니코드_수치도_거부한다() -> None:
     """
     for 나쁨 in ("앞 회차가 ½ 더 무겁다", "뒤가 ² 배다", "Ⅻ 단위로 나눈다"):
         with pytest.raises(sa.SplitAllocationInvalid) as 잡힘:
-            sa.validate_choice(
+            _검증(
                 _reply("BASE_EQUAL", 나쁨), _context("BASE_EQUAL", "FRONT_LOADED")
             )
         assert "NUMERIC_OUTPUT_FORBIDDEN" in 잡힘.value.issues
@@ -261,14 +277,14 @@ def test_제어문자는_사유에서도_후보_id_에서도_거부한다() -> N
     zero_width, nul, bidi = chr(0x200B), chr(0x00), chr(0x202E)
     for 나쁨 in (f"정상{zero_width}텍스트", f"제어{nul}문자", f"방향{bidi}전환"):
         with pytest.raises(sa.SplitAllocationInvalid) as 잡힘:
-            sa.validate_choice(
+            _검증(
                 _reply("BASE_EQUAL", 나쁨), _context("BASE_EQUAL", "FRONT_LOADED")
             )
         assert "CONTROL_CHARACTERS" in 잡힘.value.issues
 
     숨은_id = f"BASE{zero_width}_EQUAL"
     with pytest.raises(sa.SplitAllocationInvalid) as 잡힘:
-        sa.validate_choice(_reply(숨은_id), _context("BASE_EQUAL", 숨은_id))
+        _검증(_reply(숨은_id), _context("BASE_EQUAL", 숨은_id))
     assert "CONTROL_CHARACTERS" in 잡힘.value.issues
 
 
@@ -278,18 +294,57 @@ def test_사유가_상한을_넘으면_거부한다() -> None:
     🔴 **상수를 베끼지 않는다.** ``300`` 을 여기 적으면 상한을 옮길 때 검사가 옛 값을 계속
       시험한다 — 값 비교로는 「검사가 그 상한을 실제로 쓰는가」를 증명 못 한다 (규칙 8).
     """
-    상한 = sa.REASON_MAX_CHARS
     with pytest.raises(sa.SplitAllocationInvalid) as 잡힘:
-        sa.validate_choice(
+        _검증(
             _reply("BASE_EQUAL", "가" * (상한 + 1)),
             _context("BASE_EQUAL", "FRONT_LOADED"),
         )
     assert "REASON_TOO_LONG" in 잡힘.value.issues
     # 상한 이하는 통과 — 검사가 상한을 **실제로 쓰는지** 확인한다
-    해석 = sa.validate_choice(
+    해석 = _검증(
         _reply("BASE_EQUAL", "가" * 상한), _context("BASE_EQUAL", "FRONT_LOADED")
     )
     assert 해석.chosen_candidate_id == "BASE_EQUAL"
+
+
+def test_사유_상한은_코드가_아니라_설정에서_온다() -> None:
+    """🔴 **규칙 8 — 값 비교가 아니라 「바꾸면 따라 바뀌나」로 잰다.**
+
+    전에는 ④ 가 ``REASON_MAX_CHARS = 300`` 을 모듈 상수로 들고 있어, ⑤ 가 읽는 선언
+    (``grade.mix_reason_max_chars``)을 옮겨도 **④ 만 옛 값에 남았다.** 두 값이 같아서
+    안 아팠을 뿐이다. 이 검사는 상한을 **설정에서 낮춰** 판정이 따라 내려오는지 본다 —
+    코드 상수가 다시 생기면 낮춘 상한이 무시되고 여기서 빨개진다.
+    """
+    사유 = "가" * 6
+    떨어짐 = sa.SplitAllocationService(
+        _설정(reason_max_chars=5), _됨(_reply("BASE_EQUAL", 사유))
+    ).select(_context("BASE_EQUAL", "FRONT_LOADED"), "BASE_EQUAL")
+    assert (떨어짐.llm_status, 떨어짐.llm_fallback_used) == ("FALLBACK", True)
+    assert 떨어짐.interpretation.reason == "규칙 기본안"
+
+    통과 = sa.SplitAllocationService(
+        _설정(reason_max_chars=6), _됨(_reply("BASE_EQUAL", 사유))
+    ).select(_context("BASE_EQUAL", "FRONT_LOADED"), "BASE_EQUAL")
+    assert (통과.llm_status, 통과.interpretation.reason) == ("SUCCESS", 사유)
+
+
+def test_판단_기준_네_줄이_지시문에_없다() -> None:
+    """🔴 **작업 4 ① 회귀** (2026-09-18 · 검증설계 v0.2 §4).
+
+    네 줄이 전부 못 섰다 — 거짓 하나(「앞 회차가 단가에 유리」) · 확인 못 함 하나 ·
+    무용 하나 · 도달 불가 하나. 실측에서 그 거짓이 판단자 사유로 되돌아왔으므로
+    (E3-9 2차 · PS-01 스무 사유 전부) 문장을 지웠다. **되살아나면 여기서 빨개진다.**
+
+    ⚠️ 낱말이 아니라 **지시문의 문장**을 본다 — 판단자가 「단가」라고 쓰는 것을 막는
+      검사가 아니다. 그건 다음 판이 채점으로 잰다.
+    """
+    지시문 = sa.SYSTEM_PROMPT
+    for 걷어낸_것 in ("판단 기준", "단가에 유리", "오래 늙는다", "앞에 몰기", "CAP_UNKNOWN"):
+        assert 걷어낸_것 not in 지시문, 걷어낸_것
+    # 남은 것 — 「안전한 후보 중 고르라」
+    assert "안전 검사까지 끝낸 것" in 지시문
+    # 🔴 지시문이 바뀌었으면 판 이름도 바뀌어야 한다 — 안 그러면 전후를 못 가른다
+    assert sa.ROLE.prompt_version == "split-alloc-2"
 
 
 @pytest.mark.parametrize(

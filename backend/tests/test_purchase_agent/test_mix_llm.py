@@ -1044,3 +1044,22 @@ def test_conftest_blanks_the_keys_rather_than_deleting_them() -> None:
             f"{key}가 빈 문자열이 아니다 — conftest가 delenv를 쓰면 load_dotenv가 되살린다"
         )
     assert os.environ.get("PURCHASE_LLM_ENABLED") == "false"
+
+
+def test_도달_불가한_SPREAD_NORMAL_절이_지시문에_없다() -> None:
+    """🔴 **작업 4 ② 회귀** (2026-09-18 · 검증설계 v0.2 §4).
+
+    *"SPREAD_NORMAL이면 신선도 리스크가 이득을 넘기 쉽다"* 는 **죽은 분기**였다 —
+    ``_select_mix`` 가 ``rule_ratio <= 0`` 이면 돌아가고 ``rule_ratio`` 는 ``widened``
+    가 참일 때만 서므로, 이 판단자가 불리는 날의 스프레드는 언제나 ``SPREAD_WIDE`` 다.
+    안 오는 상황을 계속 읽히면 판단자가 그 문장으로 사유를 짓는다.
+
+    ⚠️ ``SPREAD_NORMAL`` **라벨 자체는 안 지웠다** — ``spread_label`` 이 판정을 소유하고
+      ⑧ 이 그 라벨을 되읽는다. 지운 것은 **지시문의 한 절**이다.
+    """
+    from app.purchase_agent.llm.runtime import MIX_ROLE, SYSTEM_PROMPT
+
+    assert "SPREAD_NORMAL" not in SYSTEM_PROMPT
+    assert "SPREAD_WIDE면 단가 이득이 크다." in SYSTEM_PROMPT
+    # 지시문이 바뀌었으면 판 이름도 바뀐다 — 안 그러면 전후를 못 가른다
+    assert MIX_ROLE.prompt_version == "mix-2"
