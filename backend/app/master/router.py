@@ -33,6 +33,12 @@ from app.master.holiday_calendar import get_calendar
 from app.master.inbound import InboundOut
 from app.master.inbound import receive_arrivals as run_receive_arrivals
 from app.master.ledger_repository import BURN_IN_SIM_RUN_ID
+from app.master.outbound_flow import OutboundOut
+from app.master.outbound_flow import ship_due_sales as run_ship_due_sales
+from app.master.pending_transition import RetryOut
+from app.master.pending_transition import (
+    retry_pending_transitions as run_retry_pending_transitions,
+)
 from app.master.purchase_record import get_purchase_record, record_purchase
 from app.master.receivable import ReceivableOut
 from app.master.receivable import issue_receivables as run_issue_receivables
@@ -535,6 +541,40 @@ def master_open_day(as_of: date, sim_run_id: str) -> DayOpenOut:
 
 
 @router.post(
+    "/days/{as_of}/retry-transitions",
+    response_model=RetryOut,
+    summary="미적용 전이를 다시 세운다 — 개장 바로 뒤이고 입고 앞이다",
+)
+def master_retry_pending_transitions(as_of: date, sim_run_id: str) -> RetryOut:
+    """어제까지의 승인 중 **원장에 안 닿은 것**을 다시 세운다.
+
+    🔴 **왜 자기 엔드포인트인가.**
+
+      바로 위 `master_open_day` 가 적어 둔 원칙 그대로다 — *"명시적 호출이다. 실행의
+      부작용이 아니다. 사건에는 자기 자리가 있다."* **전이도 사건이다.** 다시 선
+      승인은 매입 원장 · 매입채무 · 입고 일정을 만든다.
+
+    🔴 **여기서 새 로직을 만들지 않는다.** `retry_pending_transitions` 를 그대로
+       부른다 — `run_scheduled_day` 가 부르는 함수와 사람이 부르는 함수가 같아야
+       손으로 넘긴 하루와 걷기가 같은 코드를 지난다 (`/days/{as_of}/close` 와 같은 말).
+
+    ★ **개장 바로 뒤, 입고 앞이다** (`scheduler.py` 가 못 박은 순서). 승인일이 `D` 면
+      상태가 설 날은 `D+1` 이라 어제 적은 실매입가는 **오늘 이 단계에서** 원장에 선다.
+      뒤로 밀면 그날 도착이 하루 더 밀린다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 다시 세웠다 · 미적용이 없었다 · 못 찾았다 — 전부 **그날의 사실**이다 |
+    | 400 | `sim_run_id` 가 비었거나 번인 실행이다 (`_walk_axis`) |
+    | 422 | `sim_run_id` 쿼리를 안 줬다 |
+
+    ★ **실패도 200 이다** (`/days/{as_of}/open` 과 같은 태도). 하나가 터져도 나머지를
+      계속 세우고, 결과는 `retried` 마다 어휘로 실린다.
+    """
+    return run_retry_pending_transitions(as_of, sim_run_id=_walk_axis(sim_run_id))
+
+
+@router.post(
     "/days/{as_of}/receive",
     response_model=InboundOut,
     summary="그날 도착분을 받는다 — 개장 다음이고 판단과는 별개다",
@@ -683,6 +723,43 @@ def master_issue_receivables(as_of: date, sim_run_id: str) -> ReceivableOut:
       아무것도 안 바뀐 상태이고, 사유가 본문에 실린다.
     """
     return run_issue_receivables(as_of, sim_run_id=_walk_axis(sim_run_id))
+
+
+@router.post(
+    "/days/{as_of}/ship",
+    response_model=OutboundOut,
+    summary="그날 나갈 판매를 내보낸다 — 판단 뒤이고 마감 앞이다",
+)
+def master_ship_due_sales(as_of: date, sim_run_id: str) -> OutboundOut:
+    """`as_of` 에 나갈 확정 판매를 순서대로 내보낸다.
+
+    🔴 **왜 자기 엔드포인트인가.**
+
+      앞의 형제들이 적어 둔 원칙 그대로다 — *"명시적 호출이다. 실행의 부작용이
+      아니다. 사건에는 자기 자리가 있다."* **출고도 사건이다.** 나가면 예약 · 할당 ·
+      재고 이동이 서고 그것은 장부가 바뀌는 것이다.
+
+    ★★ **판매 판단이 아니다.** 이미 확정된 판매를 내보내는 단계다 — 이름 때문에
+      판매가 서 있는 것처럼 보였고, 그래서 걷기 179일에 판매 판단이 0건이었다
+      (`scheduler.py`). 여기를 판매 승인 자리로 쓰지 않는다.
+
+    🔴 **여기서 새 로직을 만들지 않는다.** `ship_due_sales` 를 그대로 부른다 —
+       `run_scheduled_day` 가 부르는 함수와 사람이 부르는 함수가 같아야 손으로 넘긴
+       하루와 걷기가 같은 코드를 지난다.
+
+    ★ **마감 앞이다** (`scheduler.py` 가 못 박은 순서). 뒤에 두면 그날 확정된 안이
+      다음 날에야 나갈 자리가 생긴다. Lot 선택은 여기 없다 — 물류가 잠금과 함께 돈다.
+
+    | 상태 | 언제 |
+    |---|---|
+    | 200 | 내보냈다 · 나갈 게 없었다 · 못 했다 — 전부 **그날의 사실**이다 |
+    | 400 | `sim_run_id` 가 비었거나 번인 실행이다 (`_walk_axis`) |
+    | 422 | `sim_run_id` 쿼리를 안 줬다 |
+
+    ★ **실패도 200 이다** (`/days/{as_of}/receive` 와 같은 태도). `FAILED` 는 시도조차
+      못 한 것이고, `SHORT` 는 사업 결과라 품목별로 `items` 에 실린다.
+    """
+    return run_ship_due_sales(as_of, sim_run_id=_walk_axis(sim_run_id))
 
 
 @router.post(

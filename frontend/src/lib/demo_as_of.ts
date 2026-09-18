@@ -44,7 +44,7 @@ const KEY = "haetdeul.demo_as_of";
  *    발표 전 두 곳을 함께 V13 `2026-01-26` 또는 최종 실행(SIM-CHAIN-FINAL) `2026-09-20` 로 되돌린다.
  *    `backend/tests/api/test_shown_run.py` 가 두 값이 갈리면 빨간불을 켠다.
  */
-export const DEFAULT_AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2026-08-31";
+export const DEFAULT_AS_OF = process.env.NEXT_PUBLIC_AS_OF ?? "2026-09-17";
 
 const listeners = new Set<() => void>();
 

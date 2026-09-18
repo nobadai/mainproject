@@ -38,5 +38,5 @@ from __future__ import annotations
 
 from datetime import date
 
-SHOWN_SIM_RUN_ID = "SIM-CHAIN-REH-0914"
-SHOWN_AS_OF = date(2026, 8, 31)
+SHOWN_SIM_RUN_ID = "SIM-CHAIN-FINAL-0918"
+SHOWN_AS_OF = date(2026, 9, 17)
