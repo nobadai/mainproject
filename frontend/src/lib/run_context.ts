@@ -26,8 +26,18 @@ const KEY = "haetdeul.sim_run_id";
  *
  * 이 두 화면은 실행 비교 도구가 아니라 최종 운영 결과를 보는 자리라, 사용자가 임의
  * 실행을 선택하지 않는다. 다른 콘솔과 Master Chat은 기존 선택 상태를 계속 사용한다.
+ *
+ * 🔴 **왜 지금 `SIM-MENTOR-0918` 인가** (2026-09-18).
+ *    배포판은 멘토 체험용 축 `SIM-MENTOR-0918` 하나로 돈다.
+ *    백엔드 `app/api/shown_run.py` 의 `SHOWN_SIM_RUN_ID` 도 같은 축이다.
+ *    여기만 `SIM-CHAIN-FINAL-0918` 로 두면 재무·판매 탭만 다른 장부를 읽어
+ *    같은 화면 안에서 숫자가 갈린다. 오류 없이 조용히 갈린다.
+ *
+ * ★ **발표 전 되돌릴 자리** — 원래 값은 `SIM-CHAIN-FINAL-0918` 이다.
+ *   되돌릴 때는 아래 한 줄과 `backend/app/api/shown_run.py` 의 `SHOWN_SIM_RUN_ID`,
+ *   `frontend/Dockerfile` 의 `ARG NEXT_PUBLIC_SIM_RUN_ID` 기본값을 같이 바꾼다.
  */
-export const FINANCE_SALES_SIM_RUN_ID = "SIM-CHAIN-FINAL-0918";
+export const FINANCE_SALES_SIM_RUN_ID = "SIM-MENTOR-0918";
 
 /** 환경이 주면 그 값으로 시작한다. 없으면 **빈 값** — 아무 실행도 고르지 않은 상태다. */
 const SEED = process.env.NEXT_PUBLIC_SIM_RUN_ID ?? "";
