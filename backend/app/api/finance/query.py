@@ -201,7 +201,7 @@ def dashboard_cash(axis: CalendarAxis) -> Chart:
             y_ticks=[0, 5, 10],
             y_unit="M",
             series=series,
-            note=Note(tone="warn", text=f"이 실행·기준일에 현금 기록이 없습니다."),
+            note=Note(tone="warn", text="이 실행·기준일에 현금 기록이 없습니다."),
         )
 
     y_min, y_max, y_ticks = _million_axis(min(values), max(values))
