@@ -24,16 +24,27 @@ import { setDemoAsOf } from "@/lib/demo_as_of";
 import { formatKoreanDate } from "@/lib/procurementLabels";
 
 /**
- * 🔴 **이 축에서만 그린다.** 다른 축에서는 **아예 안 그린다** (숨김이 아니라 없음).
+ * 🔴 **여기 적힌 축에서만 그린다.** 목록에 없는 축에서는 **아예 안 그린다**
+ *    (숨김이 아니라 없음). **막는 쪽이 기본이다.**
  *
- * 왜   `SIM-CHAIN-FINAL-0918` 은 **제출물**이고 260일로 닫혀 있어야 한다. 누가 실수로
- *      눌러 261일째가 생기면 **제출 숫자와 화면이 갈린다.**
+ * 🔴 **왜 거부 목록이 아니라 허용 목록인가.** `SIM-CHAIN-FINAL-0918` 은 **제출물**이고
+ *    260일로 닫혀 있어야 한다. 누가 실수로 눌러 261일째가 생기면 **제출 숫자와 화면이
+ *    갈린다.** 거부 목록은 새 축이 생길 때마다 적는 것을 잊으면 열린 채로 새고,
+ *    허용 목록은 적는 것을 잊어도 막힌 채로 선다. 그래서 **허용을 적고 나머지를 막는다.**
  *
- * ⚠️ **축 이름을 코드에 박는 것이 마음에 걸린다.** 그래도 박아 둔다 — 오늘 하루짜리
- *   체험용이고, **박아 두는 편이 실수로 켜지는 것보다 안전하다.** 환경변수나 설정을
- *   새로 만들면 그 설정이 잘못 켜진 날 제출물 위에서 하루가 돈다.
+ * ★ **왜 이 둘인가.**
+ *   - `SIM-MENTOR-0918` — 멘토 체험용. 멘토가 직접 하루를 넘겨 본다.
+ *   - `SIM-SHOOT-0918` — 시연 영상 촬영용. 재촬영을 제출물 밖에서 돌린다.
+ *
+ * ⚠️ **축 이름을 코드에 박는 것이 마음에 걸린다.** 그래도 박아 둔다 — 오늘·내일짜리고,
+ *   **박아 두는 편이 실수로 켜지는 것보다 안전하다.** 환경변수나 설정을 새로 만들면
+ *   그 설정이 잘못 켜진 날 제출물 위에서 하루가 돈다.
+ *
+ * ★ **발표 뒤 지울 자리** — 이 목록과 아래 가드를 같이 지운다. #833 이 주석으로 남긴
+ *   되돌릴 자리(`lib/run_context.ts` · `backend/app/api/shown_run.py` ·
+ *   `frontend/Dockerfile`) 와 같은 때 손본다.
  */
-const MENTOR_SIM_RUN_ID = "SIM-MENTOR-0918";
+const DAY_ADVANCE_RUNS: readonly string[] = ["SIM-MENTOR-0918", "SIM-SHOOT-0918"];
 
 /**
  * **멈추는 어휘.** 이 넷이 나오면 거기서 서고 뒤 단계를 부르지 않는다.
@@ -120,8 +131,8 @@ export function DayAdvance({ asOf, simRunId }: { asOf: string; simRunId: string 
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
 
-  //  🔴 **멘토 체험 축에서만 있다.** 다른 축에서는 그리지 않는다 (위 상수 주석 참조).
-  if (simRunId !== MENTOR_SIM_RUN_ID) return null;
+  //  🔴 **허용한 축에서만 있다.** 목록에 없으면 그리지 않는다 (위 상수 주석 참조).
+  if (!DAY_ADVANCE_RUNS.includes(simRunId)) return null;
 
   const next = nextCalendarDay(asOf);
 

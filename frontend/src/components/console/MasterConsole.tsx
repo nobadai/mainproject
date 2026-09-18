@@ -766,7 +766,7 @@ export function MasterConsole({ session }: { session: Session }) {
             {/* 🔴 하루를 넘기는 자리. **판 머리에 둔다** — 「하루는 이 순서로 돕니다」
                 안내와 같은 자리에서 보이고, 대화가 쌓여도 안 밀린다 (그 안내는
                 대화가 비었을 때만 있는 `Empty` 안에 있다).
-                ★ 멘토 체험 축이 아니면 `DayAdvance` 가 스스로 아무것도 안 그린다. */}
+                ★ 허용 목록에 없는 축이면 `DayAdvance` 가 스스로 아무것도 안 그린다. */}
             <DayAdvance asOf={asOf} simRunId={simRun} />
             {/* 안내 버튼이 구르는 판 위에 떠야 해서 `relative` 한 겹을 덧댄다.
                 높이 규칙(`min-h-0 flex-1`)은 덧댄 겹과 안쪽 판이 그대로 이어받는다. */}
