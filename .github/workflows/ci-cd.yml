@@ -126,6 +126,11 @@ jobs:
         with:
           context: ./frontend
           push: ${{ github.event_name != 'pull_request' }}
+          # 정적 내보내기라 런타임 env 가 안 닿습니다. 축과 기준일을 빌드 때 박습니다.
+          # ★ 발표 전 되돌릴 자리 — 원래 값은 SIM-CHAIN-FINAL-0918 · 2026-09-17.
+          build-args: |
+            NEXT_PUBLIC_SIM_RUN_ID=SIM-MENTOR-0918
+            NEXT_PUBLIC_AS_OF=2026-09-17
           tags: |
             ${{ env.FRONTEND_IMAGE_NAME }}:${{ github.sha }}
             ${{ env.FRONTEND_IMAGE_NAME }}:latest
