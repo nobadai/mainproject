@@ -112,12 +112,17 @@ def test_번인_축을_기본값이나_박은_인자로_쓰는_자리가_허용_
 
 # ── 손으로 부르는 하루 엔드포인트 ─────────────────────────────────────────
 
-#: `(경로 끝, 라우터가 부르는 이름)`. 사건 다섯이 전부 장부를 바꾼다.
+#: `(경로 끝, 라우터가 부르는 이름)`. 사건 일곱이 전부 장부를 바꾼다.
+#:
+#: ★ **순서는 `scheduler.py` 가 못 박은 하루 순서 그대로다** — 전이 재시도는 개장 뒤
+#:   입고 앞이고, 출고는 판단 뒤 마감 앞이다.
 _DAY_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("open", "run_open_day"),
+    ("retry-transitions", "run_retry_pending_transitions"),
     ("receive", "run_receive_arrivals"),
     ("issue-receivables", "run_issue_receivables"),
     ("collect", "run_collect_receipts"),
+    ("ship", "run_ship_due_sales"),
     ("close", "run_close_day"),
 )
 
@@ -187,9 +192,11 @@ def test_하루_엔드포인트가_받은_축을_그대로_넘긴다(
     spy = _spy_on(monkeypatch, attr)
     handler = {
         "open": router_module.master_open_day,
+        "retry-transitions": router_module.master_retry_pending_transitions,
         "receive": router_module.master_receive_arrivals,
         "issue-receivables": router_module.master_issue_receivables,
         "collect": router_module.master_collect_receipts,
+        "ship": router_module.master_ship_due_sales,
         "close": router_module.master_close_day,
     }[tail]
 

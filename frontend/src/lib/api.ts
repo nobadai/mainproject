@@ -259,6 +259,54 @@ export function requestPlanChange(args: {
   });
 }
 
+/* ── 하루를 넘기는 단계 ─────────────────────────────────────────────────── */
+
+/**
+ * 하루가 도는 순서의 한 칸. **이름의 주인은 백엔드 라우트다** — 화면이 짓지 않는다.
+ *
+ * 🔴 **순서는 `app/master/scheduler.py` 가 못 박았다** (개장 → 전이 재시도 → 입고 →
+ *    채권 → 수금 → 판단 → 출고 → 마감). 여기 타입은 그 순서를 **고르는 자리**일 뿐이고,
+ *    무엇을 먼저 부를지는 부르는 쪽이 그 문서대로 적는다.
+ */
+export type DayStepPath =
+  | "open"
+  | "retry-transitions"
+  | "receive"
+  | "issue-receivables"
+  | "collect"
+  | "ship"
+  | "close";
+
+/**
+ * 단계 하나의 결과. **일곱이 같은 모양이다** — `status` 와 `reason` 이 그날의 사실이다.
+ *
+ * 🔴 **성공 어휘를 화면이 외우지 않는다.** 단계마다 다르고(`OPENED` · `RECEIVED` ·
+ *    `ISSUED` · `COLLECTED` · `RAN` · `CLOSED` · `NOTHING_DUE` …) 주인은 각 부서
+ *    모듈이다. 화면은 **멈추는 어휘 넷**만 보고 나머지는 지나간 것으로 읽는다.
+ */
+export interface DayStepOut {
+  status: string;
+  reason?: string | null;
+  next_action?: string | null;
+}
+
+/**
+ * 하루 단계 하나를 손으로 부른다. **걷기가 부르는 함수와 같은 자리다.**
+ *
+ * ★ 상한은 실행과 같다 — 장부를 바꾸는 호출이라 읽기 상한(20초)으로는 짧다.
+ */
+export function dayStep(
+  step: DayStepPath,
+  asOf: string,
+  simRunId: string,
+): Promise<DayStepOut> {
+  return call<DayStepOut>(
+    `/master/days/${encodeURIComponent(asOf)}/${step}?sim_run_id=${encodeURIComponent(simRunId)}`,
+    { method: "POST" },
+    EXECUTE_TIMEOUT_MS,
+  );
+}
+
 export function health(): Promise<{ status: string }> {
   return call<{ status: string }>("/health");
 }
