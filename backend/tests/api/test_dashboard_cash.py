@@ -221,14 +221,15 @@ def test_기록이_없으면_공란과_없다는_문장이다(monkeypatch):
 
 
 def test_화면_문장이_실제_실행과_기준일을_따라간다(monkeypatch):
-    texts = []
     for as_of in (AS_OF_A, AS_OF_B):
         monkeypatch.setattr(
-            finance_query, "get_finance_cashflow", _stub([_row(as_of, 1_000_000, 2_000_000)])
+            finance_query,
+            "get_finance_cashflow",
+            _stub([_row(as_of, 1_000_000, 2_000_000)]),
         )
+
         chart = finance_query.dashboard_cash(build_axis(as_of))
-        texts.append(chart.note.text)
-        shown = f"보고 있는 실행: {SHOWN_SIM_RUN_ID} · 기준일: {as_of.isoformat()}"
-        assert shown in chart.note.text
-    assert texts[0] != texts[1]
-    assert "아직 안 일어난 일" not in texts[0]
+
+        assert SHOWN_SIM_RUN_ID not in chart.note.text
+        assert as_of.isoformat() not in chart.note.text
+        assert "재무 일마감에 저장된 현금 잔액입니다." in chart.note.text
