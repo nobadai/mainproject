@@ -37,6 +37,7 @@ from app.purchase_agent.llm.split_allocation import (
     build_context as build_split_context,
 )
 from app.purchase_agent.llm.split_schemas import (
+    SplitAllocationChoice,
     SplitAllocationResult,
     SplitCandidate,
 )
@@ -403,7 +404,35 @@ def _choose_allocation(
     )
     result = selector(context, "BASE_EQUAL")
     고른 = result.interpretation.chosen_candidate_id
-    return (고른 if 고른 in 후보 else "BASE_EQUAL"), result
+    if 고른 not in 후보:
+        return "BASE_EQUAL", _되돌린다(result)
+    return 고른, result
+
+
+def _되돌린다(result: SplitAllocationResult) -> SplitAllocationResult:
+    """후보 밖 id 를 들고 온 판단을 **실패로 표시해** 되돌린다 — ⑤ ``_select_mix`` 와 같은 자리.
+
+    🔴 **검증기만으로는 부족하다.** ``validate_choice`` 는 서비스 안의 문이고, ``selector``
+      는 주입 가능한 콜러블이라 그 문을 **우회할 수 있다.** 우회하면 고른 후보만 균등으로
+      되돌아가고 **판단자가 쓴 사유는 그대로 남아**, 근거에 「회차 배분 회차를 고르게
+      나눈다(BASE_EQUAL) 선택 — <남의 사유>」가 나갔다. 라벨과 문장이 어긋나는 상태다.
+
+    🔴 **``None`` 으로 지우지 않는다.** 지우면 되돌린 사실까지 사라져 「판단자가 이상한
+      값을 줘서 되돌렸다」가 소비자에게 안 보인다. 실패로 표시해 ⑥ 이 ``risks`` 에 고지를
+      싣게 한다 — 그래야 실행 흔적(``llm_calls``)의 상태와도 서로를 부정하지 않는다.
+
+    ⚠️ 사유도 같이 기본안으로 되돌린다. 상태만 ``FALLBACK`` 으로 바꾸고 문장을 두면 그
+      문장이 계속 어딘가로 실려 나갈 길이 남는다 — 지금 근거가 실어 나르던 그 길이다.
+    """
+    return result.model_copy(
+        update={
+            "interpretation": SplitAllocationChoice(
+                chosen_candidate_id="BASE_EQUAL", reason="규칙 기본안"
+            ),
+            "llm_status": "FALLBACK",
+            "llm_fallback_used": True,
+        }
+    )
 
 
 def split_plan(

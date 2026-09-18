@@ -14,6 +14,7 @@
 """
 
 import copy
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -300,3 +301,99 @@ def test_어느_후보를_골라도_일곱번_검사를_통과한다(
         assert 안["total_amount_krw"] == sum(
             줄["qty_kg"] * 줄["grade_unit_price"] for 줄 in 안["sourcing_plan"]
         )
+
+
+# ── 노드 2차 방어선 (2026-09-18) ────────────────────────────────────────────
+
+
+def _후보_밖_선택자(사유: str):
+    """검증기를 **우회해** 후보 밖 id 를 ``SUCCESS`` 로 들고 오는 판단자.
+
+    🔴 ``selector`` 는 주입 가능한 콜러블이라 ``validate_choice`` 를 안 지난다 — 어댑터가
+      꽂는 진짜 판단자는 그 문을 지나지만, 이 층을 믿고 노드가 검사를 생략하면
+      **우회로가 열린 채로 남는다.** ⑤ 가 Codex 교차검증 P2 에서 같은 자리를 막았다.
+    """
+    from app.purchase_agent.llm.split_schemas import (
+        SplitAllocationChoice,
+        SplitAllocationResult,
+    )
+
+    def selector(context, default_candidate_id: str) -> SplitAllocationResult:
+        return SplitAllocationResult(
+            interpretation=SplitAllocationChoice(
+                chosen_candidate_id="SIDEWAYS_LOADED", reason=사유
+            ),
+            llm_status="SUCCESS",
+            llm_provider="fake",
+            llm_model="fake",
+            llm_attempts=1,
+            llm_fallback_used=False,
+        )
+
+    return selector
+
+
+def _우회_상태(monkeypatch: pytest.MonkeyPatch, 사유: str) -> dict:
+    monkeypatch.setenv("PURCHASE_LLM_SPLIT_ALLOCATION_ENABLED", "true")
+    monkeypatch.setattr(
+        "app.purchase_agent.nodes.split_plan.load_constraints", lambda: _선언(승인=True)
+    )
+    state = _state(cap=_넉넉한_여유())
+    state.update(split_plan(state, selector=_후보_밖_선택자(사유)))
+    state.update(allocate_sourcing(state))
+    state.update(package_scenarios(state))
+    state.update(self_check(state))
+    return state
+
+
+def test_후보_밖_id_는_노드가_한_번_더_막는다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🔴 **되돌린 사실이 보여야 한다 — 조용히 넘기지 않는다.**
+
+    고른 후보만 균등으로 되돌리고 상태를 ``SUCCESS`` 로 두면 실행 흔적이 「판단자가 골랐다」
+    로 남는데 결과는 기본안이다 — 흔적과 산출물이 서로를 부정한다.
+    """
+    state = _우회_상태(monkeypatch, "앞에 실으면 단가에 유리하다")
+    결정 = state["split_plan"][0]["decision"]
+    assert 결정["allocation_chosen"] == "BASE_EQUAL"
+    판단 = 결정["allocation_judgment"]
+    assert 판단 is not None, "지우지 않는다 — 지우면 되돌린 사실까지 사라진다"
+    assert (판단.llm_status, 판단.llm_fallback_used) == ("FALLBACK", True)
+    고지 = [
+        줄
+        for 안 in state["proposal"]["scenarios"]
+        for 줄 in 안["risks"]
+        if "회차 배분 판단 미적용" in 줄
+    ]
+    assert 고지, "되돌린 사실이 risks 에 안 실렸다"
+
+
+def test_후보_밖_id_를_들고_온_판단자의_사유는_어디에도_안_실린다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🔴 **이것이 이 방어선의 본체다.**
+
+    전에는 고른 후보만 균등으로 되돌아가고 **사유 문장은 그대로 남아**, 근거에
+    「회차 배분 회차를 고르게 나눈다(BASE_EQUAL) 선택 — <남의 사유>」가 나갔다
+    (2026-09-18 재현 · 앵커 두 날 × ``timing`` 안). 라벨과 문장이 어긋난 상태다.
+
+    ★ 칸 이름을 손으로 훑지 않는다 — **산출물 전체를 뒤져** 마커가 한 군데도 없는지 본다.
+      칸을 적으면 나중에 생기는 칸이 검사 밖에 남는다.
+    """
+    마커 = "우회사유마커"
+    state = _우회_상태(monkeypatch, f"{마커} 앞에 몰면 좋다")
+    assert 마커 not in json.dumps(state["proposal"], ensure_ascii=False, default=str)
+
+
+def test_되돌린_뒤_배분은_규칙_기본안과_같다(monkeypatch: pytest.MonkeyPatch) -> None:
+    """되돌림은 **무변화**여야 한다 — 판단자를 안 꽂았을 때와 회차 비율이 같다."""
+    monkeypatch.setenv("PURCHASE_LLM_SPLIT_ALLOCATION_ENABLED", "true")
+    monkeypatch.setattr(
+        "app.purchase_agent.nodes.split_plan.load_constraints", lambda: _선언(승인=True)
+    )
+    기본 = _state(cap=_넉넉한_여유())
+    기본.update(split_plan(기본, selector=None))
+    우회 = _state(cap=_넉넉한_여유())
+    우회.update(split_plan(우회, selector=_후보_밖_선택자("남의 사유")))
+    assert [줄["ratio"] for 줄 in 우회["split_plan"]] == [
+        줄["ratio"] for 줄 in 기본["split_plan"]
+    ]

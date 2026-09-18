@@ -25,6 +25,22 @@ from app.purchase_agent.llm.split_schemas import (
 )
 from app.purchase_agent.llm.text_guard import contains_control_chars, contains_number
 
+# 🔴 **「판단 기준」 네 줄을 지웠다** (2026-09-18 · 검증설계 v0.2 §4 · 결정 ①).
+#   네 줄이 **전부 못 섰다** — 감사 판정이 이렇다:
+#     「TREND_RISING 이면 앞 회차가 단가에 유리」  거짓. 회차 금액은 ``grade_unit_price``
+#         스칼라 하나로 계산되고 마지막 회차가 잔량을 흡수해 **총액이 배분과 무관**하다.
+#         ⑦ 의 사중 일치가 그 항등식을 잠그고, 그래프 순서상 여기서는 단가가 아직 안 붙었다
+#     「앞에 실을수록 창고에서 더 오래 늙는다」      확인 못 함. 로트 나이를 재는 계산이 없다
+#     「CAP_TIGHT 면 앞에 몰기 어렵다」              무용. 못 모는 날은 ``FRONT_LOADED`` 가
+#         사전검사에서 이미 빠져 후보에 없다
+#     「CAP_UNKNOWN 은 못 봤다는 뜻」                 도달 불가. 그 라벨이 붙는 날은 후보가
+#         하나라 ``needs_call`` 이 막는다
+#   ★ 실측이 그것을 그대로 보여 줬다 — 거짓 지시가 심은 「단가에 유리」가 판단자 사유로
+#     되돌아왔다 (E3-9 2차 기준선 · PS-01 스무 사유 전부가 입력에 없는 이득을 주장했다).
+#   ⇒ **라벨만 주고 「안전한 후보 중 고르라」로 둔다.** 고칠 문장이 없으니 지운다.
+#
+# ⚠️ **「이유를 쓰라」는 틀은 이번에 안 건드린다** (충환 2026-09-18). 이득어가 지시와
+#   함께 사라지는지, 아니면 말만 바꿔 남는지를 다음 판이 잰다 — 같이 고치면 못 가른다.
 SYSTEM_PROMPT = """당신은 매입 에이전트의 분할 회차 배분 판단 레이어다.
 계산은 이미 끝났다. 규칙이 만든 후보 중 **하나를 고르고 이유를 쓰는 것**이 전부다.
 
@@ -33,20 +49,18 @@ SYSTEM_PROMPT = """당신은 매입 에이전트의 분할 회차 배분 판단 
 - reason 에 숫자를 쓰지 않는다. 비율도 수량도 날짜도 쓰지 않는다.
 - reason 은 한국어 한 문장이다.
 
-판단 기준:
-- trend 가 TREND_RISING 이면 앞 회차에 더 싣는 쪽이 단가에 유리하다.
-  다만 앞에 실을수록 그 물량이 창고에서 더 오래 늙는다.
-- cap 이 CAP_TIGHT 면 앞에 몰기 어렵다. CAP_UNKNOWN 은 넉넉하다는 뜻이 아니라
-  **못 봤다**는 뜻이다 — 모르는 쪽으로 물량을 밀지 않는다.
+후보는 규칙이 **안전 검사까지 끝낸 것**이다 — 어느 것을 골라도 제약을 안 넘는다.
+그중 하나를 고른다.
 """
 
-#: 사유 상한. ⑤ 와 같은 뜻의 값이고, 늘어나면 사유가 서술이 된다.
-REASON_MAX_CHARS = 300
-
+#: 🔴 **지시문이 바뀌면 판 이름도 바뀐다.** ``llm_calls`` 에 남는 ``prompt_version`` 의
+#: 뜻이 *"이 판으로 물어봤다"* 라, 문면을 고치고 이름을 두면 **기준선과 고친 뒤가 같은
+#: 이름을 달고** 전후를 못 가른다 (v0.2 §5-4 가 재는 단위가 그 전후다).
+#: ⚠️ ``schema_version`` 은 그대로다 — 응답 계약은 안 건드렸다.
 ROLE = RoleSpec(
     system_prompt=SYSTEM_PROMPT,
     response_schema=SplitAllocationChoice.model_json_schema(),
-    prompt_version="split-alloc-1",
+    prompt_version="split-alloc-2",
     schema_version="split-alloc-1",
 )
 
@@ -72,13 +86,24 @@ class SplitAllocationInvalid(ValueError):
 
 
 def validate_choice(
-    raw_output: str, context: SplitAllocationContext
+    raw_output: str, context: SplitAllocationContext, *, reason_max_chars: int
 ) -> SplitAllocationChoice:
     """프로바이더 밖의 공통 관문. **어느 API 를 쓰든 같은 문을 지난다.**
 
     🔴 ``chosen_candidate_id`` 는 **숫자 검사 대상이 아니다.** 후보 id 는 규칙이 만든
     식별자라 숫자가 들어갈 수 있다 — 거기 걸면 정상 선택이 매번 fallback 으로 떨어진다.
     검사는 **자연어인 ``reason``** 에만 건다 (⑤ 와 같은 경계).
+
+    🔴 **``reason_max_chars`` 는 인자다 — 이 파일에 상수로 안 둔다** (2026-09-18 ·
+    규칙 7). 전에는 여기 ``REASON_MAX_CHARS = 300`` 이 있었고 ⑤ 는 선언
+    (``constraints.yaml`` 의 ``grade.mix_reason_max_chars``)을 읽어, **같은 뜻의 값이 두
+    곳에 살았다.** 값이 같아서 안 아팠을 뿐이고, 선언을 옮기는 날 ⑤ 만 따라가고 ④ 는
+    옛 값에 남는다 — 「단일 소스」가 깨지는 전형이다.
+
+    ★ **새 키를 안 팠다.** 두 사유는 같은 칸(``rationale[].claim``)에 같은 모양으로
+    실려 같은 화면이 읽는다 — 상한이 갈릴 근거가 지금 0이다. 여기서 키를 하나 더 파면
+    「단일 소스로 만들겠다」면서 소스를 둘로 늘리는 셈이고, 그 둘이 같은 값이라 갈려도
+    안 아프다. 갈라야 할 날이 오면 **그날 판다** (`#379` 의 「죽은 선언」과 같은 결).
     """
     try:
         choice = SplitAllocationChoice.model_validate_json(raw_output)
@@ -95,7 +120,7 @@ def validate_choice(
         choice.chosen_candidate_id
     ):
         issues.append("CONTROL_CHARACTERS")
-    if len(choice.reason) > REASON_MAX_CHARS:
+    if len(choice.reason) > reason_max_chars:
         issues.append("REASON_TOO_LONG")
     if issues:
         raise SplitAllocationInvalid(issues)
@@ -170,7 +195,11 @@ class SplitAllocationService:
             provider=self.provider,
             context=context,
             template=template,
-            validate=lambda raw: validate_choice(raw, context),
+            # 🔴 상한은 **설정이 들고 온다** — 설정은 ``constraints.yaml`` 을 읽는다
+            #   (``get_llm_settings``). ⑤ 와 같은 선언을 같은 경로로 지난다.
+            validate=lambda raw: validate_choice(
+                raw, context, reason_max_chars=self.settings.reason_max_chars
+            ),
             needs_call=needs_call(context),
             guidance_for=guidance_for,
         )

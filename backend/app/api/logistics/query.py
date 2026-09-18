@@ -336,6 +336,14 @@ def _raw(value: Decimal | float | None) -> float | None:
     return None if value is None else float(value)
 
 
+def _days_ago(as_of: date, when: date | None) -> str:
+    """기준일에서 며칠 전인가. **당일은 «0일 전» 이 아니라 «오늘» 이다.**"""
+    if when is None:
+        return "이 실행에 도착 기록이 없습니다"
+    지난날 = (as_of - when).days
+    return "오늘" if 지난날 == 0 else f"{지난날}일 전"
+
+
 def _days(value: int | None) -> str | None:
     return None if value is None else f"{value}일"
 
@@ -505,15 +513,40 @@ def _summary_pane(
         if guaranteed is None or guaranteed <= 0
         else float(cap.used_capacity_kg / guaranteed * 100)
     )
-    headroom = None if guaranteed is None else guaranteed - cap.used_capacity_kg
+    #  🔴 **여유는 0 아래로 안 내려간다** — 정본이 `max(0, 보장 − 점유)` 다
+    #     (`docs/logistics/services/04_창고_Capacity관리.md` C-2). 뺄셈 결과를 그대로 쓰면
+    #     「추가 수용 가능량 **-463 kg**」이 되어 뜻이 성립하지 않는다 — 더 받을 수 있는
+    #     양이 음수일 수는 없다. 실측 250일 중 14일이 그랬다(최대 8,463kg · 105.8%).
+    #  ★ **깎되 버리지 않는다.** 초과분은 아래 `over_kg` 가 자기 숫자로 말한다 — 0 으로
+    #    접어 «꽉 차지 않았다» 로 읽히면 그것대로 사실과 다르다.
+    headroom = (
+        None if guaranteed is None
+        else max(Decimal(0), guaranteed - cap.used_capacity_kg)
+    )
+    over_kg = (
+        None if guaranteed is None
+        else max(Decimal(0), cap.used_capacity_kg - guaranteed)
+    )
+    #  보장 용량을 못 읽으면 사용률도 초과분도 없다 — 0 으로 메우지 않는다.
+    capacity_detail = (
+        "보장 용량을 못 읽어 계산하지 않습니다" if usage_pct is None
+        else f"보장 용량 {_kg(over_kg)} kg 초과 ({usage_pct:.1f}% 사용)" if over_kg
+        else f"보장 용량의 {usage_pct:.1f}% 사용"
+    )
 
     #  ★ **업무 숫자를 맨 앞에 둔다** — 사용자가 먼저 볼 것은 재고이지 점검 건수가 아니다.
     #    값은 전부 이미 읽어 온 read model 것이고 여기서 새로 세지 않는다.
     shown_items = [it for it in inv.items if _on_screen(it.item_name)]
     on_hand = sum((it.on_hand_qty_kg for it in shown_items), Decimal(0))
     available = _sum([it.available_qty_kg for it in shown_items])
+    #  🔴 **두 축을 더하면 한 Lot 을 두 번 센다.** 「우선 출고」(`turnover.sell_priority_of`)
+    #     와 「폐기 검토」(`turnover.is_disposal_candidate`)는 **서로 독립**이라 둘 다 참인
+    #     Lot 이 있다 — `_lot_action` 이 그 경우를 위한 분기를 따로 갖고 있는 것이 근거다.
+    #     실측: 250일 중 21일이 부풀었고 최악은 2026-03-08 의 «12 Lot»(실제 8 Lot).
+    #  ★ 그래서 합이 아니라 **Lot 목록에서 둘 중 하나라도 참인 것을 센다.**
     attention_lots = sum(
-        it.sell_priority_lot_count + it.disposal_candidate_lot_count for it in shown_items
+        1 for lo in inv.lots
+        if _on_screen(lo.item_name) and (lo.sell_priority or lo.disposal_candidate)
     )
     open_issues = len(newly_opened) + len(carried_over)
     working = [r for r in ob.reservations if _on_screen(r.item_name) and _still_working(r)]
@@ -533,8 +566,7 @@ def _summary_pane(
                  tone="good" if available else "warn", raw=_raw(available)),
             Stat(label="창고 여유", value=_kg(headroom) if headroom is not None else "—",
                  unit="kg" if headroom is not None else None,
-                 detail=(f"보장 용량의 {usage_pct:.1f}% 사용" if usage_pct is not None
-                         else "보장 용량을 못 읽어 계산하지 않습니다"),
+                 detail=capacity_detail,
                  tone="good" if headroom is not None and headroom > 0 else "warn",
                  raw=_raw(headroom)),
             Stat(label="확인할 문제", value=f"{open_issues:,}", unit="건",
@@ -609,8 +641,7 @@ def _summary_pane(
                     Stat(label="추가 수용 가능량",
                          value=_kg(headroom) if headroom is not None else "—",
                          unit="kg" if headroom is not None else None,
-                         detail=(f"보장 용량의 {usage_pct:.1f}% 사용" if usage_pct is not None
-                                 else "보장 용량을 못 읽어 계산하지 않습니다"),
+                         detail=capacity_detail,
                          tone="good" if headroom is not None and headroom > 0 else "warn",
                          raw=_raw(headroom)),
                 ],
@@ -642,7 +673,13 @@ def _summary_pane(
                             "resv": _kg_cell(it.reserved_qty_kg),
                             "left": _kg_cell(it.unallocated_reserved_qty_kg),
                             "expired": _kg_cell(it.expired_qty_kg),
-                            "risk": it.sell_priority_lot_count + it.expired_lot_count,
+                            #  🔴 위 「신선도 관리 대상」과 **같은 셈**이어야 한다 —
+                            #     두 축은 독립이라 더하면 한 Lot 을 두 번 센다.
+                            "risk": sum(
+                                1 for lo in inv.lots
+                                if (lo.item_name or lo.item_id) == (it.item_name or it.item_id)
+                                and (lo.sell_priority or lo.disposal_candidate)
+                            ),
                         }
                         for it in shown_items
                     ],
@@ -662,11 +699,16 @@ def _stock_pane(
     inb: ConsoleInboundResponse,
     ob: ConsoleOutboundResponse,
 ) -> Pane:
-    on_hand = sum((it.on_hand_qty_kg for it in inv.items), Decimal(0))
-    available = _sum([it.available_qty_kg for it in inv.items])
-    reserved = sum((it.reserved_qty_kg for it in inv.items), Decimal(0))
-    disposal = sum(it.disposal_candidate_lot_count for it in inv.items)
-    sell_priority = sum(it.sell_priority_lot_count for it in inv.items)
+    #  ★ **통계도 화면 품목만 센다.** 품목 축(`inv.items`)은 `items.mvp_active` 5종인데
+    #    프로젝트가 다루는 것은 계약 `ITEMS` 3종이고, 아래 Lot 표·예약 표와 「한눈에 보기」
+    #    탭도 그 3종이다(`_on_screen`). 통계만 5종을 세면 **같은 값을 두 탭이 다른 품목
+    #    수로 설명**하고, 제외 품목에 재고가 생기면 두 탭의 kg 까지 갈린다.
+    shown_items = [it for it in inv.items if _on_screen(it.item_name)]
+    on_hand = sum((it.on_hand_qty_kg for it in shown_items), Decimal(0))
+    available = _sum([it.available_qty_kg for it in shown_items])
+    reserved = sum((it.reserved_qty_kg for it in shown_items), Decimal(0))
+    disposal = sum(it.disposal_candidate_lot_count for it in shown_items)
+    sell_priority = sum(it.sell_priority_lot_count for it in shown_items)
 
     #  🔴 현재고 합계 밑에 적던 «입고 예정 N kg» 을 뺐다 (#812) — 이 실행은 도착 전
     #     상태를 남기지 않아 늘 0 kg 이었다. 이유는 `_inbound_pane` 머리말에 있다.
@@ -696,21 +738,24 @@ def _stock_pane(
         label="재고 · 신선도",
         stats=[
             Stat(
-                label="현재고 합계", value=_kg(on_hand, 1), unit="kg",
-                detail=f"품목 {len(inv.items)}종",
+                label="현재고 합계", value=_kg(on_hand), unit="kg",
+                detail=f"품목 {len(shown_items)}종",
                 tone="good" if on_hand > 0 else "warn", raw=_raw(on_hand),
             ),
             Stat(
-                label="판매가능량", value=_kg(available, 1) if available is not None else "—",
+                label="판매가능량", value=_kg(available) if available is not None else "—",
                 unit="kg" if available is not None else None,
                 detail=avail_detail,
                 tone=("warn" if available is None else "good" if available > 0 else "warn"),
                 raw=_raw(available),
             ),
             Stat(
-                label="활성 예약 수량", value=_kg(reserved, 1), unit="kg",
-                detail=(f"활성 예약 {sum(it.active_reservation_count for it in inv.items)}건이 "
-                        "요구한 수량입니다"),
+                label="활성 예약 수량", value=_kg(reserved), unit="kg",
+                #  🔴 **«요구한 수량» 이 아니다.** 이 값은 `ConsoleInventoryItem
+                #     .reserved_qty_kg`(= allocated + unallocated · 지금 잡고 있는 양)이고,
+                #     「요구량」은 아래 표가 그리는 `required_qty_kg` 라는 **다른 칸**이다.
+                detail=(f"활성 예약 {sum(it.active_reservation_count for it in shown_items)}건이 "
+                        "지금 잡고 있는 양입니다"),
                 tone="warn" if reserved > 0 else "neutral", raw=_raw(reserved),
             ),
             Stat(
@@ -905,8 +950,15 @@ def _receipt_by_item(receipts: Any) -> list[dict[str, str | float | int | None]]
     return rows
 
 
-def _receipt_progress_counts(receipts: Any) -> list[tuple[str, int, str, str]]:
+def _receipt_progress_counts(
+    receipts: Any, *, pending_source: Any
+) -> list[tuple[str, int, str, str]]:
     """도착한 건을 **재고 처리 결과별로** 센다.
+
+    🔴 **모집단이 둘이다.** 완료 칸은 `receipts`(그날 도착한 건)를 세고, 「처리 중」은
+       `pending_source`(날짜로 안 자른 전체)를 센다. 막힌 건은 **막힌 그날 날짜에
+       속하므로** 하루로 자르면 다음 날 화면에서 사라진다 — 찾으라고 세운 칸이 못
+       찾게 된다.
 
     🔴 **판정을 새로 만들지 않는다.** 아래 표의 「재고 처리」 칸과 **같은 함수**
        (`_receipt_progress`)에게 물어 그 결과를 세기만 한다 — 다른 식으로 세면
@@ -921,13 +973,11 @@ def _receipt_progress_counts(receipts: Any) -> list[tuple[str, int, str, str]]:
         ("반영할 재고 없음", "수용할 물량이 없어 끝난 입고", "neutral"),
     ]
     센것 = {label: 0 for label, _, _ in 쓸것}
-    처리중 = 0
     for r in receipts:
         _, applied = _receipt_progress(r)
         if applied in 센것:
             센것[applied] += 1
-        else:
-            처리중 += 1
+    처리중 = sum(1 for r in pending_source if _receipt_progress(r)[1] not in 센것)
     out = [
         (label, 센것[label], detail, tone)
         for label, detail, tone in 쓸것
@@ -935,13 +985,14 @@ def _receipt_progress_counts(receipts: Any) -> list[tuple[str, int, str, str]]:
     ]
     #  ★ 아직 안 끝난 건은 **0 이어도 적는다** — 「할 일 없음」이 사용자가 볼 값이다.
     out.append(
-        ("처리 중", 처리중, "아직 두 완료 어디에도 안 닿은 건", "warn" if 처리중 else "good")
+        ("처리 중", 처리중, "아직 두 완료 어디에도 안 닿은 건 (날짜 무관)",
+         "warn" if 처리중 else "good")
     )
     return out
 
 
 def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
-    """입고 · 검수. **보여 주는 기간은 그 달 1일 ~ 기준일이다.**
+    """입고 · 검수. **보여 주는 기간은 기준일 하루다** (안 끝난 건만 예외 — 아래).
 
     🔴 **누계를 «도착 건수» 라고 적지 않는다** (#812).
 
@@ -957,8 +1008,19 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
     화면 어디에도 **언제부터인지 안 적혀 있었다.** 재고 담당자가 «오늘 할 일» 을 정하는
     데 쓸 수 없는 값이다.
 
-    ★ **그 달 1일부터 센다.** 월 실적과 대조하기 쉽고, 월초에도 「마지막 입고」가
-      며칠 전인지 따로 말해 주므로 빈 화면이 되지 않는다.
+    ★ **누계를 버리고 기준일 하루만 센다.** 한동안 그 달 1일부터 셌으나 두 가지가
+      걸렸다 — ① 나머지 세 pane 이 전부 «기준일 시점» 인데 입고만 기간 누계라 한
+      화면에서 축이 갈렸고, ② 달력 경계가 업무 경계가 아니라 창고에 아무 일도 없는
+      8/31 → 9/1 사이에 숫자가 **38건 19,529kg 에서 2건 58kg 로** 떨어졌다
+      (실측 `SIM-CHAIN-REH-0914`).
+
+    🔴 **다만 「처리 중」과 아래 표는 날짜로 안 자른다.** 검수·재고 반영이 막힌 건은
+       **막힌 그날 날짜에 속하므로** 하루로 자르면 다음 날 화면에서 사라진다 —
+       찾으라고 세운 칸이 못 찾게 된다. 그래서 표는 «안 끝난 건 전부 + 그날 도착 건»
+       이고, 「처리 중」은 `inb.receipts` 전체를 센다.
+
+    ⚠️ 입고가 없는 날은 화면이 0 으로 선다(실측 239일 중 102일). 그 날 «왜 비었는지»
+       는 「마지막 입고」가 말한다 — 그래서 그 칸은 아래처럼 기간 밖에서 찾는다.
 
     ⚠️ **응답에서 지운 것이 아니다.** `inb.receipts` 에는 기준일까지 전부 그대로 실려
        있고, 여기서는 **그릴 것만 고른다** — 화면 품목 필터(`_on_screen`)와 같은 결이다.
@@ -987,22 +1049,30 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
        「확인 필요」(`unresolved_count`) 가 이미 자기 숫자로 말한다.
     """
     summary = inb.arrival_summary
-    월초 = as_of.replace(day=1)
-    기간 = f"{_md(월초)} ~ {_md(as_of)}"
-    #  ★ 이 달에 도착한 것만 센다. 아래 표 · 품목별 · 요약 숫자가 **같은 모집단**이다.
-    이달 = [r for r in inb.receipts if r.arrived_at >= 월초]
-    수용합계 = _sum([r.accepted_qty_kg for r in 이달])
-    #  ★ **마지막 입고는 기간 밖에서도 찾는다** (#812). 이 달에 한 건도 없으면 「0건」만
+    #  ★ **기준일 하루만 센다.** 아래 표 · 품목별 · 요약 숫자가 **같은 모집단**이다.
+    #  🔴 품목 필터도 표와 같이 건다 — 통계만 5종을 세면 「기준일 도착 4건」인데 아래
+    #     표에 3줄만 서고, 「품목별 입고」에 화면에 없는 품목 줄이 생긴다.
+    today_receipts = [r for r in inb.receipts if r.arrived_at == as_of and _on_screen(r.item_name)]
+    수용합계 = _sum([r.accepted_qty_kg for r in today_receipts])
+    #  ★ **마지막 입고는 기간 밖에서도 찾는다** (#812). 그날 한 건도 없으면 「0건」만
     #    남아 화면이 «왜 비었는지» 를 안 말한다 — 실측 09-14 기준 마지막 입고가 09-01 로
     #    13일 전이었고, 그 사실이 0 보다 중요하다.
-    최근도착 = max((r.arrived_at for r in inb.receipts), default=None)
+    최근도착 = max(
+        (r.arrived_at for r in inb.receipts if _on_screen(r.item_name)), default=None
+    )
 
     #  ★ 아직 처리가 안 끝난 건을 **맨 위로** 올리고, 그다음 최근 도착 순이다.
     #    🔴 잘라내도 «아직 할 일» 은 안 잘린다 — 그것이 이 정렬의 이유다.
     #    판정은 하지 않는다. 재고가 섰거나(`stock_applied`) 수용 0 으로 끝난
     #    (`settled_without_stock` · #805) 건은 둘 다 **끝난 것**이다.
+    #  ★ 그릴 것 = **그날 도착 건 + 아직 안 끝난 건.**
+    #  🔴 **안 끝난 건은 날짜로 자르지 않는다.** 막힌 건은 막힌 그날 날짜에 속하므로
+    #     하루로 자르면 다음 날 화면에서 사라진다. «끝난 것» 의 판정은 바로 아래 정렬
+    #     키와 같은 식을 쓴다 — 두 자리가 갈리면 위아래가 어긋난다.
     receipts = sorted(
-        (r for r in 이달 if _on_screen(r.item_name)),
+        (r for r in inb.receipts
+         if (r.arrived_at == as_of or not (r.stock_applied or r.settled_without_stock))
+         and _on_screen(r.item_name)),
         key=lambda r: (
             bool(r.stock_applied or r.settled_without_stock),
             -r.arrived_at.toordinal(),
@@ -1045,8 +1115,8 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
             *_arrival_alerts(summary),
             #  🔴 **기간을 숫자 옆에 적는다** (#812). 종전에는 «기준일까지» 라고만 적어
             #     8개월 누계가 그날 실적처럼 읽혔다.
-            Stat(label="이 달 도착", value=f"{len(이달):,}", unit="건",
-                 detail=기간, tone="neutral", raw=float(len(이달))),
+            Stat(label="기준일 도착", value=f"{len(today_receipts):,}", unit="건",
+                 detail=f"{_md(as_of)} 하루", tone="neutral", raw=float(len(today_receipts))),
             #  ★ **건수만으로는 얼마가 들어왔는지 모른다** (#812). 같은 1건이 17kg 일
             #    수도 1,435kg 일 수도 있다. 합계는 표에 이미 있는 수용량을 더한 것이고,
             #    못 읽은 건이 섞이면 «—» 다 — 0 으로 메우지 않는다.
@@ -1056,19 +1126,25 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
                  detail=("검수를 통과해 재고가 된 양" if 수용합계 is not None
                          else "못 읽은 건이 있습니다 — 0 이 아닙니다"),
                  tone="neutral", raw=_raw(수용합계)),
-            Stat(label="마지막 입고",
-                 value=_md(최근도착) or "—",
-                 detail=(f"{(as_of - 최근도착).days}일 전" if 최근도착 is not None
-                         else "이 실행에 도착 기록이 없습니다"),
-                 #  ★ 기간 밖 값이라 «이 달» 이 0 건이어도 여기는 차 있다.
-                 tone="warn" if 최근도착 is not None and (as_of - 최근도착).days > 7
-                 else "neutral",
-                 raw=None),
             *(
                 Stat(label=label, value=f"{count:,}", unit="건",
                      detail=detail, tone=tone, raw=float(count))
-                for label, count, detail, tone in _receipt_progress_counts(이달)
+                for label, count, detail, tone in _receipt_progress_counts(
+                    today_receipts,
+                    pending_source=[r for r in inb.receipts if _on_screen(r.item_name)],
+                )
             ),
+            #  ★ **맨 뒤에 둔다.** 앞의 네 칸은 «오늘 들어온 것이 어디까지 갔나» 한 줄기
+            #    (도착 → 검수 통과 → 재고 반영 → 아직 안 끝난 것)인데, 이 칸만 «그날 0 건
+            #    이면 마지막이 언제였나» 라는 다른 질문에 답한다. 가운데 두면 흐름이 끊긴다.
+            #  ★ 기간 밖 값이라 «그날» 이 0 건이어도 여기는 차 있다 — 그래서 도착 0 건인
+            #    날에는 앞 네 칸이 0 으로 서고 이 칸이 그 이유를 말한다.
+            Stat(label="마지막 입고",
+                 value=_md(최근도착) or "—",
+                 detail=_days_ago(as_of, 최근도착),
+                 tone="warn" if 최근도착 is not None and (as_of - 최근도착).days > 7
+                 else "neutral",
+                 raw=None),
         ],
         cards=[
             #  🔴 **「입고 처리 흐름」 카드를 없앴다** (#812).
@@ -1086,17 +1162,17 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
             #    291줄을 눈으로 더해야 했다. 같은 값의 품목 축 합계다 — 새 사실이 아니다.
             Card(
                 key="by_item", title="품목별 입고",
-                subtitle=f"{기간} 에 들어온 양입니다",
+                subtitle=f"{_md(as_of)} 에 들어온 양입니다",
                 table=_t(
                     [("item", "품목", "left"), ("count", "건수", "right"),
                      ("acc", "수용", "right")],
-                    _receipt_by_item(이달),
-                    empty_text="이 달에 도착한 물량이 없습니다",
+                    _receipt_by_item(today_receipts),
+                    empty_text="이 날 도착한 물량이 없습니다",
                 ),
             ),
             Card(
                 key="receipt", title="입고 처리 현황",
-                subtitle=f"{기간} · 검수와 재고 처리 상태입니다",
+                subtitle=f"{_md(as_of)} 도착 · 아직 안 끝난 건은 날짜와 무관하게 같이 싣습니다",
                 #  🔴 `arrival_schedule` 은 **표가 아니라 계약 필드명**이었다.
                 #     실제 출처는 이 둘이다.
                 source_ref="inbound_receipts · inbound_inspections",
@@ -1104,7 +1180,7 @@ def _inbound_pane(inb: ConsoleInboundResponse, as_of: date) -> Pane:
                 table=_t(
                     _receipt_columns(shown_receipts),
                     receipt_rows,
-                    empty_text="이 날짜까지 창고에 도착한 물량이 없습니다",
+                    empty_text="이 날 도착한 건도, 남아 있는 건도 없습니다",
                 ),
                 #  ★ 접은 건수는 **반드시 남긴다** — 숨기는 것과 접는 것은 다르다.
                 footer=(
@@ -1314,7 +1390,7 @@ def _empty_tab(*, status: SourceStatus, note: Note, source_note: str) -> Logisti
                 "summary",
                 "한눈에 보기",
                 note,
-                [Stat(label="신규", value="—", detail=note.text, tone="warn", raw=None)],
+                [Stat(label="현재고", value="—", detail=note.text, tone="warn", raw=None)],
             ),
             _empty_pane(
                 "stock",
