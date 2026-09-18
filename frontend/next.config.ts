@@ -25,6 +25,24 @@ const nextConfig: NextConfig = isDev
        * ★ 배포 빌드(`output: "export"`)에는 원래 안 들어가므로 산출물은 그대로다.
        */
       devIndicators: false,
+
+      /**
+       * 🔴 **`127.0.0.1` 로 열면 화면이 백지가 된다** (2026-09-18 실측).
+       *
+       * Next 16 의 개발 서버는 `Origin` 헤더를 허용 목록과 대조해 안 맞으면 **403
+       * `Unauthorized`** 를 돌려준다. 기본 목록에 `localhost` 는 있고 `127.0.0.1` 은 없다.
+       * 청크 스크립트 일부가 `crossorigin` 이라 `Origin` 을 달고 나가므로 그것들이 막히고,
+       * 화면은 오류 한 줄 없이 **글자 0** 으로 뜬다.
+       *
+       *     Origin: http://localhost:3100   → 200
+       *     Origin: http://127.0.0.1:3100   → 403 Unauthorized   (Host 는 무관)
+       *     127.0.0.1:3100/console/purchase  스크립트 16개 403 · body 글자 0
+       *
+       * ⚠️ 두 주소는 같은 서버인데 한쪽만 선다 — 시연에서 밟으면 「서버가 죽었나」로 읽힌다.
+       *
+       * ★ 배포 빌드(`output: "export"`)에는 개발 서버가 없어 이 칸이 아예 안 들어간다.
+       */
+      allowedDevOrigins: ["127.0.0.1"],
       experimental: {
         /**
          * 🔴 프록시 상한. **`lib/api.ts` 의 `EXECUTE_TIMEOUT_MS` 와 같은 값이다.**
