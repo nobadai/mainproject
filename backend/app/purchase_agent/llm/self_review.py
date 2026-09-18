@@ -28,6 +28,13 @@ from app.purchase_agent.llm.runtime import (
 from app.purchase_agent.llm.text_guard import contains_control_chars, contains_number
 from app.purchase_agent.review_templates import FINDINGS
 
+# 🔴 **도달 불가한 예시를 걷어냈다** (2026-09-18 · 검증설계 v0.2 §4 · 결정 ②).
+#   예시가 *"라벨이 SPREAD_NORMAL·SHELF_TIGHT 인데"* 였는데, ⑤ 가 도는 날은 언제나
+#   ``SPREAD_WIDE`` 라 그 조합이 **안 온다.** 안 오는 예시는 검토자에게 「이런 것을
+#   찾아라」로 읽히므로, 보는 것(사유가 라벨의 반대를 말하나)만 남기고 예시를 지운다.
+#   ⚠️ **``timing`` × ``SINGLE`` 줄은 그대로 둔다** — 중복이지만(코드가 같은 판정을
+#     신호로 계산해 같이 넘긴다) 그건 「안 오는 상황」이 아니라 「두 번 말하는 상황」이라
+#     고치는 판이 다르다 (충환 2026-09-18).
 SYSTEM_PROMPT = """당신은 매입 에이전트의 근거 검토 레이어다.
 수량·금액·제약 검사는 이미 끝났다. 당신이 보는 것은 **근거와 주장이 서로 맞는가**다.
 
@@ -41,8 +48,7 @@ SYSTEM_PROMPT = """당신은 매입 에이전트의 근거 검토 레이어다.
 - claim_text 가 그 근거(evidence_category)로 뒷받침되는가.
 - claim_strength 가 ASSERTIVE 인데 evidence_strength 가 ASSUMED 면 결론이 근거보다 세다.
 - risk_categories 에 이 안의 상태에서 나와야 할 위험이 빠져 있는가.
-- mix_reason 이 mix_labels 와 맞는가. 라벨이 SPREAD_NORMAL·SHELF_TIGHT 인데
-  사유가 그 반대를 말하면 어긋난 것이다.
+- mix_reason 이 mix_labels 와 맞는가. 사유가 라벨의 반대를 말하면 어긋난 것이다.
 - strategy_type 이 timing 인데 round_count 가 SINGLE 이면 라벨과 실체가 다르다.
 
 claim_text 의 <NUM>·<DATE>·<PCT>·<AMT> 는 가려진 값이다. 그 값을 추측하지 않는다.
@@ -51,7 +57,7 @@ claim_text 의 <NUM>·<DATE>·<PCT>·<AMT> 는 가려진 값이다. 그 값을 �
 ROLE = RoleSpec(
     system_prompt=SYSTEM_PROMPT,
     response_schema=ReviewOutput.model_json_schema(),
-    prompt_version="self-review-1",
+    prompt_version="self-review-2",
     schema_version="self-review-1",
 )
 

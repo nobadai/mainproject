@@ -62,6 +62,11 @@ ENV_PREFIX = "PURCHASE_"
 #: 틀렸나"를 한참 보게 된다. 마스터가 같은 자리에 같은 경고를 적어 두었다.
 _GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
+# 🔴 **``SPREAD_NORMAL`` 절을 걷어냈다** (2026-09-18 · 검증설계 v0.2 §4 · 결정 ②).
+#   *"SPREAD_NORMAL이면 신선도 리스크가 이득을 넘기 쉽다"* 는 **죽은 분기**였다 —
+#   이 판단자가 불리는 날은 언제나 ``SPREAD_WIDE`` 다. ``_select_mix`` 가
+#   ``rule_ratio <= 0`` 이면 돌아가고, ``rule_ratio`` 는 ``widened`` 가 참일 때만 선다.
+#   ⇒ 안 오는 상황을 계속 읽히면 판단자가 그 문장으로 사유를 짓는다. 지운다.
 SYSTEM_PROMPT = """당신은 매입 에이전트의 등급 조합 판단 레이어다.
 계산은 이미 끝났다. 규칙이 만든 후보 중 **하나를 고르고 이유를 쓰는 것**이 전부다.
 
@@ -74,7 +79,7 @@ SYSTEM_PROMPT = """당신은 매입 에이전트의 등급 조합 판단 레이�
 
 판단 기준:
 - 중품은 싸지만 잔여신선도 안에 소진해야 한다. 못 쓰면 폐기 손실이다.
-- SPREAD_WIDE면 단가 이득이 크고, SPREAD_NORMAL이면 신선도 리스크가 이득을 넘기 쉽다.
+- SPREAD_WIDE면 단가 이득이 크다.
 - SHELF_TIGHT면 중품 비중을 낮추는 쪽이, SHELF_AMPLE이면 높이는 쪽이 유리하다."""
 
 
@@ -171,7 +176,7 @@ MIX_ROLE = RoleSpec(
     system_prompt=SYSTEM_PROMPT,
     response_schema=_response_schema(),
     # 🔴 **E3-2 이후 안 바뀐 판이다.** 올리는 것은 지시문이나 응답 계약을 고치는 날이다.
-    prompt_version="mix-1",
+    prompt_version="mix-2",
     schema_version="mix-1",
 )
 
