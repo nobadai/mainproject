@@ -109,16 +109,26 @@ def 로트(lot_id: str = "LOT-A", item_name: str = ITEM_ON_SCREEN) -> Any:
     )
 
 
-def 재고(items: list[Any]) -> Any:
+def 용량(
+    *,
+    used: Decimal = Decimal(450),
+    guaranteed: Decimal | None = Decimal(1000),
+    burst: Decimal | None = Decimal(1200),
+) -> Any:
+    """기본값은 «여유가 있는 창고» 다 — 넘긴 값만 바꿔 쓴다."""
+    return SimpleNamespace(
+        used_capacity_kg=used,
+        guaranteed_capacity_kg=guaranteed,
+        burst_capacity_kg=burst,
+    )
+
+
+def 재고(items: list[Any], capacity: Any = None, lots: list[Any] | None = None) -> Any:
     return SimpleNamespace(
         items=items,
-        lots=[로트()],
+        lots=lots if lots is not None else [로트()],
         available_qty_unresolved_reason=None,
-        capacity=SimpleNamespace(
-            used_capacity_kg=Decimal(450),
-            guaranteed_capacity_kg=Decimal(1000),
-            burst_capacity_kg=Decimal(1200),
-        ),
+        capacity=capacity if capacity is not None else 용량(),
     )
 
 
@@ -146,8 +156,10 @@ def 화면(monkeypatch):
         resolved: tuple[ExceptionRow, ...],
         items: list[Any] | None = None,
         uncertainties: tuple[str, ...] = (),
+        capacity: Any = None,
+        lots: list[Any] | None = None,
     ) -> Any:
-        inv = 재고(items if items is not None else [품목(ITEM_ON_SCREEN)])
+        inv = 재고(items if items is not None else [품목(ITEM_ON_SCREEN)], capacity, lots)
         monkeypatch.setattr(logistics_query, "get_connection", lambda: _커넥션())
         monkeypatch.setattr(
             logistics_query,
@@ -358,6 +370,62 @@ def test_창고_사용량은_화면_품목_필터보다_앞선다(화면):
     assert 사용량.raw == 450.0
 
 
+def test_보장_용량을_넘어도_여유가_음수로_안_내려간다(화면):
+    """🔴 **「추가 수용 가능량 -463 kg」 은 뜻이 성립하지 않는다.**
+
+    정본이 `max(0, 보장 − 점유)` 다 (`04_창고_Capacity관리.md` C-2). 실측 250일 중
+    14일이 보장 용량을 넘었고(최대 8,463kg · 105.8%) 화면이 뺄셈 결과를 그대로 적었다.
+
+    ★ 깎되 **버리지 않는다** — 초과분은 설명 문구가 자기 숫자로 말한다. 0 으로 접어
+      «꽉 차지 않았다» 로 읽히면 그것대로 사실과 다르다.
+    """
+    #  보장 1,000 인 창고에 1,200 이 들어찼다 — 200 초과다.
+    result = 화면(live=(), resolved=(), capacity=용량(used=Decimal(1200)))
+    pane = 한눈에(result.tab.panes)
+    for 칸 in (통계(pane, "창고 여유"),
+               next(s for s in 카드(pane, "capacity").stats if s.label == "추가 수용 가능량")):
+        assert 칸.value == "0" and 칸.raw == 0.0
+        assert 칸.detail == "보장 용량 200 kg 초과 (120.0% 사용)"
+        assert 칸.tone == "warn"
+
+
+def test_우선출고와_폐기검토를_겸한_Lot_을_두_번_세지_않는다(화면):
+    """🔴 **두 축은 독립이다** (`turnover.sell_priority_of` ↔ `is_disposal_candidate`).
+
+    더하면 둘 다 참인 Lot 이 두 번 세어진다 — 실측 250일 중 21일이 부풀었고 최악은
+    2026-03-08 의 「12 Lot」(실제 8 Lot)이었다.
+    """
+    겸한Lot = 로트("LOT-BOTH")
+    겸한Lot.sell_priority = True
+    겸한Lot.disposal_candidate = True
+    우선만 = 로트("LOT-SELL")
+    우선만.sell_priority = True
+    우선만.disposal_candidate = False
+    pane = 한눈에(화면(live=(), resolved=(), lots=[겸한Lot, 우선만]).tab.panes)
+    #  Lot 은 둘뿐이다 — 합으로 세면 3 이 된다.
+    assert 통계(카드(pane, "progress"), "신선도 관리 대상").value == "2"
+    assert 카드(pane, "items").table.rows[0]["risk"] == 2
+
+
+def test_활성_예약_수량은_요구량이_아니라_잡고_있는_양이다(화면):
+    """🔴 `ConsoleInventoryItem.reserved_qty_kg` 는 allocated + unallocated 다.
+
+    「요구량」은 아래 표가 그리는 `required_qty_kg` 라는 **다른 칸**이다 — 한 화면에서
+    같은 말이 두 값을 가리키면 안 된다.
+    """
+    pane = next(p for p in 화면(live=(), resolved=()).tab.panes if p.key == "stock")
+    assert "지금 잡고 있는 양" in (통계(pane, "활성 예약 수량").detail or "")
+    assert "요구" not in (통계(pane, "활성 예약 수량").detail or "")
+
+
+def test_보장_용량을_못_읽으면_초과분을_지어내지_않는다(화면):
+    """★ `None` 은 «—» 다 — 0 으로 메우면 «여유가 없다» 가 되어 뜻이 바뀐다."""
+    result = 화면(live=(), resolved=(), capacity=용량(guaranteed=None, burst=None))
+    여유 = 통계(한눈에(result.tab.panes), "창고 여유")
+    assert 여유.value == "—" and 여유.raw is None
+    assert 여유.detail == "보장 용량을 못 읽어 계산하지 않습니다"
+
+
 #  ── None 을 0 으로 바꾸지 않는가 ─────────────────────────────────────────
 
 
@@ -519,33 +587,69 @@ def test_입고_요약은_항상_0_인_칸을_세우지_않는다(화면):
     assert "도착 예정" not in 이름 and "도착 지연" not in 이름
     #  경보 둘은 값이 0 이면 안 뜬다 (대역 요약이 전부 0 이다).
     assert "처리 보류" not in 이름 and "확인 필요" not in 이름
-    assert "이 달 도착" in 이름 and "처리 중" in 이름
+    assert "기준일 도착" in 이름 and "처리 중" in 이름
 
 
-def test_입고는_이_달만_세고_기간을_적는다(화면):
-    """🔴 **누계를 «도착 건수» 라고 적지 않는다** (#812).
+def test_입고는_기준일_하루만_세고_날짜를_적는다(화면):
+    """🔴 **누계도 월 단위도 «도착 건수» 가 아니다.**
 
     `receipt_state_at` 은 아래쪽 경계가 없어 실행 첫날부터 다 실어 준다 — 실측
-    291건 · 151,921kg 가 2026-01-06~09-01 8개월 누계였다. 화면은 그 달 1일부터만 세고,
-    **언제부터인지 숫자 옆에 적는다.**
+    291건 · 151,921kg 가 2026-01-06~09-01 8개월 누계였다(#812). 그 뒤 한동안 그 달
+    1일부터 셌으나, 달력 경계가 업무 경계가 아니라 창고에 아무 일도 없는 8/31 → 9/1
+    사이에 38건이 2건으로 떨어졌다. **지금은 기준일 하루만 세고 그 날짜를 적는다.**
     """
-    지난달 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    지난달.arrived_at = date(2026, 2, 20)
-    이달 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
-    이달.arrived_at = date(2026, 3, 5)
+    어제 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
+    어제.arrived_at = date(2026, 3, 9)
+    오늘 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
+    오늘.arrived_at = AS_OF
     inb = SimpleNamespace(
         in_transit=[], in_transit_status="CONFIRMED_ZERO",
-        receipts=[이달, 지난달], arrival_summary=_도착요약(),
+        receipts=[오늘, 어제], arrival_summary=_도착요약(),
     )
     pane = logistics_query._inbound_pane(inb, AS_OF)  # AS_OF = 2026-03-10
-    도착 = 통계(pane, "이 달 도착")
-    assert 도착.value == "1"  # 지난달 건은 안 센다
-    assert 도착.detail == "03-01 ~ 03-10"
-    #  표도 같은 모집단이다 — 요약과 표가 갈리지 않는다.
+    도착 = 통계(pane, "기준일 도착")
+    assert 도착.value == "1"  # 어제 건은 안 센다 — 같은 달이어도
+    assert 도착.detail == "03-10 하루"
+    #  둘 다 끝난 건이라 표에도 그날 것만 남는다.
     assert len(카드(pane, "receipt").table.rows) == 1
 
 
-def test_이_달에_입고가_없어도_마지막_입고는_말한다(화면):
+def test_안_끝난_입고는_그날_것이_아니어도_표와_처리중에_남는다(화면):
+    """🔴 **막힌 건은 막힌 그날 날짜에 속한다** — 하루로 자르면 다음 날 사라진다.
+
+    찾아내라고 세운 칸이 못 찾게 되므로, 표와 「처리 중」만은 날짜로 안 자른다.
+    """
+    막힌것 = _입고행(state="ARRIVED", stock_applied=False, settled=False, verdict=None)
+    막힌것.arrived_at = date(2026, 3, 2)  # 여드레 전에 막혔다
+    inb = SimpleNamespace(
+        in_transit=[], in_transit_status="CONFIRMED_ZERO",
+        receipts=[막힌것], arrival_summary=_도착요약(),
+    )
+    pane = logistics_query._inbound_pane(inb, AS_OF)
+    assert 통계(pane, "기준일 도착").value == "0"  # 오늘 도착은 없다
+    assert 통계(pane, "처리 중").value == "1"      # 그래도 할 일은 남아 있다
+    행 = 카드(pane, "receipt").table.rows
+    assert [r["arrive"] for r in 행] == ["03-02"]
+
+
+def test_마지막_입고는_맨_뒤에_서고_당일이면_오늘이라고_적는다(화면):
+    """★ 앞의 칸들은 «오늘 들어온 것이 어디까지 갔나» 한 줄기이고, 이 칸만 «마지막이
+    언제였나» 라는 다른 질문에 답한다 — 가운데 두면 흐름이 끊긴다.
+
+    🔴 당일이면 «0일 전» 이 아니라 **«오늘»** 이다.
+    """
+    오늘도착 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
+    오늘도착.arrived_at = AS_OF
+    inb = SimpleNamespace(
+        in_transit=[], in_transit_status="CONFIRMED_ZERO",
+        receipts=[오늘도착], arrival_summary=_도착요약(),
+    )
+    pane = logistics_query._inbound_pane(inb, AS_OF)
+    assert [s.label for s in pane.stats][-1] == "마지막 입고"
+    assert 통계(pane, "마지막 입고").detail == "오늘"
+
+
+def test_그날_입고가_없어도_마지막_입고는_말한다(화면):
     """★ 「0건」만 남으면 화면이 «왜 비었는지» 를 안 말한다 — 기간 밖에서 찾아 적는다."""
     지난달 = _입고행(state="PUTAWAY_DONE", stock_applied=True, settled=None)
     지난달.arrived_at = date(2026, 2, 25)
@@ -554,7 +658,7 @@ def test_이_달에_입고가_없어도_마지막_입고는_말한다(화면):
         receipts=[지난달], arrival_summary=_도착요약(),
     )
     pane = logistics_query._inbound_pane(inb, AS_OF)
-    assert 통계(pane, "이 달 도착").value == "0"
+    assert 통계(pane, "기준일 도착").value == "0"
     마지막 = 통계(pane, "마지막 입고")
     assert 마지막.value == "02-25" and 마지막.detail == "13일 전"
     assert 마지막.tone == "warn"  # 7일 넘게 입고가 없다
