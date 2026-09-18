@@ -191,7 +191,7 @@ def dashboard_cash(axis: CalendarAxis) -> Chart:
             )
         )
 
-    shown = f"보고 있는 실행: {run} · 기준일: {as_of.isoformat()}"
+    
     values = [value for s in series for value in s.data if value is not None]
     if not values:
         return Chart(
@@ -201,7 +201,7 @@ def dashboard_cash(axis: CalendarAxis) -> Chart:
             y_ticks=[0, 5, 10],
             y_unit="M",
             series=series,
-            note=Note(tone="warn", text=f"이 실행·기준일에 현금 기록이 없습니다. {shown}"),
+            note=Note(tone="warn", text="이 실행·기준일에 현금 기록이 없습니다."),
         )
 
     y_min, y_max, y_ticks = _million_axis(min(values), max(values))
@@ -217,7 +217,6 @@ def dashboard_cash(axis: CalendarAxis) -> Chart:
             text=(
                 "재무 일마감에 저장된 현금 잔액입니다. "
                 "**기준일 뒤와 마감이 없는 날은 공란**입니다. "
-                f"{shown}"
             ),
         ),
     )

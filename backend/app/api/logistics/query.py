@@ -1687,8 +1687,8 @@ def dashboard_stock(n: int, at: int, as_of: date) -> Chart:
         markers=markers,
         note=Note(
             tone="neutral",
-            text=("원장(`inventory_moves`)을 날마다 더해 편 값입니다. **앞날과 이 실행이 "
-                  "열지 않은 날은 공란**입니다 — 확정된 도착만 점으로 얹습니다."),
+            text=("원장을 날마다 더해 도출한 값입니다. **다음날 부터 이 실행이 "
+                  "돌지 않은 날은 공란**입니다."),
         ),
     )
 
