@@ -158,6 +158,75 @@ def test_안이_없는_날은_상세가_그대로다(stub):
     assert (stat.raw, stat.detail) == (0, "오늘 낸 안 없음")
 
 
+def _매입_배지(tab):
+    """「장 열림/휴장」 말고 **매입 갈래** 배지 하나. 자리로 집지 않는다."""
+    return next(b for b in tab.badges if b.text not in ("장 열림", "휴장"))
+
+
+def test_안이_없는_날_배지가_승인_완료라고_말하지_않는다(stub):
+    """🔴 `pending == 0` 이 되는 길이 둘인데 한 문구로 접혀 있었다 (2026-09-21).
+
+    ★ 안이 **아예 없는** 날을 「오늘 승인 완료」로 말했다 — 승인이 하나도 없는 날이다.
+    """
+    stub.plans.clear()
+    badge = _매입_배지(dashboard_query.build(AS_OF))
+
+    assert badge.text == "오늘 낸 매입안 없음"
+    assert badge.tone == "neutral"
+    assert "오늘 승인 완료" not in " ".join(b.text for b in dashboard_query.build(AS_OF).badges)
+
+
+def test_안이_없는_날_안내문이_끊긴_상한가_문장을_안_짓는다(stub):
+    """🔴 `join` 이 빈 문자열이라 「… 다릅니다 —  원/kg.」 로 끊겼다 (2026-09-21)."""
+    stub.plans.clear()
+    note = dashboard_query.build(AS_OF).purchase_note
+
+    assert note.text == "오늘 낸 매입안이 없어 상한가도 없습니다."
+    assert "상한가(" not in note.text
+    #  ★ 끊긴 자리 자체를 잠근다 — 「— 」 뒤에 바로 「 원/kg」 이 오면 안 된다.
+    assert "—  원/kg" not in note.text
+    assert "원/kg" not in note.text
+
+
+def test_안이_있고_대기_0_인_날은_여전히_승인_완료다(stub):
+    """★ 회귀 방지 — 고친 뒤에도 «전부 승인된 날» 은 그대로 「오늘 승인 완료」여야 한다."""
+    for plan in stub.plans:
+        plan.pending = False
+    tab = dashboard_query.build(AS_OF)
+    badge = _매입_배지(tab)
+
+    assert (badge.text, badge.tone) == ("오늘 승인 완료", "good")
+    #  ★ 안이 있으니 안내문은 지금 문장 그대로다.
+    assert tab.purchase_note.text.startswith("상한가(이보다 비싸면 안 산다)는 안마다 다릅니다 — ")
+    assert tab.purchase_note.text.endswith(" 원/kg. 매입 화면에서 근거와 함께 봅니다.")
+
+
+@pytest.mark.parametrize("대기", [1, 3, 4])
+def test_대기가_있는_날은_여전히_승인_대기_N건이다(stub, 대기):
+    for i, plan in enumerate(stub.plans):
+        plan.pending = i < 대기
+    badge = _매입_배지(dashboard_query.build(AS_OF))
+
+    assert (badge.text, badge.tone) == (f"승인 대기 {대기}건", "warn")
+
+
+@pytest.mark.parametrize("대기", [0, 1, 4])
+def test_배지의_수와_승인_대기_Stat_의_raw_가_같은_수다(stub, 대기):
+    """🔴 `pending` 을 안 건드렸다는 잠금. 배지와 Stat 은 **같은 사실**을 말한다."""
+    for i, plan in enumerate(stub.plans):
+        plan.pending = i < 대기
+    tab = dashboard_query.build(AS_OF)
+    stat = next(s for s in tab.stats if s.label == "매입 승인 대기")
+    badge = _매입_배지(tab)
+
+    assert stat.raw == 대기
+    if 대기:
+        #  ★ `Stat.raw` 는 수다 — 글자로 맞대지 않고 **배지에서 수를 꺼내** 맞댄다.
+        assert int(badge.text.removeprefix("승인 대기 ").removesuffix("건")) == stat.raw
+    else:
+        assert badge.text == "오늘 승인 완료"
+
+
 def test_지어낸_배지_문구가_없다(stub):
     tab = dashboard_query.build(AS_OF)
     texts = " ".join(b.text for b in tab.badges)

@@ -211,8 +211,20 @@ def build(as_of: date) -> DashboardTab:
                 Badge(text=("장 열림" if today.market_open else "휴장"),
                       tone=("good" if today.market_open else "neutral")),
             ]),
-            Badge(text=(f"승인 대기 {pending}건" if pending else "오늘 승인 완료"),
-                  tone=("warn" if pending else "good")),
+            #  🔴 **갈래가 셋이다 — 「안 없음」을 「승인 완료」로 접지 않는다** (2026-09-21).
+            #     기준 커밋 `f09d486` 에서 FINAL 축 `as_of=2026-09-18`(걷기가 안 닿은 날)을
+            #     부르면 매입안이 0건인데 배지가 「오늘 승인 완료」였다 — 승인이 하나도
+            #     없는 날을 «다 됐다» 고 말했다. `pending == 0` 이 되는 길이 ①전부
+            #     승인됐다 ②안이 아예 없다 둘인데 한 문구로 접혀 있었다.
+            #  ★★ 이 저장소는 이미 이 규율을 갖는다 — 아래 매입 표는 `empty_text` 로,
+            #     「매입 승인 대기」 Stat 은 `detail="오늘 낸 안 없음"` 로 같은 사실을
+            #     이미 두 길로 말한다. 배지와 안내문 둘만 안 따라갔다.
+            #     (`backtest_runner.ledger_blocks` 의 «0 인 갈래도 든다» 와 같은 규율이다.)
+            #  ⚠️ `pending` 값은 안 건드린다 — 아래 Stat 의 `raw` 와 **같은 수**여야 한다.
+            Badge(text=("오늘 낸 매입안 없음" if not pu.plans
+                        else f"승인 대기 {pending}건" if pending
+                        else "오늘 승인 완료"),
+                  tone=("neutral" if not pu.plans else "warn" if pending else "good")),
         ],
         stats=[
             #  ★ «내일» 이라고 쓰지 않는다. 리드타임 1~2 는 모델이 아니라
@@ -264,9 +276,17 @@ def build(as_of: date) -> DashboardTab:
             ],
             empty_text="오늘 낸 매입안이 없습니다",
         ),
+        #  🔴 **안이 없으면 상한가 문장을 짓지 않는다** (2026-09-21). 기준 커밋
+        #     `f09d486` 에서 FINAL 축 `as_of=2026-09-18` 응답이 이랬다 —
+        #     「… 다릅니다 —  원/kg. 매입 화면에서 …」. `join` 결과가 빈 문자열이라
+        #     «—» 와 «원/kg» 사이에 공백만 둘 남고 문장이 끊겼다.
+        #  ★★ 위 배지와 같은 자리다. 바로 아래 매입 표가 이미 `empty_text` 로
+        #     「오늘 낸 매입안이 없습니다」 라고 말하고 있으니, 안내문도 그 사실을
+        #     말해야 한다 — 없는 상한가를 있는 척 가리키면 안 된다.
         purchase_note=Note(
             tone="neutral",
-            text=("상한가(이보다 비싸면 안 산다)는 안마다 다릅니다 — "
+            text=("오늘 낸 매입안이 없어 상한가도 없습니다." if not pu.plans else
+                  "상한가(이보다 비싸면 안 산다)는 안마다 다릅니다 — "
                   + " · ".join(f"{p.key} {p.max_price:,}" for p in pu.plans)
                   + " 원/kg. 매입 화면에서 근거와 함께 봅니다."),
         ),
